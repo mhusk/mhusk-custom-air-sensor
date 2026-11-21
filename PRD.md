@@ -305,15 +305,16 @@ Each guide in `docs/` will follow a consistent educational template:
 
 ## 8. Implementation Milestones
 
-- **Phase 1: Repository Scaffolding & Security Guardrails**
-  - Set up `.gitignore`, `.gitleaks.toml`, `.example` files, `scripts/check-secrets.sh`, and GitHub Actions secret scanning.
-- **Phase 2: CircuitPython Firmware (`firmware/`)**
-  - Implement `aqi.py`, `firestore_client.py`, and `code.py` with NeoPixel status codes, SCD-40 + PMSA003I reading logic, and 5-minute Firestore REST publishing.
-- **Phase 3: Firebase Configuration & Security Rules**
-  - Author `firebase.json`, `firestore.indexes.json`, and hardened `firestore.rules`.
-- **Phase 4: TypeScript Remote MCP Server + WorkOS (`functions/`)**
-  - Implement the Firebase Cloud Function MCP server, Firestore query/aggregation service, MCP tools/prompts, and WorkOS OAuth 2.1 + allowlist middleware.
-- **Phase 5: Educational Documentation (`docs/` & `README.md`)**
-  - Write the 6 comprehensive "Learn by Doing" guides and main `README.md`.
-- **Phase 6: Hardware Assembly & Live End-to-End Verification**
-  - Walk through flashing the ESP32-S3, deploying Firestore & the MCP Cloud Function, and running the first live query from Claude / ChatGPT / Grok.
+The project is built and validated incrementally in 11 single-concern steps (1 git commit and 1 focused validation check per step), with documentation and real-world **"Good to Know & Troubleshooting"** notes updated alongside each step. See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for the live checklist and detailed validation criteria:
+
+- **Step 1**: `README.md` & Public-Repo Security Guardrails (`.gitignore`, `.gitleaks.toml`, `scripts/check-secrets.sh`, `.example` templates, and `docs/06-security-and-privacy-checklist.md`)
+- **Step 2**: Firebase Project Initialization & Firestore Database Provisioning (`firebase.json`, `firestore.indexes.json`, and `docs/03-firebase-and-firestore.md` Part 1)
+- **Step 3**: Hardened Firestore Security Rules (`firestore.rules` and `docs/03-firebase-and-firestore.md` Part 2)
+- **Step 4**: Firmware Math & REST Client Tested Locally on Mac (`firmware/aqi.py`, `firmware/firestore_client.py`, and `docs/02-circuitpython-firmware.md` Part 1)
+- **Step 5**: Cloud Functions Scaffolding & Firestore Query Service (`functions/src/services/firestore.ts` and `docs/04-workos-and-mcp-server.md` Part 1)
+- **Step 6**: Core MCP Server Tools, Prompts & Resources (`functions/src/mcp/*` and `docs/04-workos-and-mcp-server.md` Part 2)
+- **Step 7**: WorkOS AuthKit Integration & Owner Allowlist (`functions/src/auth/workos.ts`, `functions/src/index.ts`, and `docs/04-workos-and-mcp-server.md` Part 3)
+- **Step 8**: Connecting AI Assistants (`docs/05-connecting-ai-clients.md`)
+- **Step 9**: Physical Hardware Assembly & CircuitPython Flashing (`firmware/requirements-circuitpython.txt` and `docs/01-hardware-and-i2c.md`)
+- **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py` and `docs/02-circuitpython-firmware.md` Part 2)
+- **Step 11**: Live End-to-End AI Query & Final Docs Polish
