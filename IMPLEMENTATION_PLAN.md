@@ -26,7 +26,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 1**: `README.md` & Public-Repo Security Guardrails
 - [x] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
 - [x] **Step 3**: Hardened Firestore Security Rules
-- [ ] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
+- [x] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
 - [ ] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
 - [ ] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
 - [ ] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
@@ -86,7 +86,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 4: Firmware Math & REST Client (Tested Locally on Mac First)
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Build and verify the pure-Python US EPA AQI calculator and the Firebase Auth + Firestore REST publishing client on macOS **before** introducing microcontroller hardware.
 - **Deliverables**:
   - `firmware/aqi.py` (US EPA $\text{PM}_{2.5}$ and $\text{PM}_{10}$ AQI breakpoint calculation and category mapping)

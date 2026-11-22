@@ -91,16 +91,30 @@ if [ "$PATTERN_FAILURES" -eq 0 ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Check 3: Run Gitleaks CLI if installed (both git history & uncommitted working tree)
+# Check 3: Run Gitleaks CLI if installed (git history + non-ignored working tree)
 # ----------------------------------------------------------------------------
 if command -v gitleaks >/dev/null 2>&1; then
-  if gitleaks detect --source="$REPO_ROOT" --config="$REPO_ROOT/.gitleaks.toml" --no-banner >/dev/null 2>&1 && \
-     gitleaks detect --no-git --source="$REPO_ROOT" --config="$REPO_ROOT/.gitleaks.toml" --no-banner >/dev/null 2>&1; then
-    echo -e "${GREEN}[PASS] Check 3: Gitleaks CLI scan passed (git history + working tree).${NC}"
+  TMP_SCAN_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_SCAN_DIR"' EXIT
+
+  # Copy only git-tracked and untracked non-ignored files so gitignored local
+  # secret files (firmware/settings.toml, functions/.env) don't cause false
+  # positives, while still scanning every file eligible to be committed.
+  while IFS= read -r file; do
+    [[ ! -f "$file" ]] && continue
+    mkdir -p "$TMP_SCAN_DIR/$(dirname "$file")"
+    cp "$file" "$TMP_SCAN_DIR/$file"
+  done < <(git ls-files --cached --others --exclude-standard)
+
+  if gitleaks git --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$REPO_ROOT" >/dev/null 2>&1 && \
+     gitleaks git --staged --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$REPO_ROOT" >/dev/null 2>&1 && \
+     gitleaks dir --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$TMP_SCAN_DIR" >/dev/null 2>&1; then
+    echo -e "${GREEN}[PASS] Check 3: Gitleaks CLI scan passed (git history + staged + non-ignored working tree).${NC}"
   else
     echo -e "${RED}[FAIL] Check 3: Gitleaks CLI detected potential secrets.${NC}"
-    gitleaks detect --source="$REPO_ROOT" --config="$REPO_ROOT/.gitleaks.toml" --no-banner || true
-    gitleaks detect --no-git --source="$REPO_ROOT" --config="$REPO_ROOT/.gitleaks.toml" --no-banner || true
+    gitleaks git --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$REPO_ROOT" || true
+    gitleaks git --staged --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$REPO_ROOT" || true
+    gitleaks dir --config="$REPO_ROOT/.gitleaks.toml" --no-banner --redact "$TMP_SCAN_DIR" || true
     FAILURES=$((FAILURES + 1))
   fi
 else
