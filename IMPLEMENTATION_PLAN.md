@@ -24,7 +24,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ## Progress Tracker
 
 - [x] **Step 1**: `README.md` & Public-Repo Security Guardrails
-- [ ] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
+- [x] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
 - [ ] **Step 3**: Hardened Firestore Security Rules
 - [ ] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
 - [ ] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
@@ -57,7 +57,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 2: Firebase Project Initialization & Firestore Database Provisioning
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Create the Firebase project, enable Firestore and Firebase Authentication (Email/Password for the dedicated sensor device account), and configure local Firebase CLI project files.
 - **Deliverables**:
   - Interactive walkthrough to create the Firebase project, Firestore database, and dedicated device Auth user
