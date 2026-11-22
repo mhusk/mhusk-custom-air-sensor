@@ -1,0 +1,67 @@
+# ============================================================================
+# 1. Secrets, Credentials & Personal Identifiers (NEVER COMMIT)
+# ============================================================================
+# CircuitPython real device credentials (Wi-Fi + Firebase Auth)
+firmware/settings.toml
+settings.toml
+
+# Firebase project alias mapping (contains real GCP/Firebase project ID)
+.firebaserc
+
+# Environment & secret files
+.env
+.env.*
+!.env.example
+functions/.env
+functions/.env.*
+!functions/.env.example
+functions/.secret*
+
+# Google Cloud / Firebase service accounts & keys
+*service-account*.json
+*credentials*.json
+*firebase-adminsdk*.json
+*.pem
+*.key
+*.p12
+
+# ============================================================================
+# 2. Firebase & Google Cloud CLI Artifacts
+# ============================================================================
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+pubsub-debug.log
+functions/lib/
+
+# ============================================================================
+# 3. Node.js / TypeScript
+# ============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# ============================================================================
+# 4. Python / CircuitPython Local Testing
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# ============================================================================
+# 5. macOS / Editor Files
+# ============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.vscode/
+.idea/

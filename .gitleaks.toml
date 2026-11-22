@@ -1,0 +1,45 @@
+title = "Custom Air Sensor Public Repo Secret Scanner Rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "google-firebase-web-api-key"
+description = "Google / Firebase Web API Key (AIza...)"
+regex = '''AIza[0-9A-Za-z\-_]{35}'''
+tags = ["key", "firebase", "google"]
+
+[[rules]]
+id = "workos-secret-api-key"
+description = "WorkOS Secret API Key (sk_test_... or sk_live_...)"
+regex = '''sk_(?:live|test)_[0-9a-zA-Z]{24,}'''
+tags = ["key", "workos"]
+
+[[rules]]
+id = "workos-client-id"
+description = "WorkOS Real Client ID (client_01...)"
+regex = '''client_01[0-9A-HJ-NP-TV-Z]{24,}'''
+tags = ["client_id", "workos"]
+
+[[rules]]
+id = "circuitpython-hardcoded-wifi-or-password"
+description = "Non-placeholder Wi-Fi or Firebase password assignment"
+regex = '''(?i)(?:CIRCUITPY_WIFI_PASSWORD|FIREBASE_DEVICE_PASSWORD|MCP_BEARER_FALLBACK_SECRET)\s*=\s*["']([^"']{4,})["']'''
+tags = ["password", "circuitpython", "env"]
+  [rules.allowlist]
+  regexes = [
+    '''(?i)(?:your-|replace-|example-|CHANGE_ME|<)'''
+  ]
+
+[allowlist]
+description = "Allow safe placeholder templates"
+paths = [
+  '''\.example$'''
+]
+stopwords = [
+  "YOUR_WIFI_SSID",
+  "YOUR_WIFI_PASSWORD",
+  "your-firebase-project-id",
+  "YOUR_FIREBASE_WEB_API_KEY",
+  "CHANGE_ME"
+]

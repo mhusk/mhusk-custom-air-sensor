@@ -1,0 +1,21 @@
+# ============================================================================
+# CircuitPython Device Configuration Template (settings.toml.example)
+# ============================================================================
+# Copy this file to `CIRCUITPY/settings.toml` on your ESP32-S3 USB drive
+# (or `firmware/settings.toml` for local Mac testing — it is gitignored).
+# NEVER commit your real `settings.toml` to Git!
+
+# 1. Local 2.4GHz Wi-Fi Credentials (ESP32-S3 uses 2.4GHz networks)
+CIRCUITPY_WIFI_SSID = "your-2.4ghz-wifi-ssid"
+CIRCUITPY_WIFI_PASSWORD = "your-wifi-password"
+
+# 2. Firebase Project & Dedicated Device Account (Firebase Auth Email/Password)
+FIREBASE_PROJECT_ID = "your-firebase-project-id"
+FIREBASE_WEB_API_KEY = "your-firebase-web-api-key"
+FIREBASE_DEVICE_EMAIL = "sensor-device@example.com"
+FIREBASE_DEVICE_PASSWORD = "your-strong-device-password"
+
+# 3. Sensor Metadata
+SENSOR_DEVICE_ID = "feather-s3-01"
+SENSOR_LOCATION = "home-office"
+SENSOR_INTERVAL_SECONDS = 300

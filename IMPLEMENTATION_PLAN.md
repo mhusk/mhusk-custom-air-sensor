@@ -23,7 +23,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ## Progress Tracker
 
-- [ ] **Step 1**: `README.md` & Public-Repo Security Guardrails
+- [x] **Step 1**: `README.md` & Public-Repo Security Guardrails
 - [ ] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
 - [ ] **Step 3**: Hardened Firestore Security Rules
 - [ ] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
@@ -40,7 +40,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ## Detailed Step Breakdown
 
 ### Step 1: `README.md` & Public-Repo Security Guardrails
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Establish the project README (including the backstory inspired by the Chris Williamson podcast with Michael Feldstein, founder of Jaspr—building our own sensor for a similar price as off-the-shelf units to learn how IAQ hardware, cloud telemetry, and MCP work under the hood) and put all 4 layers of secret protection in place before any real credentials exist.
 - **Deliverables**:
   - `README.md`
