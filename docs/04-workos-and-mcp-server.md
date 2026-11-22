@@ -354,6 +354,8 @@ When deployment finishes, Firebase prints your **Cloud Run Service URL** (for ex
 https://mcp-<hash>-ue.a.run.app/mcp
 ```
 
+Finally, register that exact URL (`https://mcp-<hash>-ue.a.run.app/mcp`, with no trailing slash) under **WorkOS Dashboard → Products → Connect → Configuration → Resource Indicators** so WorkOS AuthKit accepts the RFC 8707 `resource` parameter sent by Gemini, Claude, ChatGPT, and Grok (otherwise `/oauth2/authorize` rejects requests with `error=invalid_target`).
+
 ---
 
 ### Single Focused Validation Checkpoint (Part 3)

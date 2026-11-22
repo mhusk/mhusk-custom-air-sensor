@@ -163,9 +163,11 @@ async function main(): Promise<void> {
       const meta = (await metaRes.json()) as {
         resource: string;
         authorization_servers: string[];
+        scopes_supported: string[];
       };
       assert.equal(meta.resource, mcpUrl);
       assert.deepEqual(meta.authorization_servers, [fakeAuthKitDomain]);
+      assert.equal(meta.scopes_supported.includes("offline_access"), true);
     }
     console.log("[PASS] RFC 9728 /.well-known/oauth-protected-resource discovery metadata");
 

@@ -30,7 +30,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
 - [x] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
 - [x] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
-- [ ] **Step 8**: Connecting AI Assistants (Claude, ChatGPT, Grok)
+- [x] **Step 8**: Connecting AI Assistants (Gemini, Claude, ChatGPT, Grok)
 - [ ] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [ ] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [ ] **Step 11**: Live End-to-End AI Query & Final Docs Polish
@@ -141,8 +141,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ---
 
-### Step 8: Connecting AI Assistants (Claude, ChatGPT, Grok)
-- **Status**: `[ ] Pending`
+### Step 8: Connecting AI Assistants (Gemini, Claude, ChatGPT, Grok)
+- **Status**: `[x] Completed`
 - **Goal**: Document and validate connecting live AI assistants to the deployed remote MCP server.
 - **Deliverables**:
   - `docs/05-connecting-ai-clients.md`

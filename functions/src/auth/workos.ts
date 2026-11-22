@@ -161,7 +161,7 @@ export function buildProtectedResourceMetadata(
     resource: `${cleanOrigin}/mcp`,
     authorization_servers: [cleanAuthKit],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["openid", "profile", "email"],
+    scopes_supported: ["openid", "profile", "email", "offline_access"],
     resource_name: MCP_RESOURCE_NAME,
   };
 }
