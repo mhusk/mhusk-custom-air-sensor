@@ -29,7 +29,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
 - [x] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
 - [x] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
-- [ ] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
+- [x] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
 - [ ] **Step 8**: Connecting AI Assistants (Claude, ChatGPT, Grok)
 - [ ] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [ ] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
@@ -126,7 +126,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 7: WorkOS AuthKit Integration & Owner Allowlist
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Configure WorkOS AuthKit and Google Cloud Secret Manager, then wire up OAuth 2.1 metadata discovery, JWT/Bearer verification, and the strict owner allowlist in the Cloud Function HTTP entry point.
 - **Deliverables**:
   - Interactive walkthrough to set up WorkOS and store secrets in Firebase/Cloud Secret Manager (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `MCP_BEARER_FALLBACK_SECRET`, `ALLOWED_USER_EMAILS`)

@@ -250,4 +250,165 @@ You can also inspect tools, prompts, and resources visually with the official MC
 
 ---
 
-*Part 3 (Step 7) will wire up WorkOS AuthKit OAuth 2.1 metadata discovery, JWT/Bearer verification, the strict owner allowlist, and the deployed Firebase Cloud Function HTTP entrypoint (`functions/src/index.ts`).*
+## 6. Part 3 (Step 7): WorkOS AuthKit OAuth 2.1, Owner Allowlist & Cloud Functions Deployment
+
+### Concept Briefing: How OAuth 2.1 Protects a Remote MCP Server
+In Part 2, our MCP server ran locally on `127.0.0.1`. Once deployed to **Firebase Cloud Functions (2nd Gen / Cloud Run)**, the HTTPS endpoint must be reachable from the internet so cloud AI assistants (**Claude**, **ChatGPT**, **Grok**) can talk to it—yet **only you** should be able to query your home's air quality data.
+
+Under the **MCP Authorization Specification (OAuth 2.1 + RFC 9728)**, your Cloud Function acts as an **OAuth Resource Server** while **WorkOS AuthKit** acts as the **OAuth Authorization Server**:
+
+```mermaid
+sequenceDiagram
+    participant AI as AI Assistant (Claude / ChatGPT / Grok)
+    participant CF as Cloud Function MCP Server (Resource Server)
+    participant WOS as WorkOS AuthKit (Authorization Server)
+    participant FS as Cloud Firestore (Admin SDK)
+
+    AI->>CF: POST /mcp (no Authorization header)
+    CF-->>AI: 401 Unauthorized<br/>WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource"
+    AI->>CF: GET /.well-known/oauth-protected-resource
+    CF-->>AI: 200 OK { resource: ".../mcp", authorization_servers: ["https://<proj>.authkit.app"] }
+    AI->>WOS: Dynamic Client Registration (DCR) + OAuth 2.1 PKCE Login (User signs in)
+    WOS-->>AI: Signed RS256 Access Token (JWT with sub, iss, aud, exp)
+    AI->>CF: POST /mcp (Authorization: Bearer <JWT>)
+    CF->>WOS: Verify JWT signature via /oauth2/jwks + check user email via WorkOS API
+    CF->>CF: Check verified email / user_id against ALLOWED_USER_EMAILS (403 if not owner)
+    CF->>FS: Execute MCP tool (get_latest_reading, etc.)
+    FS-->>CF: Live sensor telemetry
+    CF-->>AI: 200 OK (MCP JSON-RPC response)
+```
+
+#### Two-Layer Defense in `functions/src/auth/workos.ts`
+1. **Authentication (Who are you?)**:
+   - **WorkOS AuthKit OAuth 2.1 JWT**: Verified cryptographically with [`jose`](https://github.com/panva/jose) against `${WORKOS_AUTHKIT_DOMAIN}/oauth2/jwks`, checking signature, `exp`, `iss` (`WORKOS_AUTHKIT_DOMAIN`), and `aud` (your MCP server's `/mcp` resource URL, origin, or `WORKOS_CLIENT_ID`).
+   - **Fallback Bearer Secret (`MCP_BEARER_FALLBACK_SECRET`)**: A dedicated, high-entropy static Bearer token compared via SHA-256 + `crypto.timingSafeEqual` (so neither token bytes nor token length leak via timing). This makes `curl` smoke tests, CI checks, and CLI MCP clients effortless without ever exposing `WORKOS_API_KEY`.
+2. **Authorization (Are you the owner?)**:
+   - WorkOS Connect OAuth access tokens identify the user via `sub` (`user_01...`) and may not embed `email` by default. Rather than trusting unverified claims, [`functions/src/auth/workos.ts`](../functions/src/auth/workos.ts) resolves the authoritative user record from WorkOS (`workos.userManagement.getUser(sub)`, cached in memory for 5 minutes) and verifies **both** `emailVerified === true` and membership in `ALLOWED_USER_EMAILS` (which accepts comma-separated emails and/or `user_...` IDs).
+   - **Fail-Closed by Default**: If `ALLOWED_USER_EMAILS` is empty or misconfigured, all OAuth requests are denied with `403 Forbidden`—never allowed through.
+
+### Architecture of `functions/src/index.ts`
+[`functions/src/index.ts`](../functions/src/index.ts) exports a single **2nd Gen** `onRequest` Cloud Function named `mcp` deployed in **`us-east1`** (co-located with Firestore for minimal latency) with `invoker: "public"`, `memory: "256MiB"`, `maxInstances: 5`, and five Google Cloud Secret Manager bindings via `defineSecret()`:
+
+| Endpoint | Auth Required? | Purpose |
+| :--- | :--- | :--- |
+| `GET /health` | No | Lightweight liveness probe reporting whether WorkOS OAuth and Bearer fallback are configured (exposes zero secrets or user info). |
+| `GET /.well-known/oauth-protected-resource`<br/>`GET /.well-known/oauth-protected-resource/mcp` | No | **RFC 9728** Protected Resource Metadata pointing MCP clients to your `WORKOS_AUTHKIT_DOMAIN`. |
+| `GET /.well-known/oauth-authorization-server` | No | Cached proxy of `${WORKOS_AUTHKIT_DOMAIN}/.well-known/oauth-authorization-server` for legacy MCP (2025-03-26) clients. |
+| `POST /mcp` (plus `GET`/`DELETE /mcp`) | **Yes (`401`/`403`)** | Protected MCP Streamable HTTP endpoint serving all 4 tools, the `analyze_indoor_air` prompt, and the `air-quality://thresholds/reference` resource. |
+
+---
+
+### Hands-On Setup (Part 3)
+
+#### Step 7A: Configure WorkOS AuthKit (Free Tier)
+1. Sign in to the [WorkOS Dashboard](https://dashboard.workos.com/) and stay in the **Staging** environment (it includes a free `https://<your-subdomain>.authkit.app` domain with zero custom DNS setup; Production requires configuring your own custom domain).
+2. Enable sign-in methods:
+   - Navigate to **Authentication → Methods** and ensure at least one sign-in method you use is enabled (e.g., **Email + Password** or **Magic Auth**; optionally enable Google/GitHub under **Authentication → Providers**).
+3. Copy your **AuthKit Domain**:
+   - Navigate to **Developer → Domains** (or **Authentication → Related → Domains**) and copy your AuthKit domain (`https://<your-subdomain>.authkit.app`).
+4. Enable **Dynamic Client Registration (DCR)** for MCP clients:
+   - Navigate to **Products → Connect → Configuration** and enable **Dynamic Client Registration (DCR)** (and **Client ID Metadata Documents / CIMD** if shown). This allows Claude, ChatGPT, Grok, and MCP Inspector to register automatically via OAuth 2.1 PKCE without hardcoding client secrets.
+5. Copy your API credentials:
+   - Under **Developer → API Keys**, click **Create key** (e.g., name it `custom-air-sensor-mcp`) and copy your **Secret API Key** (`sk_test_...` or `sk_live_...`).
+   - Under **Overview** (top of the left sidebar) or **Applications**, copy your **Client ID** (`client_01...`).
+6. Note your personal login email address (the human account you'll sign in with through WorkOS AuthKit—*not* the ESP32-S3's Firebase Auth device email) for `ALLOWED_USER_EMAILS`.
+
+#### Step 7B: Store the 5 Secrets in Google Cloud Secret Manager
+> [!IMPORTANT]
+> Deploying 2nd Gen Cloud Functions with secrets requires your Firebase project to be on the **Blaze (Pay-as-You-Go)** plan and have the **Secret Manager API** enabled (the Firebase CLI will prompt to enable it automatically on your first `secrets:set`).
+
+First, generate a strong random fallback Bearer secret on your Mac (save it temporarily in a password manager so you can test with `curl` or CLI MCP clients):
+
+```bash
+openssl rand -hex 32
+```
+
+Now store all 5 runtime secrets in Google Cloud Secret Manager via the Firebase CLI (none of these values are ever written to Git):
+
+```bash
+firebase functions:secrets:set WORKOS_API_KEY
+firebase functions:secrets:set WORKOS_CLIENT_ID
+firebase functions:secrets:set WORKOS_AUTHKIT_DOMAIN
+firebase functions:secrets:set ALLOWED_USER_EMAILS
+firebase functions:secrets:set MCP_BEARER_FALLBACK_SECRET
+```
+
+When prompted for each secret:
+- `WORKOS_API_KEY`: paste your WorkOS secret key (`sk_...`)
+- `WORKOS_CLIENT_ID`: paste your WorkOS Client ID (`client_01...`)
+- `WORKOS_AUTHKIT_DOMAIN`: paste `https://<your-subdomain>.authkit.app`
+- `ALLOWED_USER_EMAILS`: paste your email address (comma-separated if allowing multiple, e.g., `you@example.com`; WorkOS `user_01...` IDs are also accepted)
+- `MCP_BEARER_FALLBACK_SECRET`: paste the 64-character hex string generated by `openssl rand -hex 32`
+
+#### Step 7C: Deploy the Cloud Function (2nd Gen)
+Install the new dependencies (`@workos-inc/node` and `jose`), compile TypeScript, and deploy:
+
+```bash
+npm --prefix functions install
+firebase deploy --only functions
+```
+
+When deployment finishes, Firebase prints your **Cloud Run Service URL** (for example, `https://mcp-<hash>-ue.a.run.app`). Save that base URL—your canonical remote MCP URL is:
+
+```text
+https://mcp-<hash>-ue.a.run.app/mcp
+```
+
+---
+
+### Single Focused Validation Checkpoint (Part 3)
+
+#### 1. Offline Automated Auth & Discovery Suite
+Verify all 13 offline checks (domain normalization, allowlist parsing, `/.well-known/*` discovery, `401` + `WWW-Authenticate`, RS256 WorkOS JWT signature/audience verification, verified-email allowlist, `403` for strangers/unverified users, and fail-closed empty allowlist):
+
+```bash
+npm --prefix functions run verify:auth
+```
+
+#### 2. Live Deployed Cloud Function Validation
+Replace `<CLOUD_RUN_BASE_URL>` with your deployed `https://mcp-...a.run.app` URL (without a trailing slash):
+
+1. **Confirm unauthenticated `/mcp` returns `401 Unauthorized` with RFC 9728 `WWW-Authenticate` header**:
+   ```bash
+   curl -i -sS -X POST "<CLOUD_RUN_BASE_URL>/mcp" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+   ```
+   Confirm HTTP `401` and a `WWW-Authenticate: Bearer realm="custom-air-sensor-mcp", resource_metadata="https://.../\.well-known/oauth-protected-resource"` response header.
+
+2. **Confirm OAuth 2.1 Protected Resource Metadata discovery returns `200 OK`**:
+   ```bash
+   curl -sS "<CLOUD_RUN_BASE_URL>/.well-known/oauth-protected-resource" | jq .
+   ```
+   Confirm `"resource"` equals `<CLOUD_RUN_BASE_URL>/mcp` and `"authorization_servers"` contains your `https://<subdomain>.authkit.app` domain.
+
+3. **Confirm an authenticated request returns `200 OK` with live Firestore MCP tool output**:
+   ```bash
+   # Read your fallback Bearer secret directly into a shell variable (never commit it)
+   curl -sS -X POST "<CLOUD_RUN_BASE_URL>/mcp" \
+     -H "Authorization: Bearer <YOUR_MCP_BEARER_FALLBACK_SECRET>" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_latest_reading","arguments":{}}}' | jq .
+   ```
+   Confirm HTTP `200` and that the JSON-RPC `result` contains your live Firestore sensor reading from Step 4!
+
+4. **Run the public-repo secret guardrail check**:
+   ```bash
+   ./scripts/check-secrets.sh
+   ```
+
+---
+
+### Good to Know & Real-World Troubleshooting (Part 3)
+- **Use the Cloud Run `*.a.run.app/mcp` URL (or `cloudfunctions.net/mcp` for RFC 9728 Clients)**: Firebase Cloud Functions (2nd Gen) exposes both `https://us-east1-<project>.cloudfunctions.net/mcp` and an underlying Cloud Run URL `https://mcp-<hash>-ue.a.run.app`. When invoked via `cloudfunctions.net`, [`functions/src/index.ts`](../functions/src/index.ts) automatically sets `WWW-Authenticate: ... resource_metadata="https://<region>-<project>.cloudfunctions.net/mcp/.well-known/oauth-protected-resource"` so RFC 9728 MCP clients discover WorkOS cleanly. For legacy MCP clients that blindly probe `/.well-known/oauth-authorization-server` at the origin root without following `resource_metadata`, use the Cloud Run URL (`https://mcp-<hash>-ue.a.run.app/mcp`) from **Google Cloud Console → Cloud Run → `mcp`**.
+- **Run `firebase functions:secrets:set` One Command at a Time**: Each `secrets:set` invocation prompts interactively for a secret value. Never paste all 5 commands at once, or lines 2–5 will be swallowed as the value of the first secret!
+- **First Deploy Artifact Registry Cleanup Policy Warning**: On your first `firebase deploy --only functions`, the function deploys successfully, then Firebase CLI may exit with a warning asking to set an Artifact Registry cleanup policy so old container images don't accumulate monthly storage charges. Run the one-time CLI command to delete images older than 1 day:
+  ```bash
+  firebase functions:artifacts:setpolicy --location us-east1 --days 1 --force
+  ```
+- **Never Read `defineSecret().value()` at Module Load Time**: During `firebase deploy`, the Firebase CLI imports your compiled `lib/index.js` locally to inspect exported functions before uploading. Calling `.value()` at the top level crashes deployment because secrets are only injected inside the live Cloud Run container. Always call `.value()` inside the request handler.
+- **Why `parsedBody: req.body` Matters on Firebase Cloud Functions**: Firebase's `onRequest` Express wrapper pre-parses `application/json` bodies before your handler runs, consuming the raw HTTP request stream. Passing `parsedBody: req.body` into `handleStatelessMcpHttpRequest()` lets `@modelcontextprotocol/sdk`'s `StreamableHTTPServerTransport` process the already-parsed JSON immediately instead of hanging waiting for stream bytes.
+- **Secret Manager IAM Permissions on First Deploy**: The first time you deploy a function with `defineSecret(...)`, `firebase deploy --only functions` automatically grants the Cloud Run compute service account `roles/secretmanager.secretAccessor` on those secrets. If you update a secret value later with `firebase functions:secrets:set`, re-run `firebase deploy --only functions` so Cloud Run pins the new secret version.
+- **Never Use `WORKOS_API_KEY` as a Client Bearer Token**: `WORKOS_API_KEY` is your server's private admin credential for calling WorkOS APIs (like `userManagement.getUser`). Always use either a short-lived WorkOS OAuth 2.1 JWT (for AI assistants) or the separate `MCP_BEARER_FALLBACK_SECRET` (for `curl` / CLI tests).
