@@ -25,7 +25,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 - [x] **Step 1**: `README.md` & Public-Repo Security Guardrails
 - [x] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
-- [ ] **Step 3**: Hardened Firestore Security Rules
+- [x] **Step 3**: Hardened Firestore Security Rules
 - [ ] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
 - [ ] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
 - [ ] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
@@ -72,8 +72,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 3: Hardened Firestore Security Rules
-- **Status**: `[ ] Pending`
-- **Goal**: Lock down Cloud Firestore so unauthenticated requests have zero access and the dedicated device UID has strict write-only access with schema validation on `readings` and `devices/{device_id}`.
+- **Status**: `[x] Completed`
+- **Goal**: Lock down Cloud Firestore so unauthenticated requests have zero access and the dedicated device UID has strict write-only access with schema validation on `readings` and `devices/{device_id}`. The UID lives in Firestore at `authorized_devices/{uid}` so the committed rules stay free of it.
 - **Deliverables**:
   - `firestore.rules`
   - `docs/03-firebase-and-firestore.md` (Part 2: Security Rules architecture & schema validation)

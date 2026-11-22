@@ -1,0 +1,214 @@
+rules_version = '2';
+
+// Public-repo rules: the device UID is never hardcoded here.
+// The Firebase Console (Admin/IAM) creates authorized_devices/{uid}.
+// Client SDKs and the Firestore REST API cannot read or write that collection.
+// Cloud Functions using the Admin SDK bypass these rules entirely.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSensorDevice() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/authorized_devices/$(request.auth.uid));
+    }
+
+    function isDeviceId(value) {
+      return value is string
+        && value.size() >= 1
+        && value.size() <= 64
+        && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$');
+    }
+
+    function isLocation(value) {
+      return isDeviceId(value);
+    }
+
+    function isSafeDocId(value) {
+      return value is string
+        && value.size() >= 1
+        && value.size() <= 700
+        && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,699}$');
+    }
+
+    // Timestamp type only, so a wrong or stale board clock cannot backdate history.
+    // 15 minutes of lateness covers the 5-minute sample interval plus retries.
+    // 5 minutes of lead covers clock skew after NTP sync.
+    function isFreshTimestamp(value) {
+      return value is timestamp
+        && value >= request.time - duration.value(15, 'm')
+        && value <= request.time + duration.value(5, 'm');
+    }
+
+    function inRange(value, min, max) {
+      return value is number && value >= min && value <= max;
+    }
+
+    function isAqiCategory(value) {
+      return value in [
+        'Good',
+        'Moderate',
+        'Unhealthy for Sensitive Groups',
+        'Unhealthy',
+        'Very Unhealthy',
+        'Hazardous'
+      ];
+    }
+
+    function isFirmwareVersion(value) {
+      return value is string
+        && value.size() >= 5
+        && value.size() <= 32
+        && value.matches('^[0-9]+\\.[0-9]+\\.[0-9]+$');
+    }
+
+    function validSensors(value) {
+      return value is list
+        && value.size() >= 1
+        && value.size() <= 4
+        && value.hasOnly(['SCD-40', 'PMSA003I']);
+    }
+
+    function validLatestReading(data) {
+      return data is map
+        && data.keys().hasAll([
+          'co2_ppm',
+          'temperature_f',
+          'humidity_percent',
+          'pm2_5_ug_m3',
+          'aqi_us',
+          'aqi_category'
+        ])
+        && data.keys().hasOnly([
+          'co2_ppm',
+          'temperature_f',
+          'humidity_percent',
+          'pm2_5_ug_m3',
+          'aqi_us',
+          'aqi_category'
+        ])
+        && inRange(data.co2_ppm, 0, 40000)
+        && inRange(data.temperature_f, -40, 185)
+        && inRange(data.humidity_percent, 0, 100)
+        && inRange(data.pm2_5_ug_m3, 0, 1000)
+        && inRange(data.aqi_us, 0, 500)
+        && isAqiCategory(data.aqi_category);
+    }
+
+    function validReading(data) {
+      return data is map
+        && data.keys().hasAll([
+          'device_id',
+          'location',
+          'timestamp',
+          'co2_ppm',
+          'temperature_c',
+          'temperature_f',
+          'humidity_percent',
+          'pm1_0_ug_m3',
+          'pm2_5_ug_m3',
+          'pm10_0_ug_m3',
+          'aqi_us',
+          'aqi_category',
+          'particles_0_3um',
+          'particles_0_5um',
+          'particles_1_0um',
+          'particles_2_5um',
+          'particles_5_0um',
+          'particles_10_0um'
+        ])
+        && data.keys().hasOnly([
+          'device_id',
+          'location',
+          'timestamp',
+          'co2_ppm',
+          'temperature_c',
+          'temperature_f',
+          'humidity_percent',
+          'pm1_0_ug_m3',
+          'pm2_5_ug_m3',
+          'pm10_0_ug_m3',
+          'aqi_us',
+          'aqi_category',
+          'particles_0_3um',
+          'particles_0_5um',
+          'particles_1_0um',
+          'particles_2_5um',
+          'particles_5_0um',
+          'particles_10_0um'
+        ])
+        && isDeviceId(data.device_id)
+        && isLocation(data.location)
+        && isFreshTimestamp(data.timestamp)
+        && inRange(data.co2_ppm, 0, 40000)
+        && inRange(data.temperature_c, -40, 85)
+        && inRange(data.temperature_f, -40, 185)
+        && inRange(data.humidity_percent, 0, 100)
+        && inRange(data.pm1_0_ug_m3, 0, 1000)
+        && inRange(data.pm2_5_ug_m3, 0, 1000)
+        && inRange(data.pm10_0_ug_m3, 0, 1000)
+        && inRange(data.aqi_us, 0, 500)
+        && isAqiCategory(data.aqi_category)
+        && inRange(data.particles_0_3um, 0, 65535)
+        && inRange(data.particles_0_5um, 0, 65535)
+        && inRange(data.particles_1_0um, 0, 65535)
+        && inRange(data.particles_2_5um, 0, 65535)
+        && inRange(data.particles_5_0um, 0, 65535)
+        && inRange(data.particles_10_0um, 0, 65535);
+    }
+
+    function validDevice(data) {
+      return data is map
+        && data.keys().hasAll([
+          'device_id',
+          'location',
+          'last_seen_at',
+          'firmware_version',
+          'sensors',
+          'reporting_interval_seconds',
+          'latest_reading'
+        ])
+        && data.keys().hasOnly([
+          'device_id',
+          'location',
+          'last_seen_at',
+          'firmware_version',
+          'sensors',
+          'reporting_interval_seconds',
+          'latest_reading'
+        ])
+        && isDeviceId(data.device_id)
+        && isLocation(data.location)
+        && isFreshTimestamp(data.last_seen_at)
+        && isFirmwareVersion(data.firmware_version)
+        && validSensors(data.sensors)
+        && inRange(data.reporting_interval_seconds, 60, 3600)
+        && validLatestReading(data.latest_reading);
+    }
+
+    match /readings/{readingId} {
+      allow read: if false;
+      allow update, delete: if false;
+      allow create: if isSensorDevice()
+        && isSafeDocId(readingId)
+        && validReading(request.resource.data);
+    }
+
+    match /devices/{deviceId} {
+      allow read: if false;
+      allow delete: if false;
+      allow create, update: if isSensorDevice()
+        && isDeviceId(deviceId)
+        && request.resource.data.device_id == deviceId
+        && validDevice(request.resource.data);
+    }
+
+    // Existence of authorized_devices/{auth.uid} is the allowlist.
+    // Clients cannot create, read, or edit these documents.
+    match /authorized_devices/{uid} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
