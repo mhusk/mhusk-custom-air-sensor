@@ -1,12 +1,12 @@
 # Custom ESP32-S3 Air Quality Sensor + Firebase + Remote MCP Server
 
-An end-to-end, DIY smart indoor air quality (IAQ) monitoring system that connects physical environmental sensors (**$\text{CO}_2$**, **$\text{PM}_{1.0}$ / $\text{PM}_{2.5}$ / $\text{PM}_{10}$**, **Temperature**, and **Humidity**) to **Google Cloud Firestore** and exposes live & historical telemetry to modern AI assistants (**Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client) through a remote **Model Context Protocol (MCP)** server secured with **WorkOS AuthKit**.
+An end-to-end, DIY smart indoor air quality (IAQ) monitoring system that connects physical environmental sensors (**CO<sub>2</sub>**, **PM<sub>1.0</sub> / PM<sub>2.5</sub> / PM<sub>10</sub>**, **Temperature**, and **Humidity**) to **Google Cloud Firestore** and exposes live & historical telemetry to modern AI assistants (**Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client) through a remote **Model Context Protocol (MCP)** server secured with **WorkOS AuthKit**.
 
 ---
 
 ## Why Build This? (The Backstory)
 
-I was inspired to start this project after listening to a **Chris Williamson (*Modern Wisdom*) podcast episode featuring Michael Feldstein**, the founder of **Jaspr**. Hearing their deep dive into indoor air quality—how invisible spikes in $\text{CO}_2$ degrade sleep and cognitive focus, and how fine particulate matter ($\text{PM}_{2.5}$) from cooking, wildfire smoke, or everyday dust lingers indoors—made me curious to measure the air in my own home.
+I was inspired to start this project after listening to a **Chris Williamson (*Modern Wisdom*) podcast episode featuring Michael Feldstein**, the founder of **Jaspr**. Hearing their deep dive into indoor air quality—how invisible spikes in CO<sub>2</sub> degrade sleep and cognitive focus, and how fine particulate matter (PM<sub>2.5</sub>) from cooking, wildfire smoke, or everyday dust lingers indoors—made me curious to measure the air in my own home.
 
 When I looked at consumer air quality monitors, I realized something interesting: **most commercial smart air sensors cost roughly the same amount as buying these high-precision sensor breakouts yourself**. While buying an off-the-shelf unit gives you a plastic shell and a proprietary app, building one from scratch for a similar price is a much more rewarding way to learn by doing—exploring how I2C hardware buses, CircuitPython firmware, cloud time-series databases, OAuth 2.1, and the Model Context Protocol (MCP) all fit together.
 
@@ -21,8 +21,8 @@ All components plug together using 4-pin **STEMMA QT (JST SH)** cables—no sold
 | Component | Part / Model | What It Measures / Does | I2C Address |
 | :--- | :--- | :--- | :--- |
 | **Microcontroller** | **Adafruit ESP32-S3 Feather** | 2.4GHz Wi-Fi board running CircuitPython; includes onboard STEMMA QT port & NeoPixel status LED | Host Controller |
-| **$\text{CO}_2$ Sensor** | **Adafruit SCD-40** (Sensirion) | True photoacoustic $\text{CO}_2$ ($400\text{–}2000+\text{ ppm}$), ambient temperature, & relative humidity | `0x62` |
-| **Particulate Sensor** | **Adafruit PMSA003I** (Plantower) | Laser particulate matter sensor measuring $\text{PM}_{1.0}$, $\text{PM}_{2.5}$, $\text{PM}_{10.0}$ ($\mu\text{g/m}^3$) + raw particle counts by size ($>0.3\mu\text{m}$ to $>10.0\mu\text{m}$) | `0x12` |
+| **CO<sub>2</sub> Sensor** | **Adafruit SCD-40** (Sensirion) | True photoacoustic CO<sub>2</sub> (400–2000+ ppm), ambient temperature, & relative humidity | `0x62` |
+| **Particulate Sensor** | **Adafruit PMSA003I** (Plantower) | Laser particulate matter sensor measuring PM<sub>1.0</sub>, PM<sub>2.5</sub>, PM<sub>10.0</sub> (µg/m³) + raw particle counts by size (>0.3 µm to >10.0 µm) | `0x12` |
 | **Interconnects** | **2x STEMMA QT Cables** | Daisy-chains `3.3V`, `GND`, `SDA`, and `SCL` across the ESP32-S3 and both sensors | N/A |
 | **Power & Data** | **USB-A to USB-C Cable** | Powers the board continuously and mounts the `CIRCUITPY` USB drive when connected to a computer | N/A |
 
@@ -96,6 +96,6 @@ Before committing any changes, run the local secret scanner:
 ```
 
 All personal configuration lives in gitignored files copied from safe `.example` templates:
-- `firmware/settings.toml.example` $\rightarrow$ `firmware/settings.toml` (on your local machine / `CIRCUITPY` drive)
-- `.firebaserc.example` $\rightarrow$ `.firebaserc`
-- `functions/.env.example` $\rightarrow$ `functions/.env.local` (for local testing; production uses Google Cloud Secret Manager)
+- `firmware/settings.toml.example` → `firmware/settings.toml` (on your local machine / `CIRCUITPY` drive)
+- `.firebaserc.example` → `.firebaserc`
+- `functions/.env.example` → `functions/.env.local` (for local testing; production uses Google Cloud Secret Manager)
