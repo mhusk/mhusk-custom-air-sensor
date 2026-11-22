@@ -27,7 +27,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
 - [x] **Step 3**: Hardened Firestore Security Rules
 - [x] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
-- [ ] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
+- [x] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
 - [ ] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
 - [ ] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
 - [ ] **Step 8**: Connecting AI Assistants (Claude, ChatGPT, Grok)
@@ -99,7 +99,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 5: Cloud Functions Scaffolding & Firestore Query Service
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Set up the Node.js 22 + TypeScript Firebase Cloud Functions project and implement the Firestore data access & statistical aggregation layer (`firestore.ts`).
 - **Deliverables**:
   - `functions/package.json` & `functions/tsconfig.json`
