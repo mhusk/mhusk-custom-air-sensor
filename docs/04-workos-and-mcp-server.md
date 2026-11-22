@@ -149,4 +149,105 @@ Finally, run the public-repo secret check:
 
 ---
 
-*Part 2 (Step 6) will implement the Model Context Protocol (MCP) server, its 4 air quality tools, health analysis prompt, and EPA/ASHRAE reference resource.*
+## 5. Part 2 (Step 6): Core MCP Server Tools, Prompts & Resources
+
+### Concept Briefing: How the Model Context Protocol (MCP) Works
+The **Model Context Protocol (MCP)** is an open JSON-RPC 2.0 protocol that standardizes how AI assistants (Claude, ChatGPT, Grok, and local developer tools) discover and invoke external capabilities. An MCP server exposes three core primitives:
+
+| MCP Primitive | Who Controls It | What It Does in This Project |
+| :--- | :--- | :--- |
+| **Tools** (`tools/list`, `tools/call`) | **Model-controlled** (the AI decides when to call them) | Query live and historical Firestore sensor data (`get_latest_reading`, `get_readings_history`, `get_air_quality_summary`, `get_sensor_status`). |
+| **Prompts** (`prompts/list`, `prompts/get`) | **User-controlled** (invoked as a slash command / reusable template) | `analyze_indoor_air` — gives the AI a structured workflow to inspect current readings, review 24-hour spikes, and provide actionable ventilation/filtration advice. |
+| **Resources** (`resources/list`, `resources/read`) | **Application/Model-readable** (static or dynamic reference documents) | `air-quality://thresholds/reference` — embeds the exact revised 2024 US EPA PM<sub>2.5</sub>/PM<sub>10</sub> AQI tables, ASHRAE/Harvard CO<sub>2</sub> cognitive bands, and humidity ranges. |
+
+```mermaid
+sequenceDiagram
+    participant AI as AI Assistant / MCP Client
+    participant HTTP as Streamable HTTP Transport (/mcp)
+    participant MCP as McpServer (server.ts)
+    participant Tools as tools.ts / prompts.ts
+    participant FS as firestore.ts -> Cloud Firestore
+
+    AI->>HTTP: POST /mcp (JSON-RPC: tools/list)
+    HTTP->>MCP: Route request (stateless per-request instance)
+    MCP-->>AI: 200 OK (4 tool schemas + annotations)
+
+    AI->>HTTP: POST /mcp (JSON-RPC: tools/call get_latest_reading)
+    HTTP->>MCP: Validate args with Zod
+    MCP->>Tools: Execute handler
+    Tools->>FS: getLatestReading() via Admin SDK
+    FS-->>Tools: Latest reading + device status + health context
+    Tools-->>AI: 200 OK (Structured JSON text content)
+```
+
+### Architecture of `functions/src/mcp/`
+1. **[`functions/src/mcp/tools.ts`](../functions/src/mcp/tools.ts)**:
+   - Registers all four read-only tools with `server.registerTool(...)`, Zod input schemas, and `ToolAnnotations` (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`).
+   - Uses an injectable `AirQualityDataService` interface so the exact same MCP server runs against **live Cloud Firestore** in production and deterministic **mock data** during offline tests.
+   - Wraps tool execution in `try/catch` so invalid input (e.g., malformed ISO timestamps) returns a clean MCP `{ isError: true }` tool response instead of crashing the HTTP handler.
+2. **[`functions/src/mcp/prompts.ts`](../functions/src/mcp/prompts.ts)**:
+   - Registers the `analyze_indoor_air` prompt (accepting optional `location`, `device_id`, and `period` arguments).
+   - Registers the `air-quality://thresholds/reference` Markdown resource, kept 100% aligned with [`firmware/aqi.py`](../firmware/aqi.py) and [`functions/src/services/firestore.ts`](../functions/src/services/firestore.ts).
+3. **[`functions/src/mcp/server.ts`](../functions/src/mcp/server.ts)**:
+   - Exports `createAirQualityMcpServer()` to instantiate a configured `McpServer`.
+   - Exports `handleStatelessMcpHttpRequest()` using `StreamableHTTPServerTransport` in **stateless mode** (`sessionIdGenerator: undefined`, `enableJsonResponse: true`). Each incoming HTTP request gets an isolated `McpServer` + transport that closes automatically when the HTTP response finishes—ideal for serverless Cloud Functions (2nd Gen) / Cloud Run.
+
+### Hands-On Setup (Part 2)
+Install the MCP TypeScript SDK and Zod inside `functions/` (already recorded in [`functions/package.json`](../functions/package.json)):
+
+```bash
+npm --prefix functions install @modelcontextprotocol/sdk zod
+npm --prefix functions run build
+```
+
+### Single Focused Validation Checkpoint (Part 2)
+
+#### 1. Automated MCP JSON-RPC Protocol Suite (Offline & Live Firestore)
+Run the automated verification suite ([`functions/src/scripts/verifyMcp.ts`](../functions/src/scripts/verifyMcp.ts)), which starts a localhost HTTP server on an ephemeral port and verifies `401` Bearer rejection, `initialize`, `tools/list`, all 4 `tools/call` invocations, `prompts/list` + `prompts/get`, and `resources/list` + `resources/read`:
+
+```bash
+# Offline check using deterministic in-memory sensor data
+npm --prefix functions run verify:mcp
+
+# Live check reading the Step 4 synthetic reading from Cloud Firestore
+GOOGLE_APPLICATION_CREDENTIALS= npm --prefix functions run verify:mcp -- --live
+```
+
+#### 2. Interactive Local Testing with `curl` or MCP Inspector
+Start the localhost-only MCP dev server ([`functions/src/scripts/localMcpServer.ts`](../functions/src/scripts/localMcpServer.ts)) in Terminal 1:
+
+```bash
+# Live Firestore mode (optional: prefix with MCP_BEARER_FALLBACK_SECRET="your-local-test-token")
+GOOGLE_APPLICATION_CREDENTIALS= npm --prefix functions run mcp:local
+
+# Or offline mock mode (no GCP credentials required)
+npm --prefix functions run mcp:local -- --mock
+```
+
+In Terminal 2, invoke `tools/list` and `tools/call` directly with `curl`:
+
+```bash
+# List all registered MCP tools
+curl -sS -X POST http://127.0.0.1:8787/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq .
+
+# Call get_latest_reading
+curl -sS -X POST http://127.0.0.1:8787/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_latest_reading","arguments":{}}}' | jq .
+```
+
+You can also inspect tools, prompts, and resources visually with the official MCP Inspector (`npx @modelcontextprotocol/inspector`) pointed at Streamable HTTP URL `http://127.0.0.1:8787/mcp`.
+
+### Good to Know & Real-World Troubleshooting (Part 2)
+- **`406 Not Acceptable` When Testing with `curl`**: The MCP Streamable HTTP transport (`StreamableHTTPServerTransport`) strictly requires the `Accept` header to include **both** `application/json` and `text/event-stream` (`-H "Accept: application/json, text/event-stream"`). Omitting `text/event-stream` triggers `406 Not Acceptable`, even when `enableJsonResponse: true` is enabled on the server.
+- **Why Create a Fresh `McpServer` Per HTTP Request?**: In `@modelcontextprotocol/sdk`, a single `McpServer` instance binds 1:1 to a transport. Reusing one global `McpServer` across concurrent HTTP requests causes transport conflicts or cross-request leaks. Creating a fresh `McpServer` + `StreamableHTTPServerTransport({ sessionIdGenerator: undefined })` per request is lightweight (microseconds) and completely safe on serverless Cloud Run.
+- **Why `enableJsonResponse: true` for Cloud Functions**: By default, `StreamableHTTPServerTransport` wraps POST responses in an SSE stream (`text/event-stream`). Setting `enableJsonResponse: true` returns standard `application/json` responses for request/response tool calls, which works smoothly with `curl`, Firebase Cloud Functions buffering, and all Streamable HTTP MCP clients.
+- **Local Dev Server Binds to `127.0.0.1` Only**: `localMcpServer.ts` intentionally binds exclusively to loopback (`127.0.0.1`), never `0.0.0.0`, so unauthenticated local testing is never exposed to your LAN. Production authentication (WorkOS AuthKit OAuth 2.1 + owner allowlist) is added in Step 7.
+
+---
+
+*Part 3 (Step 7) will wire up WorkOS AuthKit OAuth 2.1 metadata discovery, JWT/Bearer verification, the strict owner allowlist, and the deployed Firebase Cloud Function HTTP entrypoint (`functions/src/index.ts`).*

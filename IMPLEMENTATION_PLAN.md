@@ -28,7 +28,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 3**: Hardened Firestore Security Rules
 - [x] **Step 4**: Firmware Math & REST Client (Tested Locally on Mac First)
 - [x] **Step 5**: Cloud Functions Scaffolding & Firestore Query Service
-- [ ] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
+- [x] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
 - [ ] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
 - [ ] **Step 8**: Connecting AI Assistants (Claude, ChatGPT, Grok)
 - [ ] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
@@ -112,7 +112,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 6: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Implement the Model Context Protocol (MCP) server, its 4 tools, its health analysis prompt, and its EPA/ASHRAE reference resource, and test them locally before adding WorkOS OAuth complexity.
 - **Deliverables**:
   - `functions/src/mcp/server.ts`
