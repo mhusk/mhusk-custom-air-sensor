@@ -14,6 +14,28 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 
 ---
 
+## Where We Are Now & Next Steps
+
+> **Current Snapshot:** **Phase 1 (v1) is live end-to-end**, streaming indoor air quality every 5 minutes to Cloud Firestore and answering live natural-language queries in **Gemini** and **Grok** through the WorkOS-protected Remote MCP server. The custom screwless 3D-printed enclosure is **currently printing on a Bambu Lab X1 Carbon**.
+
+| Phase / Layer | Status | Summary |
+| :--- | :---: | :--- |
+| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython (5-min polling, on-device US EPA AQI, NeoPixel status, watchdog) |
+| **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
+| **Enclosure — 3D-Printed Hub** | `Printing` | Screwless, support-free, thermally baffled bedroom enclosure ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
+| **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Up Next` | Enclosure calibration + lightweight Firebase Hosting dashboard (live 24h/7d charts + WorkOS login) + Firestore-backed remote config (interval, temp offset, altitude, LED mode, room label—no USB needed) |
+| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `Planned` | Pull-based CircuitPython OTA updates with SHA-256 verification, USB-aware `boot.py`, and a minimal immutable `code.py` bootloader that auto-rolls back `app.py` on boot crash |
+| **Phase 4 — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, outdoor AQI context for "should I open the window?" decisions, and optional smart-home actuation |
+
+### What's Next (The 2-Layer Remote Update Plan)
+1. **Finish enclosure commissioning & launch Phase 2 (Remote Config + Web Dashboard):** Dial in enclosed SCD-40 temperature offset and altitude compensation, then manage day-to-day settings and view 24h/7d room charts from a lightweight WorkOS-protected Firebase Hosting dashboard—with zero flash wear or brick risk.
+2. **Build Phase 3 (Cloud Pull-Based OTA with A/B Rollback):** Refactor firmware into an immutable `code.py` bootloader + updatable `app.py` with SHA-256 checksum verification and one-click fleet rollouts from the dashboard so future updates never require unplugging a sensor.
+3. **Scale to Phase 4 (Multi-Room & Proactive Intelligence):** Print additional enclosures for more rooms, add `compare_rooms` and outdoor AQI context to the MCP server, and trigger push alerts when CO<sub>2</sub> or PM<sub>2.5</sub> spikes.
+
+Track every atomic step and validation checkpoint in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
+
+---
+
 ## Hardware Bill of Materials (Solderless STEMMA QT / I2C)
 
 All components plug together using 4-pin **STEMMA QT (JST SH)** cables—no soldering required:
@@ -86,7 +108,7 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 ## Project Documents & Progress Tracking
 
 - [**`PRD.md`**](./PRD.md) — Complete Product Requirements Document, data schemas, and component specifications.
-- [**`IMPLEMENTATION_PLAN.md`**](./IMPLEMENTATION_PLAN.md) — Our 11-step commit & validation roadmap tracking each atomic build step.
+- [**`IMPLEMENTATION_PLAN.md`**](./IMPLEMENTATION_PLAN.md) — Our phased, step-by-step commit & validation roadmap (Phase 1 completed; Phases 2–4 queued).
 
 ---
 

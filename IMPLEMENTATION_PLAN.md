@@ -23,6 +23,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ## Progress Tracker
 
+### Phase 1: Core v1 Sensor Node, Cloud Firestore & Remote MCP Server *(Completed)*
 - [x] **Step 1**: `README.md` & Public-Repo Security Guardrails
 - [x] **Step 2**: Firebase Project Initialization & Firestore Database Provisioning
 - [x] **Step 3**: Hardened Firestore Security Rules
@@ -34,10 +35,30 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [x] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
+- [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *currently printing on Bambu Lab X1 Carbon*
+
+### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — Up Next)*
+- [ ] **Step 12**: Enclosure Calibration & `device_configs` Firestore Schema + Rules
+- [ ] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`)
+- [ ] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
+- [ ] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
+
+### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2)*
+- [ ] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback)
+- [ ] **Step 17**: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
+- [ ] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check)
+- [ ] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard
+
+### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — Backlog)*
+- [ ] **Multi-Room Sensor Network**: Per-device UID-to-`device_id` isolation in `firestore.rules`, `compare_rooms` MCP tool, optional CO₂-only (`SCD-40`) satellite nodes, and additional 3D-printed enclosures
+- [ ] **Proactive Alerts & Outdoor AQI Context**: Firestore `onDocumentCreated` push alerts with cooldowns (CO₂ / PM₂.₅ / stale sensor) and an outdoor AQI + weather MCP tool for "should I open the window?" advice
+- [ ] **Optional Smart-Home Actuation & VOC/NOₓ Expansion**: Triggering a HEPA air purifier smart plug on PM₂.₅ spikes and adding a Sensirion `SGP41` VOC/NOₓ breakout on STEMMA QT
 
 ---
 
 ## Detailed Step Breakdown
+
+### Phase 1: Core v1 Sensor Node, Cloud Firestore & Remote MCP Server
 
 ### Step 1: `README.md` & Public-Repo Security Guardrails
 - **Status**: `[x] Completed`
@@ -185,3 +206,118 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Single Focused Validation**:
   - Validated live end-to-end in **Gemini** and **Grok**: *"What is the current air quality in my room right now, and how do my CO2 and PM2.5 levels look?"* confirmed fresh hardware telemetry matching the live ESP32-S3 sensor.
 - **Target Commit**: `docs: finalize end-to-end verification notes and complete implementation plan`
+
+---
+
+### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config (Layer 1)
+
+> **Why split Remote Config (Phase 2) from OTA Code Updates (Phase 3)?**
+> 90% of day-to-day device changes—calibrating enclosed temperature offset, changing polling intervals, muting bedroom LEDs, or renaming a room—don't require modifying Python code on flash. Solving Remote Config first gives immediate dashboard control with zero flash wear and zero risk of bricking a mounted sensor.
+
+#### Step 12: Enclosure Calibration & `device_configs` Firestore Schema + Rules
+- **Status**: `[ ] Pending`
+- **Goal**: Commission the 3D-printed enclosure (verify thermal offset, acoustic isolation, and LED shielding) and introduce a hardened `device_configs/{device_id}` Firestore collection so each sensor can pull tunable settings (`location`, `reporting_interval_seconds`, `temperature_offset_c`, `altitude_m`, `led_enabled`, `config_version`, and one-shot commands like `reboot`).
+- **Deliverables**:
+  - Updated `firestore.rules` allowing authenticated sensor devices read-only access to `device_configs/{device_id}` (and schema validation for dashboard/admin writes)
+  - Calibration notes & thermal offset results recorded in `docs/08-enclosure-hardware-plan.md`
+  - `docs/09-remote-config-and-dashboard.md` (Part 1: Control-plane data model, `config_version` tracking, and SCD-40 thermal/altitude calibration)
+- **Single Focused Validation**:
+  - Deploy `firestore.rules`, create a test `device_configs/feather-s3-01` document, verify the sensor account can `GET` it while unauthenticated requests receive `403 PERMISSION_DENIED`, and verify the sensor account cannot overwrite `device_configs`.
+- **Target Commit**: `feat(firestore): add device_configs schema, rules, and enclosure calibration notes`
+
+#### Step 13: Firmware Remote Configuration Polling (`device_configs/{device_id}`)
+- **Status**: `[ ] Pending`
+- **Goal**: Teach the ESP32-S3 firmware to fetch `device_configs/{device_id}` during its publishing loop, apply updated settings (`temperature_offset_c`, `altitude_m`, `reporting_interval_seconds`, `location`, `led_enabled`) live in RAM without touching flash, and report the active `config_version` back in `devices/{device_id}`.
+- **Deliverables**:
+  - `firmware/firestore_client.py` (`fetch_device_config()` via Firestore REST API)
+  - `firmware/code.py` (apply SCD-40 `temperature_offset` & `altitude`, dynamic interval/location/LED mode, and safe fallback to local `settings.toml` defaults if no cloud config exists)
+  - Updated `scripts/test_firmware_local.py` with offline & live config-parsing tests
+  - `docs/09-remote-config-and-dashboard.md` (Part 2: How the sensor control loop applies live config safely)
+- **Single Focused Validation**:
+  - Change `reporting_interval_seconds` (e.g., `300` → `60`) or `temperature_offset_c` in Firestore, watch the serial console / next Firestore reading reflect the change automatically without rebooting or plugging into USB, then change it back.
+- **Target Commit**: `feat(firmware): add remote config polling and SCD-40 calibration support`
+
+#### Step 14: Dashboard Backend API & WorkOS Auth Integration
+- **Status**: `[ ] Pending`
+- **Goal**: Add lightweight authenticated JSON API routes to Firebase Cloud Functions—reusing the existing WorkOS AuthKit OAuth + strict owner allowlist—for fetching live room snapshots, 24h/7d time-series data, device health, and updating `device_configs/{device_id}`.
+- **Deliverables**:
+  - `functions/src/api/dashboard.ts` (typed REST endpoints backed by `functions/src/services/firestore.ts` plus `updateDeviceConfig` with strict Zod validation)
+  - `functions/src/index.ts` (route wiring + WorkOS session/token verification)
+  - Verification script (`npm --prefix functions run verify:api`) testing auth rejection (`401`/`403`) and valid config updates
+  - `docs/09-remote-config-and-dashboard.md` (Part 3: Securing a personal IoT dashboard API with WorkOS AuthKit)
+- **Single Focused Validation**:
+  - Run `npm --prefix functions run verify:api` and confirm unauthenticated requests fail with `401`, non-allowlisted users get `403`, and an authorized request reads telemetry and updates `device_configs/{device_id}` cleanly.
+- **Target Commit**: `feat(functions): add WorkOS-protected dashboard and remote config API`
+
+#### Step 15: Lightweight Web Dashboard on Firebase Hosting
+- **Status**: `[ ] Pending`
+- **Goal**: Build and deploy a super-lightweight, responsive web dashboard on Firebase Hosting so you can view live readings, inspect 24h/7d CO₂/PM₂.₅/Temp/Humidity charts at a glance, and tweak any sensor's Layer 1 settings from a clean Device Settings drawer.
+- **Deliverables**:
+  - `web/` (minimal frontend app with WorkOS login, live room cards, interactive 24h/7d trend charts, and Device Settings form)
+  - `firebase.json` (Firebase Hosting configuration + rewrite rules to Cloud Functions API)
+  - `docs/09-remote-config-and-dashboard.md` (Part 4: Deploying the dashboard and managing sensor settings from the browser)
+- **Single Focused Validation**:
+  - Sign in via WorkOS on the deployed Firebase Hosting URL, confirm live charts match Firestore readings, update a setting (e.g., `led_enabled` or `reporting_interval_seconds`) in the Device Settings drawer, and observe the physical sensor pick it up on its next check-in.
+- **Target Commit**: `feat(web): add lightweight Firebase Hosting dashboard with remote device config`
+
+---
+
+### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback (Layer 2)
+
+> **Why Pull-Based A/B OTA?**
+> Updating CircuitPython `.py` files over the air lets you evolve firmware across every room without unscrewing enclosures or touching USB—while keeping a tiny, immutable `code.py` bootloader guarantees that a bad push with a syntax or runtime error automatically rolls back to the last known-good version instead of bricking the board.
+
+#### Step 16: Safe Bootloader Split (`boot.py` + Immutable `code.py` → `app.py`)
+- **Status**: `[ ] Pending`
+- **Goal**: Refactor the firmware into a USB-aware `boot.py` and a minimal, rock-solid `code.py` bootloader that imports and runs `app.py`, automatically rolling back to `app.py.bak` if a newly deployed `app.py` crashes on boot or fails to record a healthy check-in.
+- **Deliverables**:
+  - `firmware/boot.py` (checks `supervisor.runtime.usb_connected`: mounts flash read-write for Python OTA when on wall power, while preserving normal `CIRCUITPY` USB drive access when plugged into a Mac)
+  - `firmware/code.py` (minimal ~50-line immutable bootloader with boot-attempt counter & automatic `app.py.bak` rollback)
+  - `firmware/app.py` (existing sensor polling + remote config logic moved out of `code.py`)
+  - `docs/10-cloud-ota-and-rollback.md` (Part 1: How CircuitPython flash locking and A/B rollback bootloaders work)
+- **Single Focused Validation**:
+  - Intentionally place a broken `app.py` (raising an exception on boot) alongside a valid `app.py.bak` on wall power, confirm `code.py` detects the crash, restores `app.py.bak`, reboots, and resumes publishing to Firestore without USB intervention.
+- **Target Commit**: `feat(firmware): split USB-aware boot.py and auto-rollback code.py bootloader`
+
+#### Step 17: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
+- **Status**: `[ ] Pending`
+- **Goal**: Define the cloud OTA release pipeline: store versioned Python payloads (`app.py`, `aqi.py`, `firestore_client.py`) with SHA-256 checksums in Firebase Storage / Cloud Functions and publish release metadata to `firmware_releases/{version}` in Firestore.
+- **Deliverables**:
+  - Firestore schema & security rules for `firmware_releases/{version}` (read-only for authenticated sensors) and `target_firmware_version` in `device_configs/{device_id}`
+  - `scripts/publish_release.py` (or npm script) that hashes firmware files with SHA-256, uploads artifacts, and writes the signed/checksummed release manifest
+  - `docs/10-cloud-ota-and-rollback.md` (Part 2: Checksummed release manifests and safe artifact staging)
+- **Single Focused Validation**:
+  - Publish a test release (e.g., `1.1.0-rc1`) via the publish script, verify the manifest and SHA-256 hashes appear in Firestore, and confirm the sensor auth account can fetch the manifest and artifact while unauthenticated requests are rejected.
+- **Target Commit**: `feat(ota): add checksummed firmware release manifest and publish script`
+
+#### Step 18: On-Device Pull-Based OTA Updater
+- **Status**: `[ ] Pending`
+- **Goal**: Implement the pull-based OTA client on the ESP32-S3: compare current `FIRMWARE_VERSION` against `target_firmware_version`, download new `.py` files to `.new` staging paths, verify SHA-256 hashes on-device before touching live files, back up existing files to `.bak`, atomically swap, reboot, and confirm healthy check-in.
+- **Deliverables**:
+  - `firmware/ota_updater.py` (staging downloads, SHA-256 verification, atomic backup/rename, and `ota_status` reporting to `devices/{device_id}`)
+  - `firmware/app.py` (periodic OTA check hook + health confirmation clearing the "pending verification" flag after first successful Firestore publish)
+  - Local offline unit tests for hash mismatch rejection and staging swap logic
+  - `docs/10-cloud-ota-and-rollback.md` (Part 3: End-to-end OTA verification, watchdog safety, and recovery)
+- **Single Focused Validation**:
+  - Bump `FIRMWARE_VERSION` (e.g., `1.0.0` → `1.1.0`), publish the release, set `target_firmware_version` in Firestore while the Feather is on wall power only, and watch it download, verify SHA-256, reboot, and report `1.1.0` in Firestore—plus test that a deliberately corrupted hash is safely rejected without rebooting.
+- **Target Commit**: `feat(firmware): add SHA-256 verified pull-based OTA updater`
+
+#### Step 19: Fleet & Firmware Rollout Panel in Web Dashboard
+- **Status**: `[ ] Pending`
+- **Goal**: Add a clean **Fleet & Firmware** tab to the lightweight web dashboard showing every sensor's current vs. target `firmware_version`, online/stale status, last OTA result (`up_to_date`, `updating`, `rolled_back`), and one-click version promotion per device or across all rooms.
+- **Deliverables**:
+  - Dashboard API endpoints to list `firmware_releases` and trigger per-device or fleet-wide `target_firmware_version` rollouts
+  - `web/` Fleet & Firmware UI panel with version badges, rollout status, and rollback warning indicators
+  - `docs/10-cloud-ota-and-rollback.md` (Part 4: Managing staged rollouts from the web dashboard)
+- **Single Focused Validation**:
+  - From the live web dashboard (with the sensor sealed in its 3D-printed enclosure on wall power), trigger a firmware version promotion and watch the dashboard transition from `updating` → `up_to_date` with the new `firmware_version` live.
+- **Target Commit**: `feat(web): add fleet firmware status and one-click OTA rollout UI`
+
+---
+
+### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — Backlog)*
+
+Planned enhancements once Phases 2 and 3 are live (will be broken into atomic steps when ready):
+- **Multi-Room Sensor Network**: Print additional enclosures for bedroom / office / kitchen, tighten `authorized_devices/{uid}` in `firestore.rules` to bind each Auth UID to a specific `device_id`, add a `compare_rooms` MCP tool, and support lower-cost `SCD-40`-only satellite nodes.
+- **Proactive Alerts & Outdoor AQI Context**: Add a Firestore `onDocumentCreated` Cloud Function for push notifications (CO₂ > 1,200 ppm, PM₂.₅ > 35 µg/m³, or offline > 20 min) with cooldowns, plus an outdoor AQI + weather MCP tool (Open-Meteo / AirNow) so AI assistants know whether opening a window will actually help.
+- **Smart-Home Actuation & Extra Sensors**: Optional webhook/Matter/Home Assistant trigger for a HEPA purifier smart plug on PM₂.₅ spikes, and a future STEMMA QT `SGP41` (VOC + NOₓ) breakout for cooking fumes and off-gassing.
