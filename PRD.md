@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary & Vision
 
-This project builds an end-to-end, DIY smart indoor air quality (IAQ) monitoring system that bridges physical hardware with modern conversational AI assistants (**Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client).
+This project builds an end-to-end, DIY smart indoor air quality (IAQ) monitoring system that bridges physical hardware with modern conversational AI assistants (**Gemini**, **Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client).
 
 Using plug-and-play Adafruit hardware (**ESP32-S3 Feather**, **SCD-40 CO2/Temp/Humidity sensor**, and **PMSA003I laser particulate matter sensor** connected via solderless **STEMMA QT / I2C** cables), the device measures indoor air quality every **5 minutes** and publishes rich sensor telemetry directly to **Google Cloud Firestore**. A remote **Model Context Protocol (MCP) server** running on **Firebase Cloud Functions (2nd Gen / Cloud Run)** and secured with **WorkOS AuthKit (OAuth 2.1 + API Key support)** exposes these readings to AI assistants so the user can ask natural-language questions about their air quality, trends, and health/ventilation recommendations.
 
@@ -18,7 +18,7 @@ Because this repository is **public on GitHub** and serves as a **learning-by-do
 - **Solderless Hardware Assembly**: Daisy-chain the ESP32-S3 Feather, SCD-40, and PMSA003I via STEMMA QT cables and power via USB-A to USB-C.
 - **Accessible Firmware**: Run **CircuitPython** on the ESP32-S3 so code can be edited directly via USB drive (`CIRCUITPY`) with readable Python and clear NeoPixel visual status feedback.
 - **Direct-to-Firestore Telemetry**: Authenticate the ESP32-S3 with Firebase Auth (REST API) and write rich 5-minute interval readings directly to Firestore without intermediate servers.
-- **AI-Ready Remote MCP Server**: Host a TypeScript MCP Server on Firebase Cloud Functions (2nd Gen) supporting Streamable HTTP/SSE so cloud AI assistants (ChatGPT, Claude, Grok) and desktop/CLI clients can query live and historical air quality.
+- **AI-Ready Remote MCP Server**: Host a TypeScript MCP Server on Firebase Cloud Functions (2nd Gen) supporting Streamable HTTP (`/mcp`) so cloud AI assistants (Gemini, ChatGPT, Claude, Grok) and desktop/CLI clients can query live and historical air quality.
 - **Enterprise-Grade Personal Auth**: Protect the MCP server with **WorkOS AuthKit (OAuth 2.1)** and an explicit user allowlist (plus fallback WorkOS API key verification for CLI tools) so only the owner can read their home sensor data.
 - **Public-Repo Safety**: Enforce strict secret isolation using `.gitignore`, `.example` templates, Firebase Secret Manager, pre-commit hooks, and a GitHub Actions secret scanner (Gitleaks).
 - **Rich Educational Markdown Docs**: Provide step-by-step guides in `docs/` that explain hardware, cloud, auth, and MCP concepts clearly for someone learning by doing.
@@ -35,7 +35,7 @@ Because this repository is **public on GitHub** and serves as a **learning-by-do
 
 | Component | Part / Model | Role & Interface | I2C Address |
 | :--- | :--- | :--- | :--- |
-| **Microcontroller** | Adafruit ESP32-S3 Feather | Wi-Fi 2.4GHz microcontroller running CircuitPython; hosts onboardSTEMMA QT port and NeoPixel status LED | Host (Controller) |
+| **Microcontroller** | Adafruit ESP32-S3 Feather | Wi-Fi 2.4GHz microcontroller running CircuitPython; hosts onboard STEMMA QT port and NeoPixel status LED | Host (Controller) |
 | **CO2 Sensor** | Adafruit SCD-40 (Sensirion) | Photoacoustic true $\text{CO}_2$ sensor (400–2000+ ppm) + ambient temperature & relative humidity | `0x62` |
 | **Particulate Sensor** | Adafruit PMSA003I (Plantower) | Laser scattering particulate sensor measuring $\text{PM}_{1.0}$, $\text{PM}_{2.5}$, $\text{PM}_{10.0}$ concentration ($\mu\text{g/m}^3$) and particle counts by size | `0x12` |
 | **Interconnects** | 2x STEMMA QT / Qwiic Cables (4-pin JST SH) | Daisy-chains 3.3V power (`VCC`), Ground (`GND`), Clock (`SCL`), and Data (`SDA`) between board and sensors | N/A |
@@ -77,6 +77,7 @@ flowchart TD
     end
 
     subgraph AIClients ["AI Assistants (MCP Clients)"]
+        GEMINI["Gemini"]
         CLAUDE["Claude (Web / Desktop)"]
         CHATGPT["ChatGPT"]
         GROK["Grok"]
@@ -87,7 +88,7 @@ flowchart TD
     FS <-->|"Admin SDK Read Queries"| MCP
     SM -.->|"Injects Runtime Secrets"| MCP
     AIClients <-->|"OAuth 2.1 Flow / Bearer Token"| WOS
-    AIClients <-->|"MCP Streamable HTTP / SSE"| MCP
+    AIClients <-->|"MCP Streamable HTTP (/mcp)"| MCP
     MCP <-->|"Verify JWT / API Key + Check Allowlist"| WOS
 ```
 
@@ -97,11 +98,13 @@ flowchart TD
 
 ### 5.1 Firmware Specification (ESP32-S3 / CircuitPython)
 
-- **Runtime Environment**: CircuitPython 9.x+ for Adafruit Feather ESP32-S3.
-- **Required CircuitPython Libraries** (`lib/` on `CIRCUITPY`):
+- **Runtime Environment**: CircuitPython 9.x+ (validated on CircuitPython 10.3.2) for Adafruit Feather ESP32-S3.
+- **Required CircuitPython Libraries** (`lib/` on `CIRCUITPY`, tracked in `firmware/requirements-circuitpython.txt`):
   - `adafruit_scd4x` (SCD-40 driver)
   - `adafruit_pm25` (PMSA003I I2C driver)
+  - `adafruit_bus_device` (I2C bus helper used by both sensor drivers)
   - `adafruit_requests` & `adafruit_connection_manager` (HTTPS REST requests)
+  - `adafruit_ntp` (UTC clock sync so timestamps pass `firestore.rules`)
   - `neopixel` (Onboard status LED)
 - **Configuration Isolation (`settings.toml`)**:
   - CircuitPython natively reads environment variables from `settings.toml` via `os.getenv()`.
@@ -119,7 +122,7 @@ flowchart TD
   3. **Read Sensors**:
      - Query SCD-40 for `CO2` (ppm), `temperature` (°C and converted °F), and `relative_humidity` (%).
      - Query PMSA003I for standard and environmental $\text{PM}_{1.0}$, $\text{PM}_{2.5}$, $\text{PM}_{10.0}$ ($\mu\text{g/m}^3$), plus raw particle counts per $0.1\text{ L}$ of air ($>0.3\mu\text{m}$, $>0.5\mu\text{m}$, $>1.0\mu\text{m}$, $>2.5\mu\text{m}$, $>5.0\mu\text{m}$, $>10.0\mu\text{m}$).
-  4. **Compute AQI**: Calculate the US EPA $\text{PM}_{2.5}$ and $\text{PM}_{10}$ Air Quality Index (0–500 scale) and category (`"Good"`, `"Moderate"`, `"Unhealthy for Sensitive Groups"`, etc.) on-device so every document has an immediate AQI score.
+  4. **Compute AQI**: Calculate the revised May 2024 US EPA $\text{PM}_{2.5}$ and $\text{PM}_{10}$ Air Quality Index (0–500 scale) and category (`"Good"`, `"Moderate"`, `"Unhealthy for Sensitive Groups"`, etc.) on-device so every document has an immediate AQI score.
   5. **Publish to Firestore**:
      - `POST` a new document to `readings` collection via Firestore REST API.
      - `PATCH` the `devices/{SENSOR_DEVICE_ID}` document with `last_seen_at` and latest snapshot metrics.
@@ -188,7 +191,7 @@ Document path: `devices/{device_id}`:
 
 #### Firestore Security Rules (`firestore.rules`)
 - **Zero Public Access**: Unauthenticated requests cannot read or write any document.
-- **Sensor Write-Only Access**: The dedicated Firebase Auth `device_uid` (configured by the owner) is only allowed to `create` documents in `readings` (with schema/type validation ensuring valid numeric fields) and `write` its own document in `devices/{device_id}`.
+- **Sensor Write-Only Access**: Authorized sensor accounts (registered in Firestore at `authorized_devices/{uid}` so no UID is ever committed to `firestore.rules`) are only allowed to `create` documents in `readings` (with schema/type validation and fresh-timestamp checks) and `write` their own document in `devices/{device_id}`.
 - **MCP Server Read Access**: The Firebase Cloud Functions MCP server reads Firestore via `firebase-admin` (Admin SDK), bypassing client rules while enforcing WorkOS authentication at the MCP gateway layer.
 
 ---
@@ -197,11 +200,11 @@ Document path: `devices/{device_id}`:
 
 - **Platform & Runtime**: Firebase Cloud Functions (2nd Gen, backed by Cloud Run) using **Node.js 22 + TypeScript**, `@modelcontextprotocol/sdk`, `firebase-admin`, and `@workos-inc/node`.
 - **Transport Protocol**:
-  - Supports **MCP Streamable HTTP** (`/mcp`) and **HTTP + SSE** (`/sse` and `/messages`) for full compatibility across **Claude**, **ChatGPT**, **Grok**, and desktop/CLI MCP clients.
+  - Supports stateless **MCP Streamable HTTP** (`/mcp`, with `enableJsonResponse: true`) for full compatibility across **Gemini**, **Claude**, **ChatGPT**, **Grok**, and desktop/CLI MCP clients on serverless Cloud Run.
 - **WorkOS Authentication & Authorization Flow**:
-  1. **OAuth 2.1 Discovery & Dynamic Auth**: Exposes standard OAuth metadata endpoints (`/.well-known/oauth-authorization-server` / `/.well-known/oauth-protected-resource`) delegating user sign-in to **WorkOS AuthKit**.
-  2. **Strict Owner Allowlist**: After WorkOS authenticates a user token, the middleware checks the user's WorkOS `user.id` or verified `email` against the `ALLOWED_WORKOS_EMAILS` / `ALLOWED_WORKOS_USER_IDS` secret stored in **Google Cloud Secret Manager**. Any non-allowlisted user receives `403 Forbidden`.
-  3. **API Key Fallback**: Also accepts a WorkOS API Key / static secret Bearer token header for MCP clients or local testing tools that prefer Bearer header configuration over interactive OAuth redirects.
+  1. **OAuth 2.1 Discovery & Dynamic Auth**: Exposes standard OAuth metadata endpoints (`/.well-known/oauth-protected-resource` per RFC 9728 and `/.well-known/oauth-authorization-server` proxy for legacy clients) delegating user sign-in to **WorkOS AuthKit**.
+  2. **Strict Owner Allowlist**: After WorkOS authenticates a user token, the middleware resolves the authoritative WorkOS user record, confirms `emailVerified === true`, and checks the user's verified `email` or WorkOS `user_...` ID against `ALLOWED_USER_EMAILS` stored in **Google Cloud Secret Manager**. Any non-allowlisted user receives `403 Forbidden`.
+  3. **Bearer Token Fallback**: Also accepts a high-entropy static `MCP_BEARER_FALLBACK_SECRET` Bearer token header (verified via SHA-256 + timing-safe comparison) for `curl` smoke tests, CI checks, or CLI MCP clients that prefer static header configuration over interactive OAuth redirects.
 
 #### MCP Tools Exposed to AI Assistants
 
@@ -209,7 +212,7 @@ Document path: `devices/{device_id}`:
 | :--- | :--- | :--- |
 | `get_latest_reading` | `device_id?: string`, `location?: string` | Fetches the most recent sensor reading and current `devices` status, including how many minutes ago the sensor reported, current $\text{CO}_2$, Temp, Humidity, $\text{PM}_{2.5}$, AQI, and qualitative health context. |
 | `get_readings_history` | `hours?: number` (default `24`, max `168`), `start_time?: string`, `end_time?: string`, `location?: string`, `limit?: number` (default `100`) | Queries historical time-series readings from Firestore within the requested window. Supports downsampling if querying multi-day ranges so the LLM context window isn't flooded. |
-| `get_air_quality_summary` | `period: "1h" \| "6h" \| "24h" \| "7d" \| "30d"`, `location?: string` | Computes statistical aggregations (min, max, average, 95th percentile) for $\text{CO}_2$, $\text{PM}_{2.5}$, $\text{PM}_{10}$, Temp, and Humidity over the period, plus automatically detects notable spikes (e.g., $\text{CO}_2 > 1000\text{ ppm}$ or $\text{PM}_{2.5} > 12\ \mu\text{g/m}^3$) with timestamps. |
+| `get_air_quality_summary` | `period: "1h" \| "6h" \| "24h" \| "7d" \| "30d"`, `location?: string` | Computes statistical aggregations (min, max, average, 95th percentile) for $\text{CO}_2$, $\text{PM}_{2.5}$, $\text{PM}_{10}$, Temp, and Humidity over the period, plus automatically detects notable spikes (e.g., $\text{CO}_2 > 1000\text{ ppm}$ or $\text{PM}_{2.5} > 9.0\ \mu\text{g/m}^3$) with timestamps. |
 | `get_sensor_status` | `device_id?: string` | Checks all registered sensors in `devices`, verifies whether `last_seen_at` is within the expected 5-minute window (or flags if offline/stale $>15\text{ min}$), and reports sensor metadata. |
 
 #### MCP Prompts & Resources Exposed
@@ -240,7 +243,7 @@ Because this repository is public, **no personal identifiers, Wi-Fi names, email
      - `.firebaserc.example`
      - `functions/.env.example`
 3. **Cloud Secret Manager for Production**:
-   - The deployed MCP server uses `defineSecret()` from `firebase-functions/params` (backed by Google Cloud Secret Manager) for `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `MCP_BEARER_FALLBACK_SECRET`, and `ALLOWED_USER_EMAILS`. Nothing sensitive sits in source code or `firebase.json`.
+   - The deployed MCP server uses `defineSecret()` from `firebase-functions/params` (backed by Google Cloud Secret Manager) for `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_AUTHKIT_DOMAIN`, `ALLOWED_USER_EMAILS`, and `MCP_BEARER_FALLBACK_SECRET`. Nothing sensitive sits in source code or `firebase.json`.
 4. **Automated Pre-Commit & CI Secret Scanning**:
    - Include a `.gitleaks.toml` configuration and a GitHub Actions workflow (`.github/workflows/secret-scan.yml`) + local pre-commit check script (`scripts/check-secrets.sh`) that scans for accidental Wi-Fi credentials, API keys, emails, or project IDs before they can reach GitHub.
 
@@ -253,6 +256,7 @@ The repository will be organized cleanly into hardware firmware, Firebase/MCP ba
 ```text
 mhusk-custom-air-sensor/
 ├── PRD.md                                  # This Product Requirements Document
+├── IMPLEMENTATION_PLAN.md                  # 11-step build, validation & commit tracker
 ├── README.md                               # Project overview, architecture diagram, and quickstart links
 ├── .gitignore                              # Strict ignore rules for CircuitPython, Firebase, Node, & secrets
 ├── .gitleaks.toml                          # Secret scanning rules for public repo protection
@@ -268,8 +272,9 @@ mhusk-custom-air-sensor/
 │   ├── 02-circuitpython-firmware.md        # Flashing CircuitPython, libraries, settings.toml, & how the loop works
 │   ├── 03-firebase-and-firestore.md        # Setting up Firebase Auth, Firestore collections, indexes, & security rules
 │   ├── 04-workos-and-mcp-server.md         # What MCP is, how WorkOS OAuth 2.1 works, and deploying Cloud Functions
-│   ├── 05-connecting-ai-clients.md         # Step-by-step instructions to connect Claude, ChatGPT, and Grok
-│   └── 06-security-and-privacy-checklist.md# How to keep your public GitHub repo 100% free of personal data
+│   ├── 05-connecting-ai-clients.md         # Step-by-step instructions to connect Gemini, Claude, ChatGPT, and Grok
+│   ├── 06-security-and-privacy-checklist.md# How to keep your public GitHub repo 100% free of personal data
+│   └── 07-understanding-your-readings.md   # What each sensor metric means, health thresholds, & how to improve them
 ├── firmware/                               # Code that gets copied to the ESP32-S3 CIRCUITPY USB drive
 │   ├── code.py                             # Main CircuitPython sensor & Firestore publishing loop
 │   ├── aqi.py                              # US EPA PM2.5 / PM10 AQI calculation module
@@ -283,15 +288,21 @@ mhusk-custom-air-sensor/
 │   └── src/
 │       ├── index.ts                        # Cloud Function HTTP entry point & OAuth / MCP routing
 │       ├── auth/
-│       │   └── workos.ts                   # WorkOS AuthKit OAuth 2.1 + allowlist + API key verification
+│       │   └── workos.ts                   # WorkOS AuthKit OAuth 2.1 + allowlist + Bearer fallback verification
 │       ├── mcp/
-│       │   ├── server.ts                   # MCP Server registration
+│       │   ├── server.ts                   # MCP Server registration & stateless Streamable HTTP handler
 │       │   ├── tools.ts                    # get_latest_reading, get_readings_history, get_air_quality_summary, get_sensor_status
 │       │   └── prompts.ts                  # Built-in IAQ health prompts & threshold resources
+│       ├── scripts/
+│       │   ├── localMcpServer.ts           # Localhost-only MCP dev server for curl / MCP Inspector
+│       │   ├── verifyAuth.ts               # Offline WorkOS OAuth 2.1, JWKS, and allowlist verification suite
+│       │   ├── verifyFirestore.ts          # Offline & live Firestore query/aggregation verification script
+│       │   └── verifyMcp.ts                # Offline & live MCP JSON-RPC protocol verification script
 │       └── services/
 │           └── firestore.ts                # Typed Firestore queries & statistical summary calculators
 └── scripts/
-    └── check-secrets.sh                    # Local helper script to verify no personal data is staged in git
+    ├── check-secrets.sh                    # Local helper script to verify no personal data is staged in git
+    └── test_firmware_local.py              # Mac offline/live test harness for EPA AQI math & Firestore REST client
 ```
 
 ### Pedagogical Style of `docs/` ("Learn by Doing")

@@ -14,7 +14,7 @@ When you build an IoT + Cloud + AI project in a **public GitHub repository**, se
 2. **The Cloud CLI Configuration (`.firebaserc` and `*service-account*.json`)**:
    - When you run `firebase init` or `firebase use`, the Firebase CLI writes your real Google Cloud / Firebase project ID into `.firebaserc`. While project IDs aren't strictly private keys, keeping your real project ID and device email out of a public repo prevents strangers from probing your endpoints.
 3. **The Cloud Function & Authentication Layer (`functions/.env*` and WorkOS Secrets)**:
-   - Your MCP server verifies users with WorkOS AuthKit (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`) and restricts access to your personal email (`ALLOWED_USER_EMAILS`).
+   - Your MCP server verifies users with WorkOS AuthKit (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_AUTHKIT_DOMAIN`), restricts access to your personal allowlist (`ALLOWED_USER_EMAILS`), and supports a separate high-entropy static Bearer fallback (`MCP_BEARER_FALLBACK_SECRET`) for CLI/scripted tests. All 5 secrets live in **Google Cloud Secret Manager** in production.
 
 ### Our 4-Layer Defense-in-Depth Strategy
 
@@ -49,7 +49,7 @@ You should **never** edit `.example` files with real credentials. Instead, whene
 | :--- | :--- | :--- |
 | `.firebaserc.example` | `.firebaserc` | Used by the Firebase CLI on your Mac to know which Firebase project to deploy to. |
 | `firmware/settings.toml.example` | `firmware/settings.toml` & `/Volumes/CIRCUITPY/settings.toml` | Read by CircuitPython (`os.getenv()`) on the ESP32-S3 (and locally during Step 4 validation). |
-| `functions/.env.example` | `functions/.env.local` | Used only by the local Firebase Functions emulator. Production uses **Google Cloud Secret Manager**. |
+| `functions/.env.example` | `functions/.env.local` | Used only for local MCP testing (`npm --prefix functions run mcp:local` or Firebase emulators). Production injects all 5 secrets via **Google Cloud Secret Manager**. |
 
 ---
 

@@ -1,6 +1,6 @@
 # Custom ESP32-S3 Air Quality Sensor + Firebase + Remote MCP Server
 
-An end-to-end, DIY smart indoor air quality (IAQ) monitoring system that connects physical environmental sensors (**CO<sub>2</sub>**, **PM<sub>1.0</sub> / PM<sub>2.5</sub> / PM<sub>10</sub>**, **Temperature**, and **Humidity**) to **Google Cloud Firestore** and exposes live & historical telemetry to modern AI assistants (**Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client) through a remote **Model Context Protocol (MCP)** server secured with **WorkOS AuthKit**.
+An end-to-end, DIY smart indoor air quality (IAQ) monitoring system that connects physical environmental sensors (**CO<sub>2</sub>**, **PM<sub>1.0</sub> / PM<sub>2.5</sub> / PM<sub>10</sub>**, **Temperature**, and **Humidity**) to **Google Cloud Firestore** and exposes live & historical telemetry to modern AI assistants (**Gemini**, **Claude**, **ChatGPT**, **Grok**, and any MCP-compatible client) through a remote **Model Context Protocol (MCP)** server secured with **WorkOS AuthKit**.
 
 ---
 
@@ -51,6 +51,7 @@ flowchart TD
     end
 
     subgraph AIClients ["AI Assistants (MCP Clients)"]
+        GEMINI["Gemini"]
         CLAUDE["Claude"]
         CHATGPT["ChatGPT"]
         GROK["Grok"]
@@ -61,7 +62,7 @@ flowchart TD
     FS <-->|"Admin SDK Queries"| MCP
     SM -.->|"Runtime Secrets"| MCP
     AIClients <-->|"OAuth 2.1 Flow / Bearer Token"| WOS
-    AIClients <-->|"MCP Streamable HTTP / SSE"| MCP
+    AIClients <-->|"MCP Streamable HTTP (/mcp)"| MCP
     MCP <-->|"Verify JWT / API Key + Check Allowlist"| WOS
 ```
 
@@ -75,8 +76,9 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 2. [**`docs/02-circuitpython-firmware.md`**](./docs/02-circuitpython-firmware.md) — US EPA AQI math, Firebase REST authentication from a microcontroller, NeoPixel status codes, and the 5-minute sensor loop.
 3. [**`docs/03-firebase-and-firestore.md`**](./docs/03-firebase-and-firestore.md) — Provisioning Firebase Auth, Cloud Firestore time-series collections, composite indexes, and hardened write-only security rules.
 4. [**`docs/04-workos-and-mcp-server.md`**](./docs/04-workos-and-mcp-server.md) — Building the TypeScript Remote MCP Server on Firebase Cloud Functions (2nd Gen) and protecting it with WorkOS AuthKit OAuth 2.1 + an owner allowlist.
-5. [**`docs/05-connecting-ai-clients.md`**](./docs/05-connecting-ai-clients.md) — Connecting Claude, ChatGPT, and Grok to query your indoor air quality in natural language.
+5. [**`docs/05-connecting-ai-clients.md`**](./docs/05-connecting-ai-clients.md) — Connecting Gemini, Claude, ChatGPT, and Grok to query your indoor air quality in natural language.
 6. [**`docs/06-security-and-privacy-checklist.md`**](./docs/06-security-and-privacy-checklist.md) — The 4-layer public-repo security strategy keeping Wi-Fi credentials, emails, project IDs, and API keys out of Git.
+7. [**`docs/07-understanding-your-readings.md`**](./docs/07-understanding-your-readings.md) — Plain-English guide to every sensor metric (CO<sub>2</sub>, PM<sub>1.0</sub>/PM<sub>2.5</sub>/PM<sub>10</sub>, US EPA AQI, humidity, temperature), health thresholds, and how to improve them.
 
 ---
 
@@ -84,6 +86,25 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 
 - [**`PRD.md`**](./PRD.md) — Complete Product Requirements Document, data schemas, and component specifications.
 - [**`IMPLEMENTATION_PLAN.md`**](./IMPLEMENTATION_PLAN.md) — Our 11-step commit & validation roadmap tracking each atomic build step.
+
+---
+
+## Built-In Verification Scripts
+
+Every layer can be validated independently before deploying or flashing hardware:
+
+```bash
+# 1. Secret & privacy guardrails (always run before committing)
+./scripts/check-secrets.sh
+
+# 2. Firmware EPA AQI math & Firestore REST encoding (add --publish for a live test write)
+python3 scripts/test_firmware_local.py
+
+# 3. Cloud Functions TypeScript build + Firestore stats, MCP protocol, and WorkOS OAuth checks
+npm --prefix functions run verify:firestore
+npm --prefix functions run verify:mcp
+npm --prefix functions run verify:auth
+```
 
 ---
 
@@ -98,4 +119,4 @@ Before committing any changes, run the local secret scanner:
 All personal configuration lives in gitignored files copied from safe `.example` templates:
 - `firmware/settings.toml.example` → `firmware/settings.toml` (on your local machine / `CIRCUITPY` drive)
 - `.firebaserc.example` → `.firebaserc`
-- `functions/.env.example` → `functions/.env.local` (for local testing; production uses Google Cloud Secret Manager)
+- `functions/.env.example` → `functions/.env.local` (for local testing via `npm --prefix functions run mcp:local`; production injects all 5 secrets via Google Cloud Secret Manager)

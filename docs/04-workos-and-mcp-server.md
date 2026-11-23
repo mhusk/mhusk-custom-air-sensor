@@ -152,7 +152,7 @@ Finally, run the public-repo secret check:
 ## 5. Part 2 (Step 6): Core MCP Server Tools, Prompts & Resources
 
 ### Concept Briefing: How the Model Context Protocol (MCP) Works
-The **Model Context Protocol (MCP)** is an open JSON-RPC 2.0 protocol that standardizes how AI assistants (Claude, ChatGPT, Grok, and local developer tools) discover and invoke external capabilities. An MCP server exposes three core primitives:
+The **Model Context Protocol (MCP)** is an open JSON-RPC 2.0 protocol that standardizes how AI assistants (Gemini, Claude, ChatGPT, Grok, and local developer tools) discover and invoke external capabilities. An MCP server exposes three core primitives:
 
 | MCP Primitive | Who Controls It | What It Does in This Project |
 | :--- | :--- | :--- |
@@ -253,13 +253,13 @@ You can also inspect tools, prompts, and resources visually with the official MC
 ## 6. Part 3 (Step 7): WorkOS AuthKit OAuth 2.1, Owner Allowlist & Cloud Functions Deployment
 
 ### Concept Briefing: How OAuth 2.1 Protects a Remote MCP Server
-In Part 2, our MCP server ran locally on `127.0.0.1`. Once deployed to **Firebase Cloud Functions (2nd Gen / Cloud Run)**, the HTTPS endpoint must be reachable from the internet so cloud AI assistants (**Claude**, **ChatGPT**, **Grok**) can talk to it—yet **only you** should be able to query your home's air quality data.
+In Part 2, our MCP server ran locally on `127.0.0.1`. Once deployed to **Firebase Cloud Functions (2nd Gen / Cloud Run)**, the HTTPS endpoint must be reachable from the internet so cloud AI assistants (**Gemini**, **Claude**, **ChatGPT**, **Grok**) can talk to it—yet **only you** should be able to query your home's air quality data.
 
 Under the **MCP Authorization Specification (OAuth 2.1 + RFC 9728)**, your Cloud Function acts as an **OAuth Resource Server** while **WorkOS AuthKit** acts as the **OAuth Authorization Server**:
 
 ```mermaid
 sequenceDiagram
-    participant AI as AI Assistant (Claude / ChatGPT / Grok)
+    participant AI as AI Assistant (Gemini / Claude / ChatGPT / Grok)
     participant CF as Cloud Function MCP Server (Resource Server)
     participant WOS as WorkOS AuthKit (Authorization Server)
     participant FS as Cloud Firestore (Admin SDK)
@@ -379,7 +379,7 @@ Replace `<CLOUD_RUN_BASE_URL>` with your deployed `https://mcp-...a.run.app` URL
      -H "Accept: application/json, text/event-stream" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
    ```
-   Confirm HTTP `401` and a `WWW-Authenticate: Bearer realm="custom-air-sensor-mcp", resource_metadata="https://.../\.well-known/oauth-protected-resource"` response header.
+   Confirm HTTP `401` and a `WWW-Authenticate: Bearer realm="custom-air-sensor-mcp", resource_metadata="https://.../.well-known/oauth-protected-resource"` response header.
 
 2. **Confirm OAuth 2.1 Protected Resource Metadata discovery returns `200 OK`**:
    ```bash

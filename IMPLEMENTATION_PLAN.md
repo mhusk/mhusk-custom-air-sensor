@@ -33,7 +33,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 8**: Connecting AI Assistants (Gemini, Claude, ChatGPT, Grok)
 - [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [x] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
-- [ ] **Step 11**: Live End-to-End AI Query & Final Docs Polish
+- [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
 
 ---
 
@@ -154,7 +154,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ### Step 9: Physical Hardware Assembly & CircuitPython Flashing
 - **Status**: `[x] Completed`
-- **Goal**: Assemble the Adafruit ESP32-S3 Feather, SCD-40, and PMSA003I via STEMMA QT cables, flash CircuitPython 9.x, install required libraries onto `CIRCUITPY/lib`, and verify the I2C bus sees both sensors.
+- **Goal**: Assemble the Adafruit ESP32-S3 Feather, SCD-40, and PMSA003I via STEMMA QT cables, flash CircuitPython 9.x/10.x, install required libraries onto `CIRCUITPY/lib`, and verify the I2C bus sees both sensors.
 - **Deliverables**:
   - `firmware/requirements-circuitpython.txt`
   - `docs/01-hardware-and-i2c.md`
@@ -177,10 +177,11 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 11: Live End-to-End AI Query & Final Docs Polish
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Perform a full end-to-end validation from physical sensors -> ESP32-S3 -> Firestore -> Cloud Function MCP Server -> AI Assistant, and finalize any remaining "Good to Know" notes across all docs.
 - **Deliverables**:
   - Final updates to `README.md`, `PRD.md`, `IMPLEMENTATION_PLAN.md`, and `docs/01`–`06`
+  - `docs/07-understanding-your-readings.md` (human-readable reference guide covering every sensor metric, health thresholds, diagnostic patterns, and practical ways to improve indoor air quality)
 - **Single Focused Validation**:
-  - Ask Claude/ChatGPT/Grok: *"What is the current air quality in my room right now, and how do my CO2 and PM2.5 levels look?"* and confirm the response matches the live hardware telemetry.
+  - Validated live end-to-end in **Gemini** and **Grok**: *"What is the current air quality in my room right now, and how do my CO2 and PM2.5 levels look?"* confirmed fresh hardware telemetry matching the live ESP32-S3 sensor.
 - **Target Commit**: `docs: finalize end-to-end verification notes and complete implementation plan`

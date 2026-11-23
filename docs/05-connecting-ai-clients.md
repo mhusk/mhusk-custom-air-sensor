@@ -8,7 +8,7 @@
 
 ### What Happens When You Ask an AI Assistant *"How Is the Air in My Room?"*
 
-Once you connect a remote MCP server to Claude, ChatGPT, or Grok, the AI assistant does **not** receive your Firestore database credentials or hardcode any custom REST API calls. Instead, it follows the open **Model Context Protocol (MCP)** over Streamable HTTP (`/mcp`) in two phases:
+Once you connect a remote MCP server to Gemini, Claude, ChatGPT, or Grok, the AI assistant does **not** receive your Firestore database credentials or hardcode any custom REST API calls. Instead, it follows the open **Model Context Protocol (MCP)** over Streamable HTTP (`/mcp`) in two phases:
 
 1. **One-Time OAuth 2.1 Handshake (Authentication & Authorization)**:
    - The AI client sends an initial probe to your `/mcp` endpoint.
@@ -22,7 +22,7 @@ Once you connect a remote MCP server to Claude, ChatGPT, or Grok, the AI assista
 ```mermaid
 sequenceDiagram
     participant User as You
-    participant AI as AI Assistant (Claude / ChatGPT / Grok)
+    participant AI as AI Assistant (Gemini / Claude / ChatGPT / Grok)
     participant WOS as WorkOS AuthKit (OAuth 2.1 + DCR)
     participant MCP as Cloud Function MCP Server (/mcp)
     participant FS as Cloud Firestore (Admin SDK)
@@ -201,7 +201,7 @@ npx @modelcontextprotocol/inspector
 
 ## 4. Single Focused Validation Checkpoint (Step 8)
 
-Once your chosen AI assistant (Claude, ChatGPT, or Grok) shows **Home Air Quality Sensor** as connected, start a fresh conversation and run these prompts:
+Once your chosen AI assistant (Gemini, Claude, ChatGPT, or Grok) shows **Home Air Quality Sensor** as connected, start a fresh conversation and run these prompts:
 
 ### Test Prompt 1 — Latest Reading (`get_latest_reading`)
 > *"What is the latest reading from my air quality sensor?"*
@@ -261,3 +261,29 @@ Before committing Step 8, verify no personal URLs, WorkOS domains, emails, or to
   ```
 - **Client UI Menus Evolve Quickly**:
   Gemini, Claude, ChatGPT, and Grok actively iterate on their MCP settings UI (for example, renaming *Integrations* to *Connectors* or *Connected Apps*). If a menu label moves slightly, look under **Settings** for **Connected Apps**, **Connectors**, **Apps**, or **MCP**, and always choose **Remote / Custom MCP Server (Streamable HTTP)** with **OAuth** authentication.
+
+---
+
+## 6. End-to-End Live Hardware Validation (Step 11)
+
+Once your physical ESP32-S3 + SCD-40 + PMSA003I sensor node is running [`firmware/code.py`](../firmware/code.py) from Step 10 and publishing real readings every 5 minutes, complete the full end-to-end validation from physical sensors → Cloud Firestore → Cloud Function MCP Server → AI Assistant:
+
+### Live End-to-End Prompt
+Ask your connected AI assistant (Gemini, Claude, ChatGPT, or Grok):
+
+> *"What is the current air quality in my room right now, and how do my CO2 and PM2.5 levels look?"*
+
+**What to verify (comparing Step 8 vs. Step 11):**
+1. **Fresh, Live Hardware Telemetry**: Unlike Step 8 (which queried the older synthetic reading from Step 4 and reported `is_stale: true`), the response now reports a reading from **within the last 5 minutes** (`is_stale: false`, sensor status `online`).
+2. **Real Room Values**: CO<sub>2</sub> (ppm), PM<sub>1.0</sub>/PM<sub>2.5</sub>/PM<sub>10</sub> (&mu;g/m<sup>3</sup>), revised May 2024 US EPA AQI & category, temperature, and humidity match your live room telemetry in Firestore (and the serial console, if still connected).
+3. **Actionable Context**: The assistant interprets CO<sub>2</sub> cognitive/ventilation impact and PM<sub>2.5</sub> particulate levels using the embedded reference thresholds (see [`docs/07-understanding-your-readings.md`](./07-understanding-your-readings.md) for the full human-readable guide to every metric and how to improve them).
+
+> [!TIP]
+> **Validated Live End-to-End**: Confirmed working across **Gemini** and **Grok** against live 5-minute hardware readings flowing from the Adafruit ESP32-S3 + SCD-40 + PMSA003I → Cloud Firestore → Cloud Functions (2nd Gen) MCP Server → WorkOS AuthKit OAuth 2.1.
+
+### Optional Bonus Prompt — Multi-Hour / Overnight Trend Analysis
+Once the sensor has been running continuously for a few hours (or overnight on USB wall power), try:
+
+> *"Summarize my indoor air quality over the last 24 hours—when did CO2 or PM2.5 peak, and should I ventilate or run an air purifier?"*
+
+This exercises `get_air_quality_summary` across real time-series data, surfacing server-computed `min`/`max`/`avg`/`p95` stats and any grouped spike episodes (`CO2 > 1,000 ppm` or `PM2.5 > 9.0 µg/m³`).
