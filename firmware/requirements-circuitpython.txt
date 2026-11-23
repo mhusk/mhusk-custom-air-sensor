@@ -1,0 +1,33 @@
+# CircuitPython libraries required on CIRCUITPY/lib for the ESP32-S3 air sensor.
+#
+# Recommended installation (with your ESP32-S3 plugged in and CIRCUITPY mounted):
+#   uvx --python 3.12 circup install -r firmware/requirements-circuitpython.txt
+#   (or: pip3 install --user circup && circup install -r firmware/requirements-circuitpython.txt)
+#
+# Manual installation alternative:
+#   Download the Adafruit CircuitPython Library Bundle matching your installed
+#   CircuitPython major version (e.g., 9.x or 10.x) from:
+#   https://circuitpython.org/libraries
+#   and copy each entry below (file or folder) from the bundle's lib/ into
+#   CIRCUITPY/lib/.
+
+# Sensirion SCD-40 CO2, temperature, and relative humidity sensor (I2C 0x62)
+adafruit_scd4x
+
+# Plantower PMSA003I laser particulate matter sensor (I2C 0x12)
+adafruit_pm25
+
+# I2C/SPI bus helper required by adafruit_scd4x and adafruit_pm25
+adafruit_bus_device
+
+# HTTPS REST client for Firebase Auth and Cloud Firestore REST API
+adafruit_requests
+
+# Socket/TLS connection pool manager required by adafruit_requests
+adafruit_connection_manager
+
+# Network Time Protocol client for syncing UTC timestamps on boot
+adafruit_ntp
+
+# Onboard RGB NeoPixel status LED driver
+neopixel

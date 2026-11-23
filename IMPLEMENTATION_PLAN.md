@@ -31,7 +31,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 6**: Core MCP Server Tools, Prompts & Resources (Local/Bearer Validation)
 - [x] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
 - [x] **Step 8**: Connecting AI Assistants (Gemini, Claude, ChatGPT, Grok)
-- [ ] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
+- [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [ ] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [ ] **Step 11**: Live End-to-End AI Query & Final Docs Polish
 
@@ -153,7 +153,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 9: Physical Hardware Assembly & CircuitPython Flashing
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Assemble the Adafruit ESP32-S3 Feather, SCD-40, and PMSA003I via STEMMA QT cables, flash CircuitPython 9.x, install required libraries onto `CIRCUITPY/lib`, and verify the I2C bus sees both sensors.
 - **Deliverables**:
   - `firmware/requirements-circuitpython.txt`
