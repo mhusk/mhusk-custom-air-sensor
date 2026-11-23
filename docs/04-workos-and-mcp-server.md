@@ -311,7 +311,9 @@ sequenceDiagram
 5. Copy your API credentials:
    - Under **Developer → API Keys**, click **Create key** (e.g., name it `custom-air-sensor-mcp`) and copy your **Secret API Key** (`sk_test_...` or `sk_live_...`).
    - Under **Overview** (top of the left sidebar) or **Applications**, copy your **Client ID** (`client_01...`).
-6. Note your personal login email address (the human account you'll sign in with through WorkOS AuthKit—*not* the ESP32-S3's Firebase Auth device email) for `ALLOWED_USER_EMAILS`.
+6. Note the **AuthKit end-user email address** you will sign in with when an AI assistant opens your `https://<your-subdomain>.authkit.app` login screen for `ALLOWED_USER_EMAILS`.
+   > [!NOTE]
+   > **WorkOS Dashboard Admin Login &ne; AuthKit End-User Account**: Your `dashboard.workos.com` developer login does **not** automatically exist inside your Staging environment's **Users** directory. Either pre-create yourself under **WorkOS Dashboard → Users** (with **Email Verified** enabled) or click **Sign up** the first time an AI client opens your AuthKit popup—and make sure *that* AuthKit user's email matches `ALLOWED_USER_EMAILS` (not the ESP32-S3's Firebase Auth device email).
 
 #### Step 7B: Store the 5 Secrets in Google Cloud Secret Manager
 > [!IMPORTANT]
