@@ -32,7 +32,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 7**: WorkOS AuthKit Integration & Owner Allowlist
 - [x] **Step 8**: Connecting AI Assistants (Gemini, Claude, ChatGPT, Grok)
 - [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
-- [ ] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
+- [x] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [ ] **Step 11**: Live End-to-End AI Query & Final Docs Polish
 
 ---
@@ -165,7 +165,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 ---
 
 ### Step 10: Complete CircuitPython Sensor Loop (`firmware/code.py`)
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Implement the full on-device firmware loop (`firmware/code.py`) combining SCD-40 + PMSA003I polling, NeoPixel status colors, watchdog resilience, and 5-minute Firestore publishing, then load it onto the ESP32-S3.
 - **Deliverables**:
   - `firmware/code.py`

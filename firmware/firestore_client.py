@@ -78,7 +78,13 @@ class _UrllibSession:
 
 def format_utc_timestamp(struct_time=None):
     """Format a UTC time tuple as an RFC 3339 timestamp string (YYYY-MM-DDTHH:MM:SSZ)."""
-    t = struct_time if struct_time is not None else time.gmtime()
+    if struct_time is not None:
+        t = struct_time
+    elif hasattr(time, "gmtime"):
+        t = time.gmtime()
+    else:
+        # CircuitPython does not expose time.gmtime(); RTC is synced to UTC (tz_offset=0).
+        t = time.localtime()
     return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}Z".format(
         t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec
     )
