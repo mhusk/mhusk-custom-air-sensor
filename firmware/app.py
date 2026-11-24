@@ -44,7 +44,7 @@ import ota_updater
 from firestore_client import FirestoreClient, FirestoreError
 
 # Firmware & hardware constants
-FIRMWARE_VERSION = "1.3.2"
+FIRMWARE_VERSION = "1.3.3"
 SUPPORTS_HEALTH_CALLBACK = True
 SENSORS = ["SCD-40", "PMSA003I"]
 SCD40_I2C_ADDR = 0x62
