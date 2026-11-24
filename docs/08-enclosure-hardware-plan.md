@@ -230,3 +230,17 @@ Before committing to the full print, verify these four items:
 2. **PMSA003I Chain Order Assembly Check:** Wire your I2C chain as **`Feather → SCD-40 → PMSA003I`**, plugging Cable #2 into the PMSA003I's **front/inward-facing STEMMA QT #2 port** (facing the open `X_int = 36–55 mm` Cable Bay corridor) and leaving its **rear STEMMA QT #1 port unplugged** against the solid LED-blocking rear wall so the fan + blue intake edge sits cleanly `1.0 mm` from the Rear grille.
 3. **SCD-40 Power-LED Light Bleed:** While the PMSA003I's green power LED is now fully shielded by the solid rear wall, the SCD-40 breakout also has a small green power LED facing its Left-wall louvers. If you notice any faint green glow on the adjacent wall at night, cover it with a tiny dot of black electrical tape or cut the `LED` jumper pad on the back of the SCD-40.
 4. **PMSA003I Micro-Fan Acoustic Isolation:** Listen in a quiet bedroom once snapped in. With `3.4 mm` of vertical headroom above the PMSA003I, adding tiny `1 mm` foam/silicone tape dots onto its four cradle pads easily eliminates any resonant plastic buzz.
+
+---
+
+## 8. Enclosure Commissioning & Calibration Log
+
+Once the final v2 print finishes and all three boards are snapped inside, let the unit run in its target spot for **60 minutes** with the lid closed, then record the measurements below and apply `temperature_offset_c` / `altitude_m` / `led_enabled` via `device_configs/feather-s3-01` (see [Guide 09: Remote Configuration & Dashboard](./09-remote-config-and-dashboard.md)):
+
+| Commissioning Check | Status | Measured / Final Value | Notes |
+| :--- | :--- | :--- | :--- |
+| **Mechanical Fit & Lid Action** | ⏳ Pending final print | — | Confirm Feather, SCD-40, PMSA003I snap cleanly and dovetail lid locks flush |
+| **Enclosed Thermal Offset (`temperature_offset_c`)** | ⏳ Pending final print | Default `4.0 °C` | Compare after 60 min against reference thermometer: `new = 4.0 + (sensor_c - ref_c)` |
+| **Site Elevation (`altitude_m`)** | ⏳ Pending final print | Default `0 m` | Set local elevation in meters for SCD-40 CO₂ pressure compensation |
+| **Dark-Room LED Light Bleed** | ⏳ Pending final print | — | Confirm solid rear wall blocks PMSA003I green LED; check SCD-40 left louvers |
+| **PMSA003I Fan Acoustics** | ⏳ Pending final print | — | Listen from pillow distance; add `1 mm` silicone dots on cradle pads if audible |

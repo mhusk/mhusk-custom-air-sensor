@@ -37,8 +37,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
 - [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *currently printing on Bambu Lab X1 Carbon*
 
-### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — Up Next)*
-- [ ] **Step 12**: Enclosure Calibration & `device_configs` Firestore Schema + Rules
+### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — In Progress)*
+- [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 pending finished print)*
 - [ ] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`)
 - [ ] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [ ] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
@@ -215,14 +215,15 @@ To keep every change easy to understand, debug, and learn from, every step in th
 > 90% of day-to-day device changes—calibrating enclosed temperature offset, changing polling intervals, muting bedroom LEDs, or renaming a room—don't require modifying Python code on flash. Solving Remote Config first gives immediate dashboard control with zero flash wear and zero risk of bricking a mounted sensor.
 
 #### Step 12: Enclosure Calibration & `device_configs` Firestore Schema + Rules
-- **Status**: `[ ] Pending`
-- **Goal**: Commission the 3D-printed enclosure (verify thermal offset, acoustic isolation, and LED shielding) and introduce a hardened `device_configs/{device_id}` Firestore collection so each sensor can pull tunable settings (`location`, `reporting_interval_seconds`, `temperature_offset_c`, `altitude_m`, `led_enabled`, `config_version`, and one-shot commands like `reboot`).
+- **Status**: `[x] Cloud Schema, Rules & Docs Complete (Physical Enclosure Measurements Pending Print)`
+- **Goal**: Commission the 3D-printed enclosure (verify thermal offset, acoustic isolation, and LED shielding) and introduce a hardened `device_configs/{device_id}` Firestore collection so each sensor can pull tunable settings (`location`, `reporting_interval_seconds`, `temperature_offset_c`, `altitude_m`, `led_enabled`, `config_version`, and one-shot `reboot_requested_at`).
 - **Deliverables**:
-  - Updated `firestore.rules` allowing authenticated sensor devices read-only access to `device_configs/{device_id}` (and schema validation for dashboard/admin writes)
-  - Calibration notes & thermal offset results recorded in `docs/08-enclosure-hardware-plan.md`
-  - `docs/09-remote-config-and-dashboard.md` (Part 1: Control-plane data model, `config_version` tracking, and SCD-40 thermal/altitude calibration)
+  - Updated `firestore.rules` allowing authenticated sensor devices `get`-only access to `device_configs/{device_id}` (no `list`, no `write`) plus optional reported-config fields on `devices/{device_id}`
+  - `scripts/verify_device_configs_rules.py` (5-point live security rules validation script)
+  - Calibration log table in `docs/08-enclosure-hardware-plan.md` (Section 8 — ready to record thermal offset, acoustics, and LED check once print completes)
+  - `docs/09-remote-config-and-dashboard.md` (Part 1: Control-plane data model, `config_version` tracking, `reboot_requested_at` design, and SCD-40 thermal/altitude calibration)
 - **Single Focused Validation**:
-  - Deploy `firestore.rules`, create a test `device_configs/feather-s3-01` document, verify the sensor account can `GET` it while unauthenticated requests receive `403 PERMISSION_DENIED`, and verify the sensor account cannot overwrite `device_configs`.
+  - Deployed `firestore.rules` cleanly with zero warnings, seeded `device_configs/feather-s3-01`, and passed all 5 live access-control checks via `python3 scripts/verify_device_configs_rules.py` (unauth `GET` → `403`, sensor `GET` → `200`, sensor `LIST`/`PATCH`/`DELETE` → `403`).
 - **Target Commit**: `feat(firestore): add device_configs schema, rules, and enclosure calibration notes`
 
 #### Step 13: Firmware Remote Configuration Polling (`device_configs/{device_id}`)

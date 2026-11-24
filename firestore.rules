@@ -3,6 +3,10 @@ rules_version = '2';
 // Public-repo rules: the device UID is never hardcoded here.
 // The Firebase Console (Admin/IAM) creates authorized_devices/{uid}.
 // Client SDKs and the Firestore REST API cannot read or write that collection.
+// Authenticated allowlisted sensors may only:
+//   - create immutable documents in readings/{readingId}
+//   - create/update their status document in devices/{deviceId}
+//   - get (single-doc read, no list/write) their config in device_configs/{deviceId}
 // Cloud Functions using the Admin SDK bypass these rules entirely.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -40,6 +44,10 @@ service cloud.firestore {
 
     function inRange(value, min, max) {
       return value is number && value >= min && value <= max;
+    }
+
+    function intInRange(value, min, max) {
+      return value is int && value >= min && value <= max;
     }
 
     function isAqiCategory(value) {
@@ -173,7 +181,11 @@ service cloud.firestore {
           'firmware_version',
           'sensors',
           'reporting_interval_seconds',
-          'latest_reading'
+          'latest_reading',
+          'config_version',
+          'temperature_offset_c',
+          'altitude_m',
+          'led_enabled'
         ])
         && isDeviceId(data.device_id)
         && isLocation(data.location)
@@ -181,7 +193,11 @@ service cloud.firestore {
         && isFirmwareVersion(data.firmware_version)
         && validSensors(data.sensors)
         && inRange(data.reporting_interval_seconds, 60, 3600)
-        && validLatestReading(data.latest_reading);
+        && validLatestReading(data.latest_reading)
+        && (!('config_version' in data) || intInRange(data.config_version, 0, 1000000))
+        && (!('temperature_offset_c' in data) || inRange(data.temperature_offset_c, 0, 20))
+        && (!('altitude_m' in data) || inRange(data.altitude_m, 0, 5000))
+        && (!('led_enabled' in data) || data.led_enabled is bool);
     }
 
     match /readings/{readingId} {
@@ -199,6 +215,16 @@ service cloud.firestore {
         && isDeviceId(deviceId)
         && request.resource.data.device_id == deviceId
         && validDevice(request.resource.data);
+    }
+
+    // Remote device configuration (control plane).
+    // Allowlisted sensors may fetch a single config document by device ID,
+    // but cannot list/enumerate configs or modify them.
+    // Only Firebase Console (Admin/IAM) or Cloud Functions (Admin SDK) write here.
+    match /device_configs/{deviceId} {
+      allow get: if isSensorDevice() && isDeviceId(deviceId);
+      allow list: if false;
+      allow write: if false;
     }
 
     // Existence of authorized_devices/{auth.uid} is the allowlist.

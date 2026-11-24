@@ -167,6 +167,7 @@ This repository is public, and a fork should deploy the same rules without inher
 | :--- | :--- | :--- | :--- | :--- |
 | `readings/{id}` | Yes, full schema, fresh timestamp | No | No | No |
 | `devices/{device_id}` | Yes, when the path equals the `device_id` field | Yes, same check on the merged document | No | No |
+| `device_configs/{device_id}` *(added in Step 12)* | No | No | No | `get` only (no `list`) — see [Guide 09](./09-remote-config-and-dashboard.md) |
 | `authorized_devices/{uid}` | No | No | No | No |
 | Every other path | No | No | No | No |
 
