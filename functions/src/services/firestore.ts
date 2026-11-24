@@ -11,6 +11,14 @@ import {
 export const READINGS_COLLECTION = "readings";
 export const DEVICES_COLLECTION = "devices";
 export const DEVICE_CONFIGS_COLLECTION = "device_configs";
+export const FIRMWARE_RELEASES_COLLECTION = "firmware_releases";
+export const FIRMWARE_RELEASE_FILES_SUBCOLLECTION = "files";
+
+export const SEMVER_VERSION_REGEX =
+  /^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]{0,19})?$/;
+export const OTA_FILENAME_REGEX = /^[a-z][a-z0-9_]{0,31}\.py$/;
+export const PROTECTED_FIRMWARE_FILES = new Set(["boot.py", "code.py", "settings.toml"]);
+export const MAX_OTA_FILE_BYTES = 512 * 1024; // 512 KiB (safely below Firestore's 1 MiB doc limit)
 
 export const DEFAULT_HISTORY_HOURS = 24;
 export const MAX_HISTORY_HOURS = 168; // 7 days
@@ -105,8 +113,40 @@ export interface DeviceConfig {
   led_enabled: boolean;
   config_version: number;
   reboot_requested_at: string | null;
+  target_firmware_version: string | null;
   updated_at: string;
   updated_by: string;
+}
+
+export type FirmwareReleaseStatus = "active" | "yanked";
+
+export interface FirmwareReleaseFileEntry {
+  doc_id: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+export interface FirmwareReleaseManifest {
+  version: string;
+  min_bootloader_version: string;
+  notes: string;
+  file_count: number;
+  total_size_bytes: number;
+  files: Record<string, FirmwareReleaseFileEntry>;
+  created_at: string;
+  created_by: string;
+  git_sha: string | null;
+  status: FirmwareReleaseStatus;
+}
+
+export interface FirmwareReleaseFileArtifact {
+  filename: string;
+  version: string;
+  sha256: string;
+  size_bytes: number;
+  encoding: "utf-8";
+  content: string;
+  created_at: string;
 }
 
 export interface UpdateDeviceConfigInput {
@@ -411,6 +451,11 @@ function mapDeviceConfigData(docId: string, data: DocumentData): DeviceConfig {
     data.reboot_requested_at !== undefined && data.reboot_requested_at !== null
       ? normalizeTimestampToDate(data.reboot_requested_at).toISOString()
       : null;
+  const targetFirmwareVersion =
+    typeof data.target_firmware_version === "string" &&
+    data.target_firmware_version.trim().length > 0
+      ? data.target_firmware_version.trim()
+      : null;
 
   return {
     device_id: asString(data.device_id, docId),
@@ -421,8 +466,98 @@ function mapDeviceConfigData(docId: string, data: DocumentData): DeviceConfig {
     led_enabled: typeof data.led_enabled === "boolean" ? data.led_enabled : true,
     config_version: Math.max(1, Math.trunc(asNumber(data.config_version, 1))),
     reboot_requested_at: rebootRequestedAt,
+    target_firmware_version: targetFirmwareVersion,
     updated_at: updatedAtDate.toISOString(),
     updated_by: asString(data.updated_by, "unknown"),
+  };
+}
+
+export function isValidFirmwareVersion(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    value.length >= 5 &&
+    value.length <= 32 &&
+    SEMVER_VERSION_REGEX.test(value)
+  );
+}
+
+export function isValidOtaFilename(value: string): boolean {
+  return (
+    typeof value === "string" &&
+    value.length >= 4 &&
+    value.length <= 35 &&
+    OTA_FILENAME_REGEX.test(value) &&
+    !PROTECTED_FIRMWARE_FILES.has(value)
+  );
+}
+
+function mapFirmwareReleaseManifest(
+  docId: string,
+  data: DocumentData
+): FirmwareReleaseManifest {
+  const createdAtDate = normalizeTimestampToDate(data.created_at);
+  const files: Record<string, FirmwareReleaseFileEntry> = {};
+
+  if (typeof data.files === "object" && data.files !== null && !Array.isArray(data.files)) {
+    for (const [filename, rawEntry] of Object.entries(
+      data.files as Record<string, unknown>
+    )) {
+      if (typeof rawEntry === "object" && rawEntry !== null) {
+        const entry = rawEntry as Record<string, unknown>;
+        files[filename] = {
+          doc_id: asString(entry.doc_id, filename),
+          sha256: asString(entry.sha256),
+          size_bytes: Math.max(0, Math.trunc(asNumber(entry.size_bytes, 0))),
+        };
+      }
+    }
+  }
+
+  const fileEntries = Object.values(files);
+  const status: FirmwareReleaseStatus = data.status === "yanked" ? "yanked" : "active";
+
+  return {
+    version: asString(data.version, docId),
+    min_bootloader_version: asString(data.min_bootloader_version, "1.0.0"),
+    notes: asString(data.notes, ""),
+    file_count: Math.max(
+      fileEntries.length,
+      Math.trunc(asNumber(data.file_count, fileEntries.length))
+    ),
+    total_size_bytes: Math.max(
+      0,
+      Math.trunc(
+        asNumber(
+          data.total_size_bytes,
+          fileEntries.reduce((acc, item) => acc + item.size_bytes, 0)
+        )
+      )
+    ),
+    files,
+    created_at: createdAtDate.toISOString(),
+    created_by: asString(data.created_by, "publish-cli"),
+    git_sha:
+      typeof data.git_sha === "string" && data.git_sha.trim().length > 0
+        ? data.git_sha.trim()
+        : null,
+    status,
+  };
+}
+
+function mapFirmwareReleaseFileArtifact(
+  docId: string,
+  version: string,
+  data: DocumentData
+): FirmwareReleaseFileArtifact {
+  const createdAtDate = normalizeTimestampToDate(data.created_at);
+  return {
+    filename: asString(data.filename, docId),
+    version: asString(data.version, version),
+    sha256: asString(data.sha256),
+    size_bytes: Math.max(0, Math.trunc(asNumber(data.size_bytes, 0))),
+    encoding: "utf-8",
+    content: asString(data.content),
+    created_at: createdAtDate.toISOString(),
   };
 }
 
@@ -993,6 +1128,7 @@ export async function updateDeviceConfig(
       led_enabled: Boolean(input.led_enabled),
       config_version: nextVersion,
       reboot_requested_at: existingData?.reboot_requested_at ?? null,
+      target_firmware_version: existingData?.target_firmware_version ?? null,
       updated_at: nowTs,
       updated_by: updatedBy,
     };
@@ -1051,6 +1187,7 @@ export async function requestDeviceReboot(
             : true,
       config_version: nextVersion,
       reboot_requested_at: nowTs,
+      target_firmware_version: cfgData?.target_firmware_version ?? null,
       updated_at: nowTs,
       updated_by: updatedBy,
     };
@@ -1058,4 +1195,122 @@ export async function requestDeviceReboot(
     tx.set(configRef, payload);
     return mapDeviceConfigData(deviceId, payload);
   });
+}
+
+/**
+ * Atomically sets (or clears when `null`) `target_firmware_version` on `device_configs/{deviceId}`
+ * and increments `config_version`, preserving all Layer 1 settings and `reboot_requested_at`.
+ */
+export async function setDeviceTargetFirmwareVersion(
+  deviceId: string,
+  targetVersion: string | null,
+  updatedBy: string,
+  db: Firestore = getDb()
+): Promise<DeviceConfig> {
+  if (targetVersion !== null && !isValidFirmwareVersion(targetVersion)) {
+    throw new Error(`Invalid target_firmware_version '${targetVersion}'.`);
+  }
+
+  const configRef = db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId);
+  const deviceRef = db.collection(DEVICES_COLLECTION).doc(deviceId);
+  const nowTs = Timestamp.now();
+
+  return db.runTransaction(async (tx) => {
+    const [existingCfg, existingDevice] = await Promise.all([
+      tx.get(configRef),
+      tx.get(deviceRef),
+    ]);
+    const cfgData = existingCfg.exists ? existingCfg.data() : undefined;
+    const devData = existingDevice.exists ? existingDevice.data() : undefined;
+
+    const prevVersion =
+      cfgData && typeof cfgData.config_version === "number"
+        ? Math.trunc(cfgData.config_version)
+        : 0;
+    const nextVersion = Math.min(1_000_000, Math.max(1, prevVersion + 1));
+
+    const payload = {
+      device_id: deviceId,
+      location: asString(cfgData?.location ?? devData?.location, "home-office"),
+      reporting_interval_seconds: Math.round(
+        asNumber(
+          cfgData?.reporting_interval_seconds ?? devData?.reporting_interval_seconds,
+          300
+        )
+      ),
+      temperature_offset_c: roundTo(
+        asNumber(cfgData?.temperature_offset_c ?? devData?.temperature_offset_c, 4.0),
+        2
+      ),
+      altitude_m: Math.round(asNumber(cfgData?.altitude_m ?? devData?.altitude_m, 0)),
+      led_enabled:
+        typeof cfgData?.led_enabled === "boolean"
+          ? cfgData.led_enabled
+          : typeof devData?.led_enabled === "boolean"
+            ? devData.led_enabled
+            : true,
+      config_version: nextVersion,
+      reboot_requested_at: cfgData?.reboot_requested_at ?? null,
+      target_firmware_version: targetVersion,
+      updated_at: nowTs,
+      updated_by: updatedBy,
+    };
+
+    tx.set(configRef, payload);
+    return mapDeviceConfigData(deviceId, payload);
+  });
+}
+
+/**
+ * Fetches a single OTA release manifest from `firmware_releases/{version}`.
+ */
+export async function getFirmwareRelease(
+  version: string,
+  db: Firestore = getDb()
+): Promise<FirmwareReleaseManifest | null> {
+  if (!isValidFirmwareVersion(version)) {
+    return null;
+  }
+  const doc = await db.collection(FIRMWARE_RELEASES_COLLECTION).doc(version).get();
+  if (!doc.exists || !doc.data()) {
+    return null;
+  }
+  return mapFirmwareReleaseManifest(doc.id, doc.data()!);
+}
+
+/**
+ * Lists all published OTA release manifests sorted newest-first by `created_at`.
+ */
+export async function listFirmwareReleases(
+  db: Firestore = getDb()
+): Promise<FirmwareReleaseManifest[]> {
+  const snapshot = await db.collection(FIRMWARE_RELEASES_COLLECTION).get();
+  const releases = snapshot.docs.map((doc) =>
+    mapFirmwareReleaseManifest(doc.id, doc.data())
+  );
+  releases.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return releases;
+}
+
+/**
+ * Fetches a single versioned Python artifact from `firmware_releases/{version}/files/{filename}`.
+ */
+export async function getFirmwareReleaseFile(
+  version: string,
+  filename: string,
+  db: Firestore = getDb()
+): Promise<FirmwareReleaseFileArtifact | null> {
+  if (!isValidFirmwareVersion(version) || !isValidOtaFilename(filename)) {
+    return null;
+  }
+  const doc = await db
+    .collection(FIRMWARE_RELEASES_COLLECTION)
+    .doc(version)
+    .collection(FIRMWARE_RELEASE_FILES_SUBCOLLECTION)
+    .doc(filename)
+    .get();
+  if (!doc.exists || !doc.data()) {
+    return null;
+  }
+  return mapFirmwareReleaseFileArtifact(doc.id, version, doc.data()!);
 }

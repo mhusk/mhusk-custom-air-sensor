@@ -29,6 +29,7 @@ function createMockDashboardService(): DashboardDataService {
         led_enabled: true,
         config_version: 1,
         reboot_requested_at: null,
+        target_firmware_version: null,
         updated_at: "2026-11-24T13:52:00.000Z",
         updated_by: "initial-seed",
       },
@@ -64,6 +65,7 @@ function createMockDashboardService(): DashboardDataService {
         led_enabled: input.led_enabled,
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: existing?.reboot_requested_at ?? null,
+        target_firmware_version: existing?.target_firmware_version ?? null,
         updated_at: new Date().toISOString(),
         updated_by: updatedBy,
       };
@@ -82,6 +84,7 @@ function createMockDashboardService(): DashboardDataService {
         led_enabled: existing?.led_enabled ?? true,
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: nowIso,
+        target_firmware_version: existing?.target_firmware_version ?? null,
         updated_at: nowIso,
         updated_by: updatedBy,
       };

@@ -45,7 +45,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2 — In Progress)*
 - [x] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback) *(live-verified on ESP32-S3 hardware: broken `app.py` on wall power auto-rolled back to `app.py.bak` and resumed publishing `v1.2.0`)*
-- [ ] **Step 17**: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
+- [x] **Step 17**: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI *(live-verified: `firestore.rules` deployed, `firmware_releases/1.2.0-rc1` published atomically, all 6 offline + 9 live REST security/SHA-256 checks passed)*
 - [ ] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check)
 - [ ] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard
 
@@ -284,14 +284,15 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(firmware): split USB-aware boot.py and auto-rollback code.py bootloader`
 
 #### Step 17: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
-- **Status**: `[ ] Pending`
-- **Goal**: Define the cloud OTA release pipeline: store versioned Python payloads (`app.py`, `aqi.py`, `firestore_client.py`) with SHA-256 checksums in Firebase Storage / Cloud Functions and publish release metadata to `firmware_releases/{version}` in Firestore.
+- **Status**: `[x] Completed (Live-Verified on Firestore)`
+- **Goal**: Define the cloud OTA release pipeline: store versioned Python payloads (`app.py`, `aqi.py`, `firestore_client.py`, plus optional `ota_updater.py`) with SHA-256 checksums in Firestore (`firmware_releases/{version}/files/{filename}`) and publish release metadata to `firmware_releases/{version}` in an atomic batch.
 - **Deliverables**:
-  - Firestore schema & security rules for `firmware_releases/{version}` (read-only for authenticated sensors) and `target_firmware_version` in `device_configs/{device_id}`
-  - `scripts/publish_release.py` (or npm script) that hashes firmware files with SHA-256, uploads artifacts, and writes the signed/checksummed release manifest
-  - `docs/10-cloud-ota-and-rollback.md` (Part 2: Checksummed release manifests and safe artifact staging)
+  - Updated `firestore.rules` allowing `isSensorDevice()` `get`-only access (no `list`, no `write`) to `firmware_releases/{version}` and non-bootloader `.py` payloads in `firmware_releases/{version}/files/{fileId}`, plus SemVer prerelease support in `isFirmwareVersion()`
+  - `functions/src/services/firestore.ts` (typed `FirmwareReleaseManifest` / `FirmwareReleaseFileArtifact` helpers, `setDeviceTargetFirmwareVersion()`, and transactional `target_firmware_version` preservation in `updateDeviceConfig()` and `requestDeviceReboot()`)
+  - `functions/src/scripts/publishRelease.ts` (`npm --prefix functions run publish:release`) & `functions/src/scripts/verifyRelease.ts` (`npm --prefix functions run verify:release`)
+  - `docs/10-cloud-ota-and-rollback.md` (Part 2: Checksummed release manifests, Firestore subcollection artifact hosting, and safe atomic publishing)
 - **Single Focused Validation**:
-  - Publish a test release (e.g., `1.1.0-rc1`) via the publish script, verify the manifest and SHA-256 hashes appear in Firestore, and confirm the sensor auth account can fetch the manifest and artifact while unauthenticated requests are rejected.
+  - Deployed `firestore.rules` cleanly with zero warnings, published `firmware_releases/1.2.0-rc1` (3 files, `54,819` bytes) via `publish:release`, and passed all 6 offline unit tests + all 9 live Firestore REST security & SHA-256 download checks in `verify:release -- --live --version 1.2.0-rc1` plus all 7 regression checks in `verify:api`.
 - **Target Commit**: `feat(ota): add checksummed firmware release manifest and publish script`
 
 #### Step 18: On-Device Pull-Based OTA Updater

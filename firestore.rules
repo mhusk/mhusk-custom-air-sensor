@@ -7,6 +7,8 @@ rules_version = '2';
 //   - create immutable documents in readings/{readingId}
 //   - create/update their status document in devices/{deviceId}
 //   - get (single-doc read, no list/write) their config in device_configs/{deviceId}
+//   - get (single-doc read, no list/write) OTA release manifests in firmware_releases/{version}
+//     and non-bootloader .py payloads in firmware_releases/{version}/files/{fileId}
 // Cloud Functions using the Admin SDK bypass these rules entirely.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -65,7 +67,15 @@ service cloud.firestore {
       return value is string
         && value.size() >= 5
         && value.size() <= 32
-        && value.matches('^[0-9]+\\.[0-9]+\\.[0-9]+$');
+        && value.matches('^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]{0,19})?$');
+    }
+
+    function isOtaFilename(value) {
+      return value is string
+        && value.size() >= 4
+        && value.size() <= 35
+        && value.matches('^[a-z][a-z0-9_]{0,31}\\.py$')
+        && !(value in ['boot.py', 'code.py']);
     }
 
     function validSensors(value) {
@@ -225,6 +235,25 @@ service cloud.firestore {
       allow get: if isSensorDevice() && isDeviceId(deviceId);
       allow list: if false;
       allow write: if false;
+    }
+
+    // Cloud pull-based OTA release manifests and Python module payloads.
+    // Allowlisted sensors may fetch a single release manifest by valid SemVer
+    // version and individual non-bootloader .py payloads by filename, but
+    // cannot list/enumerate releases or files and cannot modify them.
+    // Only Admin SDK or Firebase Console may publish releases.
+    match /firmware_releases/{version} {
+      allow get: if isSensorDevice() && isFirmwareVersion(version);
+      allow list: if false;
+      allow write: if false;
+
+      match /files/{fileId} {
+        allow get: if isSensorDevice()
+          && isFirmwareVersion(version)
+          && isOtaFilename(fileId);
+        allow list: if false;
+        allow write: if false;
+      }
     }
 
     // Existence of authorized_devices/{auth.uid} is the allowlist.

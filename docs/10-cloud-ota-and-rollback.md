@@ -177,3 +177,166 @@ Confirm you see:
 > [!NOTE]
 > **Zero steady-state flash wear on `microcontroller.nvm`.**
 > Both `boot.py` and `code.py` compare `bytes(nvm[0:4])` before writing and write all 4 bytes in a single atomic slice assignment (`nvm[0:4] = desired`). During normal 24/7 wall-power operation, `microcontroller.nvm` is **never written at all**.
+
+---
+
+## 2. Part 2: Checksummed Release Manifests, Artifact Hosting & Publish CLI (Step 17)
+
+### Why Store `.py` Artifacts in a Firestore Subcollection?
+
+Our complete CircuitPython application (`app.py`, `aqi.py`, `firestore_client.py`, plus `ota_updater.py` in Step 18) is roughly **55–75 KB** of plain UTF-8 Python source—well under Firestore's 1 MiB per-document limit. Hosting versioned payloads in a nested `firmware_releases/{version}/files/{filename}` subcollection keeps the entire OTA pipeline dead simple and low-memory on the ESP32-S3:
+
+- **Zero extra Firebase services:** No Cloud Storage bucket to provision, no `storage.rules` to maintain, and no extra bucket URL in `settings.toml`.
+- **Single TLS stack on the microcontroller:** The ESP32-S3 reuses the exact same `firestore.googleapis.com` REST API, pinned Google Trust Services (GTS) Root CA certificates, and Firebase Auth ID token already built into `firestore_client.py`.
+- **Low ESP32-S3 RAM footprint:** The parent manifest (`firmware_releases/{version}`) is ~500 bytes, and each `.py` artifact lives in its own `files/{filename}` document (~3–35 KB), so the Feather downloads, hashes, and stages **one small file at a time**.
+- **Atomic release publishing:** The publish CLI writes every `files/{filename}` document **and** the parent `firmware_releases/{version}` manifest in a single Firestore `WriteBatch`, so a polling sensor can never observe a half-published release.
+
+```mermaid
+flowchart LR
+    CLI["publish:release CLI<br/>(Node/TS + firebase-admin)"] -->|"1. Validate & SHA-256 hash<br/>(blocks boot.py/code.py)<br/>Atomic WriteBatch"| REL[("firmware_releases/{version}<br/>Manifest + SHA-256 map")]
+    CLI -->|"Same Atomic Batch"| FILES[("firmware_releases/{version}/files/{file.py}<br/>UTF-8 payload + sha256 + size_bytes")]
+    CFG[("device_configs/{device_id}<br/>target_firmware_version")] -->|"2. Sensor GET (read-only)"| ESP["ESP32-S3 Sensor<br/>(Step 18 OTA Client)"]
+    REL -->|"3. Sensor GET manifest"| ESP
+    FILES -->|"4. Sensor GET one .py at a time<br/>& verify SHA-256"| ESP
+```
+
+---
+
+### Cloud Data Model
+
+#### A. Release Manifest: `firmware_releases/{version}`
+Document ID `{version}` must match strict SemVer with an optional prerelease suffix (`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]{0,19})?$`, e.g., `1.2.0` or `1.2.0-rc1`).
+
+| Field | Firestore Type | Example | Purpose |
+| :--- | :--- | :--- | :--- |
+| `version` | `string` | `"1.2.0-rc1"` | Release version (matches document ID) |
+| `min_bootloader_version` | `string` | `"1.0.0"` | Minimum compatible immutable `code.py` bootloader version |
+| `notes` | `string` | `"Step 17 test release"` | Human-readable release summary (max 2,000 chars) |
+| `file_count` | `integer` | `3` | Number of `.py` files included in this release |
+| `total_size_bytes` | `integer` | `54819` | Combined UTF-8 byte length across all release files |
+| `files` | `map` | `{ "app.py": { doc_id, sha256, size_bytes }, ... }` | Per-file SHA-256 hex digest and exact UTF-8 byte size |
+| `created_at` | `timestamp` | RFC 3339 timestamp | Publication timestamp |
+| `created_by` | `string` | `"publish-cli"` | Audit label identifying publisher |
+| `git_sha` | `string \| null` | `"38598a5"` | Short Git commit SHA captured at publish time |
+| `status` | `string` | `"active"` \| `"yanked"` | Marks whether a release is active or yanked from rollout |
+
+#### B. Per-File Payload: `firmware_releases/{version}/files/{filename}`
+Document ID `{filename}` must match `^[a-z][a-z0-9_]{0,31}\.py$` and is strictly denied for `boot.py` and `code.py` at **both** the CLI and `firestore.rules` layers.
+
+| Field | Firestore Type | Purpose |
+| :--- | :--- | :--- |
+| `filename` | `string` | Target module name on `CIRCUITPY` (e.g., `"app.py"`) |
+| `version` | `string` | Parent release version |
+| `sha256` | `string` | 64-character lowercase hex SHA-256 of `content` encoded as UTF-8 bytes |
+| `size_bytes` | `integer` | Exact UTF-8 byte length of `content` (max 512 KiB) |
+| `encoding` | `string` | Always `"utf-8"` |
+| `content` | `string` | Raw UTF-8 Python source text |
+| `created_at` | `timestamp` | Publication timestamp |
+
+#### C. Device Rollout Target: `device_configs/{device_id}`
+Step 17 adds one optional field to `device_configs/{device_id}`:
+- **`target_firmware_version`** (`string | null`, default `null`): When `null`, the sensor stays on its currently flashed firmware. When set to a SemVer version (e.g., `"1.3.0"`), Step 18's OTA client compares it against `app.FIRMWARE_VERSION` and pulls `firmware_releases/{target_firmware_version}`.
+- Both `updateDeviceConfig()` and `requestDeviceReboot()` in [`functions/src/services/firestore.ts`](../functions/src/services/firestore.ts) preserve `target_firmware_version` atomically inside Firestore transactions so saving Layer 1 settings in the web dashboard never clears a pinned firmware target.
+
+---
+
+### Hardened Security Rules (`firestore.rules`)
+
+| Path | Unauthenticated | Allowlisted Sensor (`isSensorDevice()`) | Admin SDK / Console |
+| :--- | :---: | :---: | :---: |
+| `firmware_releases/{version}` (`get`) | `403 DENIED` | `200 OK` (valid SemVer `{version}` only) | Full access |
+| `firmware_releases` (`list`) | `403 DENIED` | `403 DENIED` | Full access |
+| `firmware_releases/{version}/files/{fileId}` (`get`) | `403 DENIED` | `200 OK` (valid `.py`, blocks `boot.py` & `code.py`) | Full access |
+| `firmware_releases/{version}/files` (`list`) | `403 DENIED` | `403 DENIED` | Full access |
+| `firmware_releases/**` (`write`) | `403 DENIED` | `403 DENIED` | Full access |
+
+`isFirmwareVersion()` on `devices/{deviceId}` was also updated to accept optional SemVer prerelease suffixes (like `1.2.0-rc1`) so test releases can report their version cleanly to `devices/{device_id}` during Step 18 staging.
+
+---
+
+### Publishing Releases with `publish:release`
+
+The publish CLI lives in [`functions/src/scripts/publishRelease.ts`](../functions/src/scripts/publishRelease.ts) and reuses Node 22 + `firebase-admin` (zero Python `pip` dependencies).
+
+#### 1. Dry-Run Preview (Zero Cloud Writes)
+Preview the exact file list, byte sizes, and SHA-256 digests before touching Firestore:
+```bash
+npm --prefix functions run publish:release -- --dry-run
+```
+
+#### 2. Publish a Real or Staged Test Release
+Because `publish:release` writes to Firestore via the Admin SDK, authenticate using any standard Admin path (`GOOGLE_APPLICATION_CREDENTIALS=./firebase-adminsdk.json`, `gcloud auth application-default login`, or `FIRESTORE_ACCESS_TOKEN=...`):
+
+```bash
+# Publish a standard release matching FIRMWARE_VERSION in firmware/app.py
+GOOGLE_APPLICATION_CREDENTIALS=./firebase-adminsdk.json \
+  npm --prefix functions run publish:release -- --notes "Release description"
+
+# Publish a staged release candidate (differs from app.py's FIRMWARE_VERSION)
+GOOGLE_APPLICATION_CREDENTIALS=./firebase-adminsdk.json \
+  npm --prefix functions run publish:release -- \
+  --version 1.2.0-rc1 \
+  --allow-version-mismatch \
+  --notes "Step 17 release pipeline validation"
+```
+
+Useful optional flags:
+- `--force`: Overwrite an already-published version (by default, releases are immutable to prevent accidental silent mutation).
+- `--set-target <device_id>`: Optionally pin `device_configs/<device_id>.target_firmware_version` in the same run (omitted by default so publishing and rollout stay decoupled).
+- `--delete --version <semver>`: Atomically delete a test release and its `files/` subcollection.
+
+---
+
+### Running the Step 17 Focused Validation
+
+1. **Deploy the updated security rules:**
+   ```bash
+   firebase deploy --only firestore:rules
+   ```
+2. **Run offline unit tests (SemVer, filename guards, SHA-256 bundling, protected-file rejection):**
+   ```bash
+   npm --prefix functions run verify:release
+   ```
+3. **Publish a test release (`1.2.0-rc1`) and run the 9-point live security & SHA-256 verification:**
+   ```bash
+   npm --prefix functions run publish:release -- \
+     --version 1.2.0-rc1 --allow-version-mismatch --notes "Step 17 validation"
+
+   npm --prefix functions run verify:release -- --live --version 1.2.0-rc1
+   ```
+   Confirm all 9 live checks pass:
+   1. Unauthenticated `GET firmware_releases/1.2.0-rc1` → `403 PERMISSION_DENIED`
+   2. Unauthenticated `GET .../files/app.py` → `403 PERMISSION_DENIED`
+   3. Sensor-authenticated `GET firmware_releases/1.2.0-rc1` → `200 OK`
+   4. Sensor-authenticated `LIST firmware_releases` → `403 PERMISSION_DENIED`
+   5. Sensor-authenticated `LIST .../files` → `403 PERMISSION_DENIED`
+   6. Sensor-authenticated `GET .../files/boot.py` → `403 PERMISSION_DENIED`
+   7. Sensor fetches every `.py` artifact and verifies exact UTF-8 byte length + SHA-256 match against both the manifest and the file doc
+   8. Sensor-authenticated `PATCH` on manifest → `403 PERMISSION_DENIED`
+   9. Sensor-authenticated `DELETE` on artifact file → `403 PERMISSION_DENIED`
+
+> [!NOTE]
+> **Live Validation (Step 17 Passed):** Deployed `firestore.rules` cleanly with zero warnings, published `firmware_releases/1.2.0-rc1` (3 files, `54,819` bytes total) via `publish:release`, and passed all 6 offline unit checks, all 9 live Firestore REST security + SHA-256 verification checks in `verify:release --live`, and all 7 Dashboard API regression checks in `verify:api`.
+
+---
+
+### Good to Know & Real-World Troubleshooting (Part 2)
+
+> [!TIP]
+> **Working across multiple GCP projects (`GOOGLE_APPLICATION_CREDENTIALS` override).**
+> If your shell exports `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account key for another Google Cloud project, `firebase-admin` prioritizes that key over your default ADC and fails with `PERMISSION_DENIED`. Clear it inline when publishing:
+> ```bash
+> GOOGLE_APPLICATION_CREDENTIALS= npm --prefix functions run publish:release -- --version 1.2.0-rc1 --allow-version-mismatch
+> ```
+
+> [!IMPORTANT]
+> **UTF-8 round-trip verification prevents cross-platform SHA-256 mismatches.**
+> Because Firestore stores `.py` payloads as UTF-8 strings (`stringValue`) and the ESP32-S3 hashes `content.encode("utf-8")`, `publishRelease.ts` verifies `Buffer.from(rawBytes.toString("utf8"), "utf8").equals(rawBytes)` before hashing. That guarantees the exact byte sequence read on macOS matches the byte sequence decoded from JSON on CircuitPython.
+
+> [!TIP]
+> **Decouple publishing from rollout.**
+> Running `publish:release` writes `firmware_releases/{version}` without touching `device_configs/{device_id}` unless you explicitly pass `--set-target <device_id>`. This lets you upload and inspect a release safely before promoting it to one test board or your full fleet.
+
+> [!WARNING]
+> **Releases are immutable by default.**
+> Re-running `publish:release` for an existing version fails intentionally unless you pass `--force`. Never overwrite a version that live sensors have already installed—always bump `FIRMWARE_VERSION` (e.g., `1.2.0` → `1.2.1`) so your fleet telemetry unambiguously shows which code each board is running.
