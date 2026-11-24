@@ -234,6 +234,75 @@ def is_valid_slug(value):
     return True
 
 
+PROTECTED_OTA_FILES = ("boot.py", "code.py", "settings.toml")
+VALID_OTA_STATUSES = ("up_to_date", "updating", "rolled_back", "error")
+
+
+def is_valid_firmware_version(value):
+    """Validate SemVer string matching `firestore.rules` `isFirmwareVersion`."""
+    if not isinstance(value, str):
+        return False
+    length = len(value)
+    if length < 5 or length > 32:
+        return False
+
+    prerelease = None
+    if "-" in value:
+        core, prerelease = value.split("-", 1)
+    else:
+        core = value
+
+    parts = core.split(".")
+    if len(parts) != 3:
+        return False
+    for part in parts:
+        if not part:
+            return False
+        for ch in part:
+            if not ("0" <= ch <= "9"):
+                return False
+
+    if prerelease is not None:
+        if len(prerelease) < 1 or len(prerelease) > 20:
+            return False
+        first = prerelease[0]
+        if not (
+            ("A" <= first <= "Z")
+            or ("a" <= first <= "z")
+            or ("0" <= first <= "9")
+        ):
+            return False
+        for ch in prerelease:
+            if not (
+                ("A" <= ch <= "Z")
+                or ("a" <= ch <= "z")
+                or ("0" <= ch <= "9")
+                or ch in (".", "-")
+            ):
+                return False
+    return True
+
+
+def is_valid_ota_filename(value):
+    """Validate non-bootloader `.py` filename matching `firestore.rules` `isOtaFilename`."""
+    if not isinstance(value, str):
+        return False
+    length = len(value)
+    if length < 4 or length > 35:
+        return False
+    if value in PROTECTED_OTA_FILES or not value.endswith(".py"):
+        return False
+    stem = value[:-3]
+    if not stem or len(stem) > 32:
+        return False
+    if not ("a" <= stem[0] <= "z"):
+        return False
+    for ch in stem:
+        if not (("a" <= ch <= "z") or ("0" <= ch <= "9") or ch == "_"):
+            return False
+    return True
+
+
 def _clamp_number(value, low, high):
     if value < low:
         return low
@@ -269,6 +338,7 @@ def normalize_device_config(raw_config, defaults):
         "led_enabled": default_led,
         "config_version": 0,
         "reboot_requested_at": None,
+        "target_firmware_version": None,
     }
 
     if not isinstance(raw_config, dict):
@@ -308,6 +378,10 @@ def normalize_device_config(raw_config, defaults):
     raw_reboot = raw_config.get("reboot_requested_at")
     if isinstance(raw_reboot, str) and parse_utc_timestamp_epoch(raw_reboot) is not None:
         normalized["reboot_requested_at"] = raw_reboot
+
+    raw_target_fw = raw_config.get("target_firmware_version")
+    if isinstance(raw_target_fw, str) and is_valid_firmware_version(raw_target_fw):
+        normalized["target_firmware_version"] = raw_target_fw
 
     return normalized
 
@@ -393,6 +467,9 @@ def build_device_status_document(
     temperature_offset_c=None,
     altitude_m=None,
     led_enabled=None,
+    ota_status=None,
+    ota_target_version=None,
+    ota_last_error=None,
 ):
     """Build a `devices/{device_id}` document dict matching `firestore.rules`."""
     doc = {
@@ -419,6 +496,14 @@ def build_device_status_document(
         doc["altitude_m"] = int(round(altitude_m))
     if led_enabled is not None:
         doc["led_enabled"] = bool(led_enabled)
+    if ota_status is not None and ota_status in VALID_OTA_STATUSES:
+        doc["ota_status"] = str(ota_status)
+    if ota_target_version is not None and is_valid_firmware_version(ota_target_version):
+        doc["ota_target_version"] = str(ota_target_version)
+    if ota_last_error is not None:
+        err_text = str(ota_last_error).replace("\r", " ").replace("\n", " ").strip()
+        if err_text:
+            doc["ota_last_error"] = err_text[:200]
     return doc
 
 
@@ -554,6 +639,30 @@ class FirestoreClient:
     def fetch_device_config(self, device_id):
         """Fetch and decode `device_configs/{device_id}` (returns None on HTTP 404)."""
         url = "{}/device_configs/{}".format(self.documents_base_url, device_id)
+        doc = self._authorized_request("GET", url, allow_not_found=True)
+        if not doc:
+            return None
+        return decode_firestore_fields(doc.get("fields", {}))
+
+    def fetch_firmware_release(self, version):
+        """Fetch and decode `firmware_releases/{version}` (returns None on HTTP 404)."""
+        if not is_valid_firmware_version(version):
+            raise ValueError("Invalid firmware version: {!r}".format(version))
+        url = "{}/firmware_releases/{}".format(self.documents_base_url, version)
+        doc = self._authorized_request("GET", url, allow_not_found=True)
+        if not doc:
+            return None
+        return decode_firestore_fields(doc.get("fields", {}))
+
+    def fetch_firmware_release_file(self, version, filename):
+        """Fetch and decode `firmware_releases/{version}/files/{filename}` (None on 404)."""
+        if not is_valid_firmware_version(version):
+            raise ValueError("Invalid firmware version: {!r}".format(version))
+        if not is_valid_ota_filename(filename):
+            raise ValueError("Invalid or protected OTA filename: {!r}".format(filename))
+        url = "{}/firmware_releases/{}/files/{}".format(
+            self.documents_base_url, version, filename
+        )
         doc = self._authorized_request("GET", url, allow_not_found=True)
         if not doc:
             return None

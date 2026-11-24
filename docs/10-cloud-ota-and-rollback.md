@@ -340,3 +340,120 @@ Useful optional flags:
 > [!WARNING]
 > **Releases are immutable by default.**
 > Re-running `publish:release` for an existing version fails intentionally unless you pass `--force`. Never overwrite a version that live sensors have already installed—always bump `FIRMWARE_VERSION` (e.g., `1.2.0` → `1.2.1`) so your fleet telemetry unambiguously shows which code each board is running.
+
+---
+
+## 3. Part 3: On-Device Pull-Based OTA Updater (Step 18)
+
+### End-to-End Pull-Based OTA Flow
+
+With the immutable bootloader (`code.py`) and checksummed release pipeline (`firmware_releases/{version}`) in place, [`firmware/ota_updater.py`](../firmware/ota_updater.py) and [`firmware/app.py`](../firmware/app.py) (`v1.3.0`) close the loop on the ESP32-S3:
+
+```mermaid
+flowchart TD
+    POLL["app.py polls device_configs/{id}<br/>every reporting cycle"] -->|"target_firmware_version == null<br/>or == FIRMWARE_VERSION"| NORM["Normal sensor publish<br/>ota_status = up_to_date"]
+    POLL -->|"target_firmware_version != FIRMWARE_VERSION<br/>(after boot_confirmed)"| CHECK{"USB read-only OR<br/>target == failed_version?"}
+    CHECK -->|"Yes"| SKIP["Skip download cleanly<br/>Report ota_status (error / rolled_back)<br/>Keep publishing readings"]
+    CHECK -->|"No (wall power, fs=rw)"| MAN["GET firmware_releases/{target}<br/>Verify active, min_bootloader, filenames"]
+    MAN -->|"Valid"| STAGE["Download 1 file at a time -> *.py.new<br/>Verify UTF-8 size + SHA-256 in RAM<br/>Read back from flash & re-verify SHA-256"]
+    STAGE -->|"Any mismatch / error"| ABORT["Delete all *.py.new<br/>Live *.py untouched, NO reboot<br/>Report ota_status = error + ota_last_error"]
+    STAGE -->|"All files verified"| REPORT["Report ota_status = updating<br/>Write /ota_pending.txt<br/>Set NVM OTA_STATE = PENDING (1)"]
+    REPORT --> SWAP["Remove stale *.py.bak<br/>Rename live -> *.py.bak, *.py.new -> live<br/>(app.py swapped LAST)"]
+    SWAP --> REBOOT["microcontroller.reset()"]
+    REBOOT --> VERIFY{"New app.py publishes<br/>first reading cleanly?"}
+    VERIFY -->|"Yes"| CONFIRM["confirm_ota_healthy()<br/>Clear NVM PENDING -> 0<br/>Delete /ota_pending.txt"]
+    VERIFY -->|"Crash / WDT hang (2x)"| RB["code.py restores *.py.bak -> *.py<br/>Sets NVM OTA_STATE = ROLLED_BACK (2)<br/>app.py records /ota_failed_version.txt<br/>& skips broken target (no loop!)"]
+```
+
+---
+
+### Safety Guarantees Built Into `ota_updater.py`
+
+1. **Double SHA-256 Verification (In-RAM + Flash Read-Back):**
+   - Each `.py` file is downloaded one at a time (calling `gc.collect()` and feeding the hardware watchdog between files to keep ESP32-S3 RAM headroom high).
+   - `ota_updater.py` verifies exact UTF-8 byte length and SHA-256 digest against the manifest **before** writing `<filename>.new`, then reads `<filename>.new` back from SPI flash and re-verifies SHA-256 to catch any flash-write corruption before touching live files.
+   - If **any** file fails download, size, or SHA-256 verification, all `*.py.new` staging files are deleted immediately, live `*.py` files are untouched, the board does **not** reboot, and `devices/{device_id}` is updated with `ota_status: "error"` and a concise `ota_last_error`.
+2. **Protected-File & Bootloader Compatibility Guards:**
+   - `validate_release_manifest()` refuses any manifest that is `"yanked"`, missing `app.py`, includes `boot.py`/`code.py`/`settings.toml`, or requires a `min_bootloader_version` newer than the running `code.py` (`BOOTLOADER_VERSION = "1.0.0"`).
+3. **Power-Loss-Safe Swap Order (`app.py` Last):**
+   - Stale `*.py.bak` files from older updates are cleared, `/ota_pending.txt` is written, `NVM_OTA_STATE` is set to `OTA_STATE_PENDING (1)`, and live files are backed up and promoted with `app.py` swapped **last**. If power drops mid-swap, `code.py` immediately heals or rolls back on the next boot.
+4. **Rollback-Loop Prevention (`/ota_pending.txt` → `/ota_failed_version.txt`):**
+   - Because sensors have read-only access to `device_configs/{device_id}`, a rolled-back sensor cannot clear `target_firmware_version` in Firestore.
+   - When `app.py` boots with `NVM_OTA_STATE == OTA_STATE_ROLLED_BACK (2)`, `check_post_boot_ota_state()` promotes `/ota_pending.txt` into `/ota_failed_version.txt`, extracts the last line of `/boot_error.txt`, reports `ota_status: "rolled_back"` to `devices/{device_id}`, and **skips** any `target_firmware_version` matching that failed version until you clear the target or publish a newer release (e.g., `1.3.2`).
+
+---
+
+### Device Telemetry Fields on `devices/{device_id}`
+
+`firestore.rules` (`validDevice`) allows three optional OTA telemetry fields on `devices/{device_id}` so the dashboard (Step 19) can render real-time rollout state without breaking older `v1.0`–`v1.2` devices:
+
+| Field | Type | Allowed Values / Bounds | Purpose |
+| :--- | :--- | :--- | :--- |
+| `ota_status` | `string` (optional) | `"up_to_date"`, `"updating"`, `"rolled_back"`, `"error"` | Current OTA lifecycle state reported by the sensor |
+| `ota_target_version` | `string \| null` (optional) | Valid SemVer (e.g. `"1.3.1"`) or `null` | Target version observed in `device_configs/{device_id}` |
+| `ota_last_error` | `string \| null` (optional) | Max 200 characters or `null` | Concise rejection or rollback reason (e.g. `"SHA-256 mismatch for app.py..."`) |
+
+---
+
+### Running the Step 18 Focused Validation
+
+#### Part A: Automated Offline Verification (Mac)
+Run the local firmware unit suite, release bundler checks, and secret scan:
+
+```bash
+python3 scripts/test_firmware_local.py
+npm --prefix functions run verify:release
+npm --prefix functions run publish:release -- --dry-run
+./scripts/check-secrets.sh
+```
+
+Confirm you see:
+- `[PASS] OTA updater tests passed (manifest guards, SHA-256 verification, atomic swap, hash-mismatch rejection, rollback-loop prevention).`
+- `buildReleaseBundle() hashed 4 files (...) for v1.3.0` (`app.py`, `aqi.py`, `firestore_client.py`, `ota_updater.py`).
+
+#### Part B: Live Wall-Power OTA Validation on the ESP32-S3 Feather
+
+1. **Deploy the updated `firestore.rules`** (allows `ota_status`, `ota_target_version`, `ota_last_error` on `devices/{device_id}`):
+   ```bash
+   firebase deploy --only firestore:rules
+   ```
+2. **One-time USB flash of `v1.3.0`** (so the board has `ota_updater.py` on flash for all future wireless updates):
+   ```bash
+   cp -X firmware/boot.py firmware/code.py firmware/app.py firmware/firestore_client.py firmware/aqi.py firmware/ota_updater.py /Volumes/CIRCUITPY/
+   ```
+   Eject `CIRCUITPY`, unplug USB from your Mac, and plug the Feather into **wall power**. Confirm `devices/feather-s3-01` reports `firmware_version: "1.3.0"` and `ota_status: "up_to_date"`.
+3. **Test live OTA promotion on wall power** (e.g., bump `FIRMWARE_VERSION` to `"1.3.1"` in a test branch or publish a staged `"1.3.1"` release):
+   ```bash
+   # Publish the new release and pin feather-s3-01 to it:
+   GOOGLE_APPLICATION_CREDENTIALS= npm --prefix functions run publish:release -- \
+     --version 1.3.1 --notes "Step 18 live OTA test" --set-target feather-s3-01
+   ```
+   On its next polling cycle (while sealed on wall power), watch the NeoPixel turn **solid cyan** while downloading & verifying SHA-256, `devices/feather-s3-01` briefly show `ota_status: "updating"`, then the Feather reboots and reports `firmware_version: "1.3.1"` and `ota_status: "up_to_date"`!
+4. **Verify corrupted-hash rejection** (optional live test in addition to the offline unit test):
+   - In the Firebase Console, edit a test release's `firmware_releases/<ver>/files/app.py` `content` by 1 character without updating `sha256` and pin `target_firmware_version` to `<ver>`.
+   - Confirm the Feather logs `SHA-256 mismatch`, deletes `.new` files, does **not** reboot, keeps running its current firmware, and updates `devices/feather-s3-01` with `ota_status: "error"` and `ota_last_error: "SHA-256 mismatch for app.py..."`.
+
+> [!NOTE]
+> **Live Hardware Verification (Step 18 Passed):** Verified end-to-end on the Adafruit Feather ESP32-S3 running on wall power only:
+> 1. **Wireless OTA upgrade (`1.3.0` → `1.3.2`):** The sensor downloaded all 4 files (`88,337` bytes), verified SHA-256 in RAM and on flash read-back, reported `ota_status: "updating"`, swapped files atomically, rebooted under the 60s watchdog guard, and checked back in with `firmware_version: "1.3.2"` and `ota_status: "up_to_date"`.
+> 2. **Corrupted SHA-256 rejection (`1.3.3-badhash`):** Tampered `files/app.py` (preserving byte length) was safely rejected on-device with `ota_status: "error"` and `ota_last_error: "SHA-256 mismatch for app.py..."` without rebooting or touching live `1.3.2` files.
+
+---
+
+### Good to Know & Real-World Troubleshooting (Part 3)
+
+> [!IMPORTANT]
+> **CircuitPython's built-in `hashlib` exposes `hashlib.new("sha256")` + `.digest()`, not `hashlib.sha256()` or `.hexdigest()`.**
+> Unlike desktop CPython, CircuitPython's C-accelerated `hashlib` module omits both `hashlib.sha256()` and `.hexdigest()`. Always construct with `h = hashlib.new("sha256"); h.update(data)` and format `h.digest()` to lowercase hex—it works identically on both CircuitPython 9/10 and CPython 3 with zero extra libraries in `CIRCUITPY/lib/`.
+
+> [!TIP]
+> **USB read-only mode safely skips OTA instead of crashing.**
+> When the Feather is plugged into your Mac via USB-C (`CIRCUITPY` mounted read-write on macOS, `/` read-only to Python), `ota_updater.py` detects `storage.getmount("/").readonly == True`, skips downloading, and reports `ota_last_error: "USB read-only mode; move to wall power for OTA"` without throwing `Errno 30`.
+
+> [!NOTE]
+> **OTA checks only run after `boot_confirmed` is True.**
+> `app.py` always completes its first sensor read, publishes to Firestore, and confirms boot health (`NVM_OTA_STATE = 0`) *before* evaluating `target_firmware_version`. That ensures a newly booted release is verified healthy before it can ever initiate another update.
+
+> [!WARNING]
+> **Do not re-arm `microcontroller.watchdog` if `code.py` already armed it.**
+> During a pending OTA boot (`OTA_STATE_PENDING`), `code.py` enables the 60-second hardware watchdog before importing `app.py`. On ESP32-S3 (CircuitPython 10 / ESP-IDF), reassigning `wdt.timeout` or `wdt.mode = WatchDogMode.RESET` while the watchdog is already active raises `espidf.IDFError: Invalid argument`. Always check `if wdt.mode == WatchDogMode.RESET: wdt.feed(); return` inside `app.py`'s `init_watchdog()`.

@@ -20,11 +20,11 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 
 | Phase / Layer | Status | Summary |
 | :--- | :---: | :--- |
-| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.2.0` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, muteable NeoPixel, watchdog) |
+| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.2` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
 | **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
 | **Enclosure — 3D-Printed Hub** | `Printing` | Screwless, support-free, thermally baffled bedroom enclosure ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
 | **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Live` | Zero-build Firebase Hosting dashboard (WorkOS AuthKit PKCE login, live °F cards, 6h/24h/7d interactive SVG charts, Device Settings drawer) + Firestore-backed `device_configs` remote tuning ([`docs/09-remote-config-and-dashboard.md`](./docs/09-remote-config-and-dashboard.md)) |
-| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `In Progress` | Steps 16–17 live-verified (`boot.py` + immutable `code.py` auto-rollback + SHA-256 `firmware_releases` pipeline & publish CLI in [`docs/10-cloud-ota-and-rollback.md`](./docs/10-cloud-ota-and-rollback.md)); next up: on-device pull-based OTA updater and Fleet rollout UI |
+| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `In Progress` | Steps 16–18 live-verified on wall power (`boot.py` + immutable `code.py` auto-rollback + SHA-256 `firmware_releases` pipeline & publish CLI + on-device `ota_updater.py` in [`docs/10-cloud-ota-and-rollback.md`](./docs/10-cloud-ota-and-rollback.md)); next up: Fleet & Firmware rollout UI (Step 19) |
 | **Phase 4 — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, outdoor AQI context for "should I open the window?" decisions, and optional smart-home actuation |
 
 ### What's Next (The 2-Layer Remote Update Plan)
@@ -103,7 +103,7 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 7. [**`docs/07-understanding-your-readings.md`**](./docs/07-understanding-your-readings.md) — Plain-English guide to every sensor metric (CO<sub>2</sub>, PM<sub>1.0</sub>/PM<sub>2.5</sub>/PM<sub>10</sub>, US EPA AQI, humidity, temperature), health thresholds, and how to improve them.
 8. [**`docs/08-enclosure-hardware-plan.md`**](./docs/08-enclosure-hardware-plan.md) — Screwless, support-free 3D-printed enclosure design (Bambu Lab X1 Carbon) with a ready-to-paste SpeakCAD prompt in [`enclosure/speakcad-prompt.txt`](./enclosure/speakcad-prompt.txt).
 9. [**`docs/09-remote-config-and-dashboard.md`**](./docs/09-remote-config-and-dashboard.md) — Device Shadow remote config (`device_configs`), live firmware polling & SCD-40 RAM calibration, WorkOS-protected Dashboard API, and zero-build Firebase Hosting web UI.
-10. [**`docs/10-cloud-ota-and-rollback.md`**](./docs/10-cloud-ota-and-rollback.md) — USB-aware `boot.py` NVM handoff, minimal immutable `code.py` auto-rollback bootloader, SHA-256 `firmware_releases` manifest/publish CLI, and Layer 2 cloud OTA architecture.
+10. [**`docs/10-cloud-ota-and-rollback.md`**](./docs/10-cloud-ota-and-rollback.md) — USB-aware `boot.py` NVM handoff, minimal immutable `code.py` auto-rollback bootloader, SHA-256 `firmware_releases` manifest/publish CLI, and on-device pull-based OTA updater (`ota_updater.py`).
 
 ---
 

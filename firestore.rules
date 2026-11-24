@@ -78,6 +78,11 @@ service cloud.firestore {
         && !(value in ['boot.py', 'code.py']);
     }
 
+    function isOtaStatus(value) {
+      return value is string
+        && value in ['up_to_date', 'updating', 'rolled_back', 'error'];
+    }
+
     function validSensors(value) {
       return value is list
         && value.size() >= 1
@@ -195,7 +200,10 @@ service cloud.firestore {
           'config_version',
           'temperature_offset_c',
           'altitude_m',
-          'led_enabled'
+          'led_enabled',
+          'ota_status',
+          'ota_target_version',
+          'ota_last_error'
         ])
         && isDeviceId(data.device_id)
         && isLocation(data.location)
@@ -207,7 +215,10 @@ service cloud.firestore {
         && (!('config_version' in data) || intInRange(data.config_version, 0, 1000000))
         && (!('temperature_offset_c' in data) || inRange(data.temperature_offset_c, 0, 20))
         && (!('altitude_m' in data) || inRange(data.altitude_m, 0, 5000))
-        && (!('led_enabled' in data) || data.led_enabled is bool);
+        && (!('led_enabled' in data) || data.led_enabled is bool)
+        && (!('ota_status' in data) || isOtaStatus(data.ota_status))
+        && (!('ota_target_version' in data) || data.ota_target_version == null || isFirmwareVersion(data.ota_target_version))
+        && (!('ota_last_error' in data) || data.ota_last_error == null || (data.ota_last_error is string && data.ota_last_error.size() <= 200));
     }
 
     match /readings/{readingId} {

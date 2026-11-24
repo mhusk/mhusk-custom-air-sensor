@@ -14,6 +14,7 @@ and publishes readings + device status to Cloud Firestore on the active interval
 
 Onboard NeoPixel status codes (muted when remote `led_enabled` is false):
   - Solid Blue        : Booting, initializing I2C/Wi-Fi/NTP
+  - Solid Cyan        : Downloading and verifying a Cloud OTA firmware update
   - Green pulse (1s)  : Reading published cleanly, then LED turns OFF
   - Slow Amber blink  : Wi-Fi, NTP, or Firestore error (auto-retrying)
   - Fast Red blink    : I2C hardware or sensor read error (auto-retrying)
@@ -39,10 +40,11 @@ from watchdog import WatchDogMode
 
 import aqi
 import firestore_client
+import ota_updater
 from firestore_client import FirestoreClient, FirestoreError
 
 # Firmware & hardware constants
-FIRMWARE_VERSION = "1.2.0"
+FIRMWARE_VERSION = "1.3.2"
 SUPPORTS_HEALTH_CALLBACK = True
 SENSORS = ["SCD-40", "PMSA003I"]
 SCD40_I2C_ADDR = 0x62
@@ -56,6 +58,7 @@ DEFAULT_TEMPERATURE_OFFSET_C = 4.0  # Sensirion SCD-40 factory default
 DEFAULT_ALTITUDE_M = 0
 DEFAULT_LED_ENABLED = True
 REBOOT_REQUEST_MAX_AGE_SECONDS = 1800
+OTA_ERROR_COOLDOWN_SECONDS = 300
 NTP_RESYNC_INTERVAL_SECONDS = 21600  # Re-sync UTC clock every 6 hours
 WATCHDOG_TIMEOUT_SECONDS = 60
 NETWORK_RETRY_SECONDS = 30
@@ -65,6 +68,7 @@ MAX_CONSECUTIVE_NETWORK_ERRORS = 10
 # Onboard NeoPixel status colors (R, G, B)
 COLOR_OFF = (0, 0, 0)
 COLOR_BLUE = (0, 0, 255)
+COLOR_CYAN = (0, 200, 255)
 COLOR_GREEN = (0, 255, 0)
 COLOR_AMBER = (255, 140, 0)
 COLOR_RED = (255, 0, 0)
@@ -179,7 +183,15 @@ class StatusLED:
 
 
 def init_watchdog(timeout_seconds=WATCHDOG_TIMEOUT_SECONDS):
-    """Enable the hardware watchdog so stuck sockets or locks self-recover."""
+    """Enable the hardware watchdog so stuck sockets or locks self-recover.
+
+    If `code.py` already armed the watchdog during a pending OTA boot, simply feed it:
+    re-assigning `wdt.mode` or `wdt.timeout` while active raises `espidf.IDFError:
+    Invalid argument` on ESP32-S3 (CircuitPython 10 / ESP-IDF).
+    """
+    if wdt.mode == WatchDogMode.RESET:
+        wdt.feed()
+        return
     wdt.timeout = timeout_seconds
     wdt.mode = WatchDogMode.RESET
     wdt.feed()
@@ -509,6 +521,16 @@ def main(on_healthy=None):
     first_boot = True
     boot_confirmed = False
 
+    boot_ota = ota_updater.check_post_boot_ota_state(FIRMWARE_VERSION)
+    ota_status = boot_ota["ota_status"]
+    ota_last_error = boot_ota["ota_last_error"]
+    ota_failed_version = boot_ota["failed_version"]
+    ota_target_version = None
+    last_attempted_ota_target = None
+    ota_retry_after_mono = 0.0
+    if boot_ota["ota_state"] == ota_updater.OTA_STATE_ROLLED_BACK:
+        print("[OTA WARN] {}".format(ota_last_error))
+
     try:
         while True:
             cycle_start = time.monotonic()
@@ -567,6 +589,8 @@ def main(on_healthy=None):
                         != active_config["temperature_offset_c"]
                         or new_config["altitude_m"] != active_config["altitude_m"]
                         or new_config["led_enabled"] != active_config["led_enabled"]
+                        or new_config["target_firmware_version"]
+                        != active_config["target_firmware_version"]
                     ):
                         source = (
                             "cloud v{}".format(new_config["config_version"])
@@ -575,13 +599,14 @@ def main(on_healthy=None):
                         )
                         print(
                             "[Config] Active ({}): location={}, interval={}s, "
-                            "temp_offset={:.2f}C, altitude={}m, led={}".format(
+                            "temp_offset={:.2f}C, altitude={}m, led={}, target_fw={}".format(
                                 source,
                                 new_config["location"],
                                 new_config["reporting_interval_seconds"],
                                 new_config["temperature_offset_c"],
                                 new_config["altitude_m"],
                                 new_config["led_enabled"],
+                                new_config["target_firmware_version"],
                             )
                         )
                     active_config = new_config
@@ -591,6 +616,28 @@ def main(on_healthy=None):
                             active_config["config_version"], cfg_err
                         )
                     )
+
+                # Reconcile OTA target & clear prior rollback warning if operator changed target
+                target_fw = active_config["target_firmware_version"]
+                ota_target_version = target_fw
+                if ota_status == "rolled_back":
+                    if (
+                        target_fw is None
+                        or target_fw == FIRMWARE_VERSION
+                        or (ota_failed_version is not None and target_fw != ota_failed_version)
+                    ):
+                        ota_updater.confirm_ota_healthy(
+                            on_healthy=on_healthy,
+                            clear_rolled_back=True,
+                        )
+                        ota_status = "up_to_date"
+                        ota_last_error = None
+                        ota_failed_version = None
+                elif target_fw is None or target_fw == FIRMWARE_VERSION:
+                    if ota_status == "error":
+                        ota_status = "up_to_date"
+                        ota_last_error = None
+                        last_attempted_ota_target = None
 
                 # 4a. Check one-shot remote reboot command
                 now_epoch = firestore_client.parse_utc_timestamp_epoch(
@@ -667,6 +714,9 @@ def main(on_healthy=None):
                     temperature_offset_c=active_config["temperature_offset_c"],
                     altitude_m=active_config["altitude_m"],
                     led_enabled=active_config["led_enabled"],
+                    ota_status=ota_status,
+                    ota_target_version=ota_target_version,
+                    ota_last_error=ota_last_error,
                 )
 
                 # 6. Publish reading and update device registry in Firestore
@@ -679,18 +729,22 @@ def main(on_healthy=None):
                 consecutive_network_errors = 0
                 first_boot = False
 
-                if not boot_confirmed and on_healthy is not None:
+                if not boot_confirmed:
                     try:
-                        on_healthy()
+                        ota_updater.confirm_ota_healthy(
+                            on_healthy=on_healthy,
+                            clear_rolled_back=False,
+                        )
                     except Exception as boot_err:
                         print("[BOOT WARN] Health callback failed: {}".format(boot_err))
                     boot_confirmed = True
 
                 print(
-                    "[OK {}] cfg=v{} | CO2={} ppm | Temp={:.1f}F ({:.1f}C) | RH={:.1f}% | "
+                    "[OK {}] cfg=v{} | ota={} | CO2={} ppm | Temp={:.1f}F ({:.1f}C) | RH={:.1f}% | "
                     "PM1.0={} PM2.5={} PM10={} ug/m3 | AQI={} ({})".format(
                         ts,
                         active_config["config_version"],
+                        ota_status,
                         reading["co2_ppm"],
                         reading["temperature_f"],
                         reading["temperature_c"],
@@ -702,6 +756,93 @@ def main(on_healthy=None):
                         reading["aqi_category"],
                     )
                 )
+
+                # 7. Check for pull-based Cloud OTA update after healthy publish
+                if (
+                    boot_confirmed
+                    and target_fw is not None
+                    and target_fw != FIRMWARE_VERSION
+                    and (
+                        target_fw != last_attempted_ota_target
+                        or time.monotonic() >= ota_retry_after_mono
+                    )
+                ):
+                    print(
+                        "[OTA] Target firmware v{} differs from running v{}; checking release...".format(
+                            target_fw, FIRMWARE_VERSION
+                        )
+                    )
+                    led.set(COLOR_CYAN)
+
+                    def _report_updating(ver):
+                        updating_doc = firestore_client.build_device_status_document(
+                            device_id=device_id,
+                            location=location,
+                            last_seen_at=ts,
+                            firmware_version=FIRMWARE_VERSION,
+                            sensors=SENSORS,
+                            reporting_interval_seconds=interval_seconds,
+                            reading=reading,
+                            config_version=active_config["config_version"],
+                            temperature_offset_c=active_config["temperature_offset_c"],
+                            altitude_m=active_config["altitude_m"],
+                            led_enabled=active_config["led_enabled"],
+                            ota_status="updating",
+                            ota_target_version=ver,
+                            ota_last_error=None,
+                        )
+                        feed_watchdog()
+                        client.update_device_status(updating_doc)
+
+                    ota_result = ota_updater.perform_ota_update(
+                        client=client,
+                        current_version=FIRMWARE_VERSION,
+                        target_version=target_fw,
+                        failed_version=ota_failed_version,
+                        feed_watchdog_fn=feed_watchdog,
+                        on_before_swap=_report_updating,
+                    )
+                    # Only reached if OTA was skipped or failed before reset.
+                    ota_status = ota_result["ota_status"]
+                    ota_target_version = ota_result["ota_target_version"]
+                    if not (
+                        ota_result["action"] == "skipped_rolled_back"
+                        and ota_last_error
+                    ):
+                        ota_last_error = ota_result["ota_last_error"]
+                    last_attempted_ota_target = target_fw
+                    ota_retry_after_mono = time.monotonic() + OTA_ERROR_COOLDOWN_SECONDS
+                    print(
+                        "[OTA WARN] {} (status={}, error={})".format(
+                            ota_result["action"], ota_status, ota_last_error
+                        )
+                    )
+                    try:
+                        err_doc = firestore_client.build_device_status_document(
+                            device_id=device_id,
+                            location=location,
+                            last_seen_at=ts,
+                            firmware_version=FIRMWARE_VERSION,
+                            sensors=SENSORS,
+                            reporting_interval_seconds=interval_seconds,
+                            reading=reading,
+                            config_version=active_config["config_version"],
+                            temperature_offset_c=active_config["temperature_offset_c"],
+                            altitude_m=active_config["altitude_m"],
+                            led_enabled=active_config["led_enabled"],
+                            ota_status=ota_status,
+                            ota_target_version=ota_target_version,
+                            ota_last_error=ota_last_error,
+                        )
+                        feed_watchdog()
+                        client.update_device_status(err_doc)
+                    except Exception as status_err:
+                        print(
+                            "[OTA WARN] Failed to report OTA error status: {}".format(
+                                status_err
+                            )
+                        )
+                    led.off()
 
                 gc.collect()
                 led.pulse_success(1.0)

@@ -23,6 +23,7 @@ sys.path.insert(0, FIRMWARE_DIR)
 
 import aqi  # noqa: E402
 import firestore_client  # noqa: E402
+import ota_updater  # noqa: E402
 
 
 def load_toml_settings(path):
@@ -257,6 +258,7 @@ def run_remote_config_tests():
         "led_enabled": True,
         "config_version": 0,
         "reboot_requested_at": None,
+        "target_firmware_version": None,
     }
 
     # 3. Valid cloud config overrides defaults cleanly
@@ -651,6 +653,326 @@ def run_bootloader_tests():
     print("[PASS] Bootloader tests passed (boot.py modes, USB handoff, A/B rollback, WDT hang, mid-swap self-heal).")
 
 
+def run_ota_updater_tests():
+    """Verify Step 18 pull-based OTA manifest validation, SHA-256 verification, atomic swap, and rollback safety."""
+    import hashlib
+    import tempfile
+    import types
+
+    # 1. Syntax check on ota_updater.py and updated app.py / firestore_client.py
+    for fname in ("ota_updater.py", "app.py", "firestore_client.py"):
+        fpath = os.path.join(FIRMWARE_DIR, fname)
+        with open(fpath, "r", encoding="utf-8") as fh:
+            compile(fh.read(), fpath, "exec")
+
+    # 2. SemVer & OTA filename validators
+    assert firestore_client.is_valid_firmware_version("1.3.0")
+    assert firestore_client.is_valid_firmware_version("1.3.0-rc1")
+    assert firestore_client.is_valid_firmware_version("10.20.30-beta.2")
+    assert not firestore_client.is_valid_firmware_version("1.3")
+    assert not firestore_client.is_valid_firmware_version("v1.3.0")
+    assert not firestore_client.is_valid_firmware_version("../1.3.0")
+
+    assert firestore_client.is_valid_ota_filename("app.py")
+    assert firestore_client.is_valid_ota_filename("ota_updater.py")
+    assert not firestore_client.is_valid_ota_filename("boot.py")
+    assert not firestore_client.is_valid_ota_filename("code.py")
+    assert not firestore_client.is_valid_ota_filename("settings.toml")
+    assert not firestore_client.is_valid_ota_filename("../app.py")
+    assert not firestore_client.is_valid_ota_filename("App.py")
+
+    # 3. Remote config target_firmware_version normalization & device status OTA fields
+    defaults = {
+        "location": "home-office",
+        "reporting_interval_seconds": 300,
+        "temperature_offset_c": 4.0,
+        "altitude_m": 0,
+        "led_enabled": True,
+    }
+    cfg_with_target = firestore_client.normalize_device_config(
+        {"target_firmware_version": "1.3.1-rc1", "config_version": 4}, defaults
+    )
+    assert cfg_with_target["target_firmware_version"] == "1.3.1-rc1"
+    cfg_bad_target = firestore_client.normalize_device_config(
+        {"target_firmware_version": "not-semver"}, defaults
+    )
+    assert cfg_bad_target["target_firmware_version"] is None
+
+    sample_reading = {
+        "co2_ppm": 550,
+        "temperature_f": 71.0,
+        "humidity_percent": 45.0,
+        "pm2_5_ug_m3": 4,
+        "aqi_us": 22,
+        "aqi_category": "Good",
+    }
+    dev_doc = firestore_client.build_device_status_document(
+        device_id="feather-s3-01",
+        location="home-office",
+        last_seen_at="2026-11-24T19:00:00Z",
+        firmware_version="1.3.0",
+        sensors=["SCD-40", "PMSA003I"],
+        reporting_interval_seconds=300,
+        reading=sample_reading,
+        ota_status="error",
+        ota_target_version="1.3.1",
+        ota_last_error="x" * 250,
+    )
+    assert dev_doc["ota_status"] == "error"
+    assert dev_doc["ota_target_version"] == "1.3.1"
+    assert len(dev_doc["ota_last_error"]) == 200
+
+    # 4. SHA-256 helper & bootloader compatibility (including CircuitPython hashlib.new-only fallback)
+    payload_bytes = b'FIRMWARE_VERSION = "1.3.1"\n'
+    expected_hex = hashlib.sha256(payload_bytes).hexdigest()
+    assert ota_updater.sha256_hex(payload_bytes) == expected_hex
+    orig_hashlib = ota_updater.hashlib
+    try:
+        ota_updater.hashlib = types.SimpleNamespace(new=hashlib.new)
+        assert ota_updater.sha256_hex(payload_bytes) == expected_hex
+    finally:
+        ota_updater.hashlib = orig_hashlib
+    assert ota_updater.is_bootloader_compatible("1.0.0", "1.0.0")
+    assert ota_updater.is_bootloader_compatible("1.2.0", "1.0.0")
+    assert not ota_updater.is_bootloader_compatible("1.0.0", "1.1.0")
+
+    def _make_release(version, files_dict, status="active", min_bl="1.0.0"):
+        manifest_files = {}
+        artifacts = {}
+        for fname, content in files_dict.items():
+            raw = content.encode("utf-8")
+            digest = hashlib.sha256(raw).hexdigest()
+            manifest_files[fname] = {
+                "doc_id": fname,
+                "sha256": digest,
+                "size_bytes": len(raw),
+            }
+            artifacts[fname] = {
+                "filename": fname,
+                "version": version,
+                "sha256": digest,
+                "size_bytes": len(raw),
+                "encoding": "utf-8",
+                "content": content,
+            }
+        manifest = {
+            "version": version,
+            "min_bootloader_version": min_bl,
+            "status": status,
+            "files": manifest_files,
+        }
+        return manifest, artifacts
+
+    class _FakeOtaClient:
+        def __init__(self, manifest, artifacts):
+            self.manifest = manifest
+            self.artifacts = artifacts
+            self.calls = []
+
+        def fetch_firmware_release(self, version):
+            self.calls.append(("manifest", version))
+            return self.manifest
+
+        def fetch_firmware_release_file(self, version, filename):
+            self.calls.append(("file", version, filename))
+            return self.artifacts.get(filename)
+
+    # 5. Manifest validation rejections (yanked, old bootloader, missing app.py, protected boot.py)
+    good_manifest, _ = _make_release("1.3.1", {"app.py": "def main(): pass\n"})
+    for bad_m, expected_substr in (
+        (None, "not found"),
+        ({**good_manifest, "status": "yanked"}, "not active"),
+        ({**good_manifest, "version": "1.3.2"}, "mismatch"),
+        ({**good_manifest, "min_bootloader_version": "2.0.0"}, "older than required"),
+        ({**good_manifest, "files": {"aqi.py": good_manifest["files"]["app.py"]}}, "missing required app.py"),
+        (
+            {
+                **good_manifest,
+                "files": {
+                    **good_manifest["files"],
+                    "boot.py": {
+                        "doc_id": "boot.py",
+                        "sha256": "a" * 64,
+                        "size_bytes": 10,
+                    },
+                },
+            },
+            "Blocked or invalid",
+        ),
+    ):
+        try:
+            ota_updater.validate_release_manifest(bad_m, "1.3.1", bootloader_version="1.0.0")
+            raise AssertionError(f"Expected OtaError containing {expected_substr!r}")
+        except ota_updater.OtaError as err:
+            assert expected_substr in str(err), f"Unexpected error: {err}"
+
+    # 6. Happy-path full OTA update: download -> SHA-256 -> on_before_swap -> backup -> swap -> reset
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write('FIRMWARE_VERSION = "1.3.0"\n')
+        with open(os.path.join(tmpdir, "aqi.py"), "w", encoding="utf-8") as fh:
+            fh.write("OLD_AQI = True\n")
+        with open(os.path.join(tmpdir, "stale.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("# stale backup from older OTA\n")
+
+        manifest, artifacts = _make_release(
+            "1.3.1",
+            {
+                "app.py": 'FIRMWARE_VERSION = "1.3.1"\n',
+                "aqi.py": "NEW_AQI = True\n",
+                "ota_updater.py": "# new updater\n",
+            },
+        )
+        client = _FakeOtaClient(manifest, artifacts)
+        nvm = bytearray([0xA5, 0, 0, 0])
+        events = []
+
+        def _before_swap(ver):
+            events.append(("before_swap", ver))
+            # Live app.py must still be old when on_before_swap runs!
+            with open(os.path.join(tmpdir, "app.py"), "r", encoding="utf-8") as fh:
+                assert "1.3.0" in fh.read()
+
+        def _reset():
+            events.append(("reset",))
+
+        res = ota_updater.perform_ota_update(
+            client=client,
+            current_version="1.3.0",
+            target_version="1.3.1",
+            root_dir=tmpdir,
+            nvm=nvm,
+            bootloader_version="1.0.0",
+            fs_readonly=False,
+            on_before_swap=_before_swap,
+            reset_fn=_reset,
+        )
+        assert res["action"] == "updated"
+        assert res["swapped_files"][-1] == "app.py", "app.py must be swapped last"
+        assert events == [("before_swap", "1.3.1"), ("reset",)]
+        assert list(nvm) == [0xA5, 0, ota_updater.OTA_STATE_PENDING, 0]
+        assert not os.path.exists(os.path.join(tmpdir, "stale.py.bak"))
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.new"))
+        assert not os.path.exists(os.path.join(tmpdir, "aqi.py.new"))
+        with open(os.path.join(tmpdir, "app.py"), "r", encoding="utf-8") as fh:
+            assert "1.3.1" in fh.read()
+        with open(os.path.join(tmpdir, "app.py.bak"), "r", encoding="utf-8") as fh:
+            assert "1.3.0" in fh.read()
+        with open(os.path.join(tmpdir, "aqi.py.bak"), "r", encoding="utf-8") as fh:
+            assert "OLD_AQI" in fh.read()
+        with open(os.path.join(tmpdir, "ota_pending.txt"), "r", encoding="utf-8") as fh:
+            assert fh.read().strip() == "1.3.1"
+
+    # 7. Corrupted SHA-256 hash rejection: aborts cleanly, deletes .new, no reboot, live untouched
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write('FIRMWARE_VERSION = "1.3.0"\n')
+        with open(os.path.join(tmpdir, "aqi.py"), "w", encoding="utf-8") as fh:
+            fh.write("OLD_AQI = True\n")
+
+        manifest, artifacts = _make_release(
+            "1.3.1",
+            {
+                "aqi.py": "NEW_AQI = True\n",
+                "app.py": 'FIRMWARE_VERSION = "1.3.1"\n',
+            },
+        )
+        # Tamper 1 character of app.py content without changing byte length so SHA-256 catches it
+        artifacts["app.py"]["content"] = 'FIRMWARE_VERSION = "1.3.9"\n'
+
+        client = _FakeOtaClient(manifest, artifacts)
+        nvm = bytearray([0xA5, 0, 0, 0])
+        resets = []
+        before_swaps = []
+
+        res = ota_updater.perform_ota_update(
+            client=client,
+            current_version="1.3.0",
+            target_version="1.3.1",
+            root_dir=tmpdir,
+            nvm=nvm,
+            bootloader_version="1.0.0",
+            fs_readonly=False,
+            on_before_swap=lambda v: before_swaps.append(v),
+            reset_fn=lambda: resets.append(1),
+        )
+        assert res["action"] == "error"
+        assert res["ota_status"] == "error"
+        assert "SHA-256 mismatch" in res["ota_last_error"]
+        assert len(resets) == 0
+        assert len(before_swaps) == 0
+        assert list(nvm) == [0xA5, 0, 0, 0]
+        assert not os.path.exists(os.path.join(tmpdir, "aqi.py.new"))
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.new"))
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.bak"))
+        with open(os.path.join(tmpdir, "app.py"), "r", encoding="utf-8") as fh:
+            assert "1.3.0" in fh.read()
+        with open(os.path.join(tmpdir, "aqi.py"), "r", encoding="utf-8") as fh:
+            assert "OLD_AQI" in fh.read()
+
+    # 8. USB read-only mode skips cleanly with zero network calls or resets
+    with tempfile.TemporaryDirectory() as tmpdir:
+        client = _FakeOtaClient(None, {})
+        resets = []
+        res = ota_updater.perform_ota_update(
+            client=client,
+            current_version="1.3.0",
+            target_version="1.3.1",
+            root_dir=tmpdir,
+            fs_readonly=True,
+            reset_fn=lambda: resets.append(1),
+        )
+        assert res["action"] == "skipped_usb"
+        assert len(client.calls) == 0
+        assert len(resets) == 0
+
+    # 9. Post-rollback detection & rollback-loop prevention
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "ota_pending.txt"), "w", encoding="utf-8") as fh:
+            fh.write("1.3.1")
+        with open(os.path.join(tmpdir, "boot_error.txt"), "w", encoding="utf-8") as fh:
+            fh.write("Traceback:\nRuntimeError: simulated crash\n")
+        nvm = bytearray([0xA5, 0, ota_updater.OTA_STATE_ROLLED_BACK, 0])
+
+        post = ota_updater.check_post_boot_ota_state(
+            "1.3.0", root_dir=tmpdir, nvm=nvm, fs_readonly=False
+        )
+        assert post["ota_status"] == "rolled_back"
+        assert post["failed_version"] == "1.3.1"
+        assert "1.3.1" in post["ota_last_error"]
+        assert "simulated crash" in post["ota_last_error"]
+        assert not os.path.exists(os.path.join(tmpdir, "ota_pending.txt"))
+        assert os.path.exists(os.path.join(tmpdir, "ota_failed_version.txt"))
+
+        # Re-polling the same broken target_firmware_version must skip without downloading
+        client = _FakeOtaClient(None, {})
+        skip_res = ota_updater.perform_ota_update(
+            client=client,
+            current_version="1.3.0",
+            target_version="1.3.1",
+            failed_version=post["failed_version"],
+            root_dir=tmpdir,
+            nvm=nvm,
+            fs_readonly=False,
+        )
+        assert skip_res["action"] == "skipped_rolled_back"
+        assert skip_res["ota_status"] == "rolled_back"
+        assert len(client.calls) == 0
+
+        # Clearing rolled-back state removes ota_failed_version.txt and calls on_healthy
+        cleared = []
+        ota_updater.confirm_ota_healthy(
+            on_healthy=lambda clear_rolled_back=False: cleared.append(clear_rolled_back),
+            clear_rolled_back=True,
+            root_dir=tmpdir,
+            fs_readonly=False,
+        )
+        assert cleared == [True]
+        assert not os.path.exists(os.path.join(tmpdir, "ota_failed_version.txt"))
+
+    print("[PASS] OTA updater tests passed (manifest guards, SHA-256 verification, atomic swap, hash-mismatch rejection, rollback-loop prevention).")
+
+
 def run_live_fetch_config(settings_path):
     """Sign in as the sensor device and fetch/normalize live `device_configs/{device_id}`."""
     if not os.path.exists(settings_path):
@@ -805,6 +1127,7 @@ def main():
     run_encoding_tests()
     run_remote_config_tests()
     run_bootloader_tests()
+    run_ota_updater_tests()
 
     if args.fetch_config:
         run_live_fetch_config(args.settings)

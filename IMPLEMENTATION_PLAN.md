@@ -296,15 +296,17 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(ota): add checksummed firmware release manifest and publish script`
 
 #### Step 18: On-Device Pull-Based OTA Updater
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed (Live-Verified on ESP32-S3 Wall Power)`
 - **Goal**: Implement the pull-based OTA client on the ESP32-S3: compare current `FIRMWARE_VERSION` against `target_firmware_version`, download new `.py` files to `.new` staging paths, verify SHA-256 hashes on-device before touching live files, back up existing files to `.bak`, atomically swap, reboot, and confirm healthy check-in.
 - **Deliverables**:
-  - `firmware/ota_updater.py` (staging downloads, SHA-256 verification, atomic backup/rename, and `ota_status` reporting to `devices/{device_id}`)
-  - `firmware/app.py` (periodic OTA check hook + health confirmation clearing the "pending verification" flag after first successful Firestore publish)
-  - Local offline unit tests for hash mismatch rejection and staging swap logic
-  - `docs/10-cloud-ota-and-rollback.md` (Part 3: End-to-end OTA verification, watchdog safety, and recovery)
+  - `firmware/ota_updater.py` (manifest & bootloader guards, one-file-at-a-time `.new` staging downloads, double SHA-256 verification in RAM + flash read-back using CircuitPython-compatible `hashlib.new("sha256")`, power-loss-safe backup/swap with `app.py` last + `os.sync()`, and rollback-loop prevention via `/ota_pending.txt` + `/ota_failed_version.txt`)
+  - `firmware/firestore_client.py` (`is_valid_firmware_version()`, `is_valid_ota_filename()`, `target_firmware_version` normalization, `fetch_firmware_release()`, `fetch_firmware_release_file()`, and optional `ota_status`/`ota_target_version`/`ota_last_error` on `build_device_status_document()`)
+  - `firmware/app.py` (`v1.3.2` with post-boot rollback detection, ESP-IDF-safe `init_watchdog()` during pending OTA boots, `confirm_ota_healthy()`, post-publish OTA polling with cyan LED indicator, and `ota_status` reporting)
+  - Updated `firestore.rules` allowing optional `ota_status`, `ota_target_version`, and `ota_last_error` fields on `devices/{deviceId}` (deployed cleanly)
+  - Updated `scripts/test_firmware_local.py` with offline OTA unit tests (manifest guards, `hashlib.new` fallback, happy-path multi-file swap, corrupted SHA-256 rejection, USB read-only skip, and rollback-loop prevention)
+  - `docs/10-cloud-ota-and-rollback.md` (Part 3: End-to-end OTA verification, watchdog safety, CircuitPython `hashlib` + ESP-IDF WDT gotchas, and recovery)
 - **Single Focused Validation**:
-  - Bump `FIRMWARE_VERSION` (e.g., `1.0.0` → `1.1.0`), publish the release, set `target_firmware_version` in Firestore while the Feather is on wall power only, and watch it download, verify SHA-256, reboot, and report `1.1.0` in Firestore—plus test that a deliberately corrupted hash is safely rejected without rebooting.
+  - Deployed `firestore.rules` and Cloud Functions (`updateDeviceConfig` `target_firmware_version` preservation), passed all offline tests in `python3 scripts/test_firmware_local.py`, `verify:release`, and `./scripts/check-secrets.sh`, then live-verified on the ESP32-S3 Feather on wall power: wireless OTA upgrade `1.3.0` → `1.3.2` (`ota_status: updating` → reboot → `firmware_version: 1.3.2`, `ota_status: up_to_date`) **and** live rejection of tampered `1.3.3-badhash` (`ota_status: error`, `SHA-256 mismatch for app.py`, zero reboot, remained on `1.3.2`).
 - **Target Commit**: `feat(firmware): add SHA-256 verified pull-based OTA updater`
 
 #### Step 19: Fleet & Firmware Rollout Panel in Web Dashboard
