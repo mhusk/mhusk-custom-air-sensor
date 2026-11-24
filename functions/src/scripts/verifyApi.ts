@@ -11,7 +11,11 @@ import type {
   WorkosAuthConfig,
 } from "../auth/workos.js";
 import { createMcpHttpHandler } from "../index.js";
-import type { DeviceConfig, DeviceStatus } from "../services/firestore.js";
+import type {
+  DeviceConfig,
+  DeviceStatus,
+  FirmwareReleaseManifest,
+} from "../services/firestore.js";
 import { createMockAirQualityService } from "./localMcpServer.js";
 
 function createMockDashboardService(): DashboardDataService {
@@ -36,6 +40,43 @@ function createMockDashboardService(): DashboardDataService {
     ],
   ]);
 
+  const releases = new Map<string, FirmwareReleaseManifest>([
+    [
+      "1.3.2",
+      {
+        version: "1.3.2",
+        min_bootloader_version: "1.0.0",
+        notes: "Step 18 verified OTA release",
+        file_count: 4,
+        total_size_bytes: 88337,
+        files: {
+          "app.py": { doc_id: "app.py", sha256: "a".repeat(64), size_bytes: 34000 },
+        },
+        created_at: "2026-11-24T14:50:00.000Z",
+        created_by: "publish-cli",
+        git_sha: "ef22e8f",
+        status: "active",
+      },
+    ],
+    [
+      "1.3.1-yanked",
+      {
+        version: "1.3.1-yanked",
+        min_bootloader_version: "1.0.0",
+        notes: "Yanked test build",
+        file_count: 4,
+        total_size_bytes: 88000,
+        files: {
+          "app.py": { doc_id: "app.py", sha256: "b".repeat(64), size_bytes: 34000 },
+        },
+        created_at: "2026-11-24T14:10:00.000Z",
+        created_by: "publish-cli",
+        git_sha: "9184020",
+        status: "yanked",
+      },
+    ],
+  ]);
+
   return {
     getSensorStatus: async (options) => {
       const result = await baseService.getSensorStatus(options);
@@ -46,6 +87,9 @@ function createMockDashboardService(): DashboardDataService {
         temperature_offset_c: 4.0,
         altitude_m: 0,
         led_enabled: true,
+        ota_status: "up_to_date",
+        ota_target_version: null,
+        ota_last_error: null,
       }));
       return { ...result, devices };
     },
@@ -85,6 +129,28 @@ function createMockDashboardService(): DashboardDataService {
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: nowIso,
         target_firmware_version: existing?.target_firmware_version ?? null,
+        updated_at: nowIso,
+        updated_by: updatedBy,
+      };
+      configs.set(deviceId, next);
+      return next;
+    },
+    listFirmwareReleases: async () =>
+      Array.from(releases.values()).sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    getFirmwareRelease: async (version) => releases.get(version) ?? null,
+    setDeviceTargetFirmwareVersion: async (deviceId, targetVersion, updatedBy) => {
+      const existing = configs.get(deviceId);
+      const nowIso = new Date().toISOString();
+      const next: DeviceConfig = {
+        device_id: deviceId,
+        location: existing?.location ?? "home-office",
+        reporting_interval_seconds: existing?.reporting_interval_seconds ?? 300,
+        temperature_offset_c: existing?.temperature_offset_c ?? 4.0,
+        altitude_m: existing?.altitude_m ?? 0,
+        led_enabled: existing?.led_enabled ?? true,
+        config_version: (existing?.config_version ?? 0) + 1,
+        reboot_requested_at: existing?.reboot_requested_at ?? null,
+        target_firmware_version: targetVersion,
         updated_at: nowIso,
         updated_by: updatedBy,
       };
@@ -448,6 +514,78 @@ async function main(): Promise<void> {
     assert.equal(typeof rebootCfg.reboot_requested_at, "string");
     assert.equal(rebootCfg.temperature_offset_c, 5.5); // preserved!
     console.log("[PASS] 7. POST /api/devices/:deviceId/reboot stamps reboot_requested_at & increments config_version");
+
+    // 8. GET /api/firmware/releases
+    const releasesRes = await apiRequest(baseUrl, "GET", "/api/firmware/releases", {
+      token: ownerJwt,
+    });
+    assert.equal(releasesRes.status, 200);
+    assert.equal(releasesRes.body.count, 2);
+    const releaseItems = releasesRes.body.releases as Array<Record<string, unknown>>;
+    assert.equal(releaseItems[0].version, "1.3.2");
+    assert.equal(releaseItems[1].status, "yanked");
+    console.log("[PASS] 8. GET /api/firmware/releases returns published manifests newest-first");
+
+    // 9. PUT /api/devices/:deviceId/firmware (per-device promotion, guards, and clear)
+    const badVerRes = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/firmware", {
+      token: ownerJwt,
+      body: { target_firmware_version: "not-a-semver" },
+    });
+    assert.equal(badVerRes.status, 400);
+
+    const missingRelRes = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/firmware", {
+      token: ownerJwt,
+      body: { target_firmware_version: "9.9.9" },
+    });
+    assert.equal(missingRelRes.status, 404);
+
+    const yankedRelRes = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/firmware", {
+      token: ownerJwt,
+      body: { target_firmware_version: "1.3.1-yanked" },
+    });
+    assert.equal(yankedRelRes.status, 409);
+
+    const promoteOneRes = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/firmware", {
+      token: ownerJwt,
+      body: { target_firmware_version: "1.3.2" },
+    });
+    assert.equal(promoteOneRes.status, 200);
+    assert.equal(promoteOneRes.body.target_firmware_version, "1.3.2");
+    const promotedCfg = promoteOneRes.body.config as Record<string, unknown>;
+    assert.equal(promotedCfg.target_firmware_version, "1.3.2");
+    assert.equal(promotedCfg.config_version, 4);
+    assert.equal(promotedCfg.temperature_offset_c, 5.5); // preserved!
+
+    const overviewPendingOta = await apiRequest(baseUrl, "GET", "/api/dashboard/overview", {
+      token: ownerJwt,
+    });
+    const devicesPendingOta = overviewPendingOta.body.devices as Array<Record<string, unknown>>;
+    assert.equal(devicesPendingOta[0].ota_rollout_status, "pending");
+
+    const clearOneRes = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/firmware", {
+      token: ownerJwt,
+      body: { target_firmware_version: null },
+    });
+    assert.equal(clearOneRes.status, 200);
+    assert.equal(clearOneRes.body.target_firmware_version, null);
+    console.log("[PASS] 9. PUT /api/devices/:deviceId/firmware validates SemVer/yanked/404, promotes, and clears target");
+
+    // 10. POST /api/firmware/rollout (fleet-wide promotion + yanked rejection)
+    const yankedFleetRes = await apiRequest(baseUrl, "POST", "/api/firmware/rollout", {
+      token: ownerJwt,
+      body: { target_firmware_version: "1.3.1-yanked" },
+    });
+    assert.equal(yankedFleetRes.status, 409);
+
+    const fleetRes = await apiRequest(baseUrl, "POST", "/api/firmware/rollout", {
+      token: ownerJwt,
+      body: { target_firmware_version: "1.3.2" },
+    });
+    assert.equal(fleetRes.status, 200);
+    assert.equal(fleetRes.body.updated, true);
+    assert.equal(fleetRes.body.updated_count, 1);
+    assert.equal(fleetRes.body.target_firmware_version, "1.3.2");
+    console.log("[PASS] 10. POST /api/firmware/rollout promotes active release across fleet and rejects yanked builds");
 
     console.log("\nAll Dashboard API & WorkOS Auth verification checks passed!");
   } finally {

@@ -465,3 +465,66 @@ Confirm you see:
 > [!WARNING]
 > **Redeploy Cloud Functions whenever `device_configs` schema fields are added.**
 > `updateDeviceConfig()` writes the full `device_configs/{device_id}` document inside a Firestore transaction while preserving `target_firmware_version`. If you publish a release and pin `target_firmware_version`, then save Layer 1 settings (like changing the reporting interval) from the Web Dashboard *before* running `firebase deploy --only functions`, the older Cloud Function will overwrite the document without `target_firmware_version` and silently cancel the pending OTA.
+
+---
+
+## Part 4: Fleet & Firmware Rollout UI in the Web Dashboard (Step 19)
+
+With the release pipeline (Step 17) and on-device SHA-256 OTA updater (Step 18) live, Step 19 brings firmware visibility and one-click promotion directly into the WorkOS-protected Firebase Hosting web dashboard.
+
+### New WorkOS-Protected Dashboard API Endpoints
+
+All routes live in [`functions/src/api/dashboard.ts`](../functions/src/api/dashboard.ts) and enforce the same WorkOS AuthKit JWT / Bearer fallback + `ALLOWED_USER_EMAILS` owner allowlist as the rest of `/api/*`:
+
+| Method & Path | Purpose | Guardrails |
+| :--- | :--- | :--- |
+| `GET /api/firmware/releases` | Lists all manifests in `firmware_releases` sorted newest-first by `created_at`. | Owner-authenticated; returns `status` (`active` / `yanked`), notes, file count, total bytes, and git SHA. |
+| `PUT /api/devices/:deviceId/firmware` | Sets or clears (`null`) `target_firmware_version` on a single sensor's `device_configs/{deviceId}`. | Strict Zod SemVer validation (`400`), verifies release exists (`404`), blocks `yanked` releases (`409`), preserves all Layer 1 settings & `reboot_requested_at` inside a Firestore transaction. |
+| `POST /api/firmware/rollout` | Sets or clears `target_firmware_version` across all registered sensors (or an optional `device_ids` subset). | Same SemVer (`400`), existence (`404`), and `yanked` (`409`) checks before updating all targets. |
+
+Additionally, `GET /api/dashboard/overview` now maps `ota_status`, `ota_target_version`, and `ota_last_error` from `devices/{deviceId}` and computes `ota_rollout_status`:
+
+- **`up_to_date`** — Sensor is running the desired firmware (or no target is pinned).
+- **`pending`** — A new `target_firmware_version` is queued in `device_configs/{deviceId}` and will be pulled on the sensor's next wall-power check-in.
+- **`updating`** — Sensor is actively downloading, SHA-256 verifying, and swapping files (NeoPixel solid cyan).
+- **`rolled_back`** — Bootloader automatically restored `.py.bak` after a crash or watchdog timeout; `ota_last_error` surfaces the failure reason.
+- **`error`** — On-device OTA check failed before touching live files (e.g., SHA-256 mismatch or USB read-only mode); `ota_last_error` explains why.
+
+### Fleet & Firmware Tab (`web/`)
+
+The zero-build web dashboard (`web/index.html`, `web/app.js`, `web/api.js`, `web/styles.css`) now organizes the authenticated view into two accessible tabs:
+
+1. **Live & Trends** — Live room cards (with a status pill whenever a sensor is `updating`, `pending`, `rolled_back`, or `error`), 6h/24h/7d interactive SVG charts, and the Layer 1 Device Settings drawer.
+2. **Fleet & Firmware** — Displays:
+   - **Fleet-Wide Promotion Bar**: Pick any `active` release, inspect its notes/size/git SHA, and promote across all rooms (or clear targets) behind a native `<dialog>` confirmation modal.
+   - **Responsive Fleet Table**: Shows each sensor's room, online/stale status, running version badge, target version badge, OTA status + inline `ota_last_error` warnings, and per-device `Promote` / `Clear` controls (automatically transforms into stacked cards on narrow screens via CSS `@container` queries).
+   - **Published Releases**: Compact cards for every manifest in `firmware_releases`, clearly labeling `Active` vs. `Yanked` builds.
+
+### Running the Step 19 Focused Validation
+
+#### Part A: Offline Verification
+```bash
+npm --prefix functions run verify:api
+npm --prefix functions run verify:auth
+node scripts/verify_web_dashboard.mjs
+./scripts/check-secrets.sh
+```
+
+#### Part B: Deploy & Live Wall-Power Rollout from the Dashboard
+1. **Deploy both Cloud Functions and Firebase Hosting** so the new `/api/firmware/*` routes and Fleet & Firmware tab are live together:
+   ```bash
+   firebase deploy --only functions,hosting
+   ```
+2. **Publish a new patch release** (for example, bumping `FIRMWARE_VERSION` in `firmware/app.py` to `1.3.3`) *without* `--set-target` so you trigger the rollout from the web UI:
+   ```bash
+   GOOGLE_APPLICATION_CREDENTIALS= npm --prefix functions run publish:release -- \
+     --version 1.3.3 --notes "Step 19 dashboard rollout test"
+   ```
+3. **Promote from the live Web Dashboard** (with the sensor sealed in its enclosure on wall power):
+   - Open your Firebase Hosting URL, sign in with WorkOS, and switch to the **Fleet & Firmware** tab.
+   - Select `v1.3.3` and click **Promote** (or **Promote All Rooms**), then confirm in the modal dialog.
+   - Click **Refresh** over the next polling cycle and watch the row transition:
+     `Update pending` → `Updating…` → `Up to date` with Running `v1.3.3` live.
+
+> [!TIP]
+> **Canary first, fleet second:** When you add more room sensors in Phase 4, use the per-device **Promote** button in the Fleet table to upgrade one room first and confirm `Up to date` before clicking **Promote All Rooms**.

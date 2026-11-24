@@ -88,44 +88,156 @@
     </section>
 
     <!-- Authenticated Dashboard View -->
-    <div id="dashboard-view" class="dashboard" hidden>
-      <section class="section" aria-labelledby="rooms-heading">
-        <div class="section__header">
-          <div>
-            <h1 id="rooms-heading" class="section__title">Live Sensors</h1>
-            <p id="last-refreshed" class="section__meta">Manual refresh · °F</p>
-          </div>
-          <div id="fleet-summary-pills" class="pill-row"></div>
+    <div id="dashboard-view" class="dashboard-shell" hidden>
+      <div class="dashboard-tabs">
+        <div
+          id="dashboard-tablist"
+          class="tablist"
+          focusgroup="tablist nomemory"
+          aria-label="Dashboard sections"
+        >
+          <button
+            type="button"
+            id="tab-overview"
+            class="tablist__tab"
+            aria-selected="true"
+            focusgroupstart
+          >
+            Live &amp; Trends
+          </button>
+          <button
+            type="button"
+            id="tab-fleet"
+            class="tablist__tab"
+            aria-selected="false"
+          >
+            <span>Fleet &amp; Firmware</span>
+            <span id="tab-fleet-badge" class="tab-badge" hidden></span>
+          </button>
         </div>
 
-        <div id="device-cards" class="device-grid"></div>
-      </section>
+        <div id="panel-overview" class="tabpanel" role="tabpanel" aria-labelledby="tab-overview">
+          <div class="tabpanel__inner dashboard">
+            <section class="section" aria-labelledby="rooms-heading">
+              <div class="section__header">
+                <div>
+                  <h1 id="rooms-heading" class="section__title">Live Sensors</h1>
+                  <p id="last-refreshed" class="section__meta">Manual refresh · °F</p>
+                </div>
+                <div id="fleet-summary-pills" class="pill-row"></div>
+              </div>
 
-      <section class="section" aria-labelledby="trends-heading">
-        <div class="section__header section__header--wrap">
-          <div>
-            <h2 id="trends-heading" class="section__title">Trends &amp; History</h2>
-            <p id="trends-meta" class="section__meta">Select a time window to inspect readings.</p>
-          </div>
+              <div id="device-cards" class="device-grid"></div>
+            </section>
 
-          <div class="controls-bar">
-            <label class="select-wrap" id="device-filter-wrap" hidden>
-              <span class="visually-hidden">Filter by sensor</span>
-              <select id="device-filter-select" class="select-input"></select>
-            </label>
+            <section class="section" aria-labelledby="trends-heading">
+              <div class="section__header section__header--wrap">
+                <div>
+                  <h2 id="trends-heading" class="section__title">Trends &amp; History</h2>
+                  <p id="trends-meta" class="section__meta">Select a time window to inspect readings.</p>
+                </div>
 
-            <div class="segmented" role="group" aria-label="Time range">
-              <button type="button" class="segmented__btn" data-hours="6" data-period="6h" aria-pressed="false">6h</button>
-              <button type="button" class="segmented__btn is-active" data-hours="24" data-period="24h" aria-pressed="true">24h</button>
-              <button type="button" class="segmented__btn" data-hours="168" data-period="7d" aria-pressed="false">7d</button>
-            </div>
+                <div class="controls-bar">
+                  <label class="select-wrap" id="device-filter-wrap" hidden>
+                    <span class="visually-hidden">Filter by sensor</span>
+                    <select id="device-filter-select" class="select-input"></select>
+                  </label>
+
+                  <div class="segmented" role="group" aria-label="Time range">
+                    <button type="button" class="segmented__btn" data-hours="6" data-period="6h" aria-pressed="false">6h</button>
+                    <button type="button" class="segmented__btn is-active" data-hours="24" data-period="24h" aria-pressed="true">24h</button>
+                    <button type="button" class="segmented__btn" data-hours="168" data-period="7d" aria-pressed="false">7d</button>
+                  </div>
+                </div>
+              </div>
+
+              <div id="charts-grid" class="charts-grid"></div>
+
+              <div id="spikes-panel" class="spikes-panel" hidden></div>
+            </section>
           </div>
         </div>
 
-        <div id="charts-grid" class="charts-grid"></div>
+        <div
+          id="panel-fleet"
+          class="tabpanel"
+          role="tabpanel"
+          aria-labelledby="tab-fleet"
+          hidden="until-found"
+        >
+          <div class="tabpanel__inner dashboard">
+            <section class="section" aria-labelledby="fleet-heading">
+              <div class="section__header section__header--wrap">
+                <div>
+                  <h1 id="fleet-heading" class="section__title">Fleet &amp; Firmware</h1>
+                  <p id="fleet-meta" class="section__meta">
+                    Pull-based SHA-256 verified OTA rollouts with automatic A/B rollback.
+                  </p>
+                </div>
+                <div id="fleet-ota-summary-pills" class="pill-row"></div>
+              </div>
 
-        <div id="spikes-panel" class="spikes-panel" hidden></div>
-      </section>
+              <div class="rollout-card" aria-labelledby="fleet-rollout-heading">
+                <div class="rollout-card__header">
+                  <div>
+                    <h2 id="fleet-rollout-heading" class="rollout-card__title">Fleet-Wide Promotion</h2>
+                    <p id="fleet-release-meta" class="rollout-card__meta">
+                      Select a published release to promote across all sensors.
+                    </p>
+                  </div>
+                  <div class="rollout-card__controls">
+                    <label class="select-wrap" for="fleet-release-select">
+                      <span class="visually-hidden">Target firmware release for all rooms</span>
+                      <select id="fleet-release-select" class="select-input"></select>
+                    </label>
+                    <button type="button" id="fleet-promote-btn" class="btn btn--primary" disabled>
+                      Promote All Rooms
+                    </button>
+                    <button type="button" id="fleet-clear-btn" class="btn btn--secondary" disabled>
+                      Clear Targets
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                tabindex="0"
+                role="region"
+                aria-labelledby="fleet-table-caption"
+                class="table-wrapper"
+              >
+                <table class="fleet-table">
+                  <caption id="fleet-table-caption" class="visually-hidden">
+                    Sensor fleet firmware versions, OTA rollout status, and per-device promotion controls
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Sensor</th>
+                      <th scope="col">Running</th>
+                      <th scope="col">Target</th>
+                      <th scope="col">OTA Status</th>
+                      <th scope="col">Rollout Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fleet-table-body"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="releases-heading">
+              <div class="section__header">
+                <div>
+                  <h2 id="releases-heading" class="section__title">Published Releases</h2>
+                  <p id="releases-meta" class="section__meta">
+                    Manifests stored in <code>firmware_releases</code> with SHA-256 checksums.
+                  </p>
+                </div>
+              </div>
+              <div id="releases-list" class="releases-grid"></div>
+            </section>
+          </div>
+        </div>
+      </div>
     </div>
   </main>
 
@@ -289,6 +401,19 @@
     <form method="dialog" class="confirm-dialog__actions">
       <button type="submit" value="cancel" class="btn btn--secondary" autofocus>Cancel</button>
       <button type="submit" value="reboot" class="btn btn--danger">Request Reboot</button>
+    </form>
+  </dialog>
+
+  <!-- Firmware Rollout Confirmation Modal (native modal <dialog>) -->
+  <dialog id="rollout-dialog" class="confirm-dialog" aria-labelledby="rollout-dialog-title">
+    <h1 id="rollout-dialog-title" class="confirm-dialog__title">Promote firmware release?</h1>
+    <p id="rollout-dialog-body" class="confirm-dialog__body"></p>
+    <p id="rollout-dialog-notes" class="confirm-dialog__notes" hidden></p>
+    <form method="dialog" class="confirm-dialog__actions">
+      <button type="submit" value="cancel" class="btn btn--secondary" autofocus>Cancel</button>
+      <button type="submit" value="confirm" id="rollout-confirm-btn" class="btn btn--primary">
+        Promote Firmware
+      </button>
     </form>
   </dialog>
 

@@ -163,3 +163,40 @@ export function triggerDeviceReboot(deviceId) {
     method: "POST",
   });
 }
+
+/**
+ * Lists all published OTA firmware release manifests (newest-first).
+ */
+export function fetchFirmwareReleases() {
+  return authenticatedJsonFetch("/api/firmware/releases");
+}
+
+/**
+ * Sets or clears `target_firmware_version` for a single sensor device.
+ *
+ * @param {string} deviceId
+ * @param {string | null} targetFirmwareVersion
+ */
+export function setDeviceTargetFirmware(deviceId, targetFirmwareVersion) {
+  return authenticatedJsonFetch(`/api/devices/${encodeURIComponent(deviceId)}/firmware`, {
+    method: "PUT",
+    body: { target_firmware_version: targetFirmwareVersion },
+  });
+}
+
+/**
+ * Sets or clears `target_firmware_version` across all registered sensors (or a subset).
+ *
+ * @param {string | null} targetFirmwareVersion
+ * @param {string[]} [deviceIds]
+ */
+export function triggerFleetRollout(targetFirmwareVersion, deviceIds) {
+  const body = { target_firmware_version: targetFirmwareVersion };
+  if (Array.isArray(deviceIds) && deviceIds.length > 0) {
+    body.device_ids = deviceIds;
+  }
+  return authenticatedJsonFetch("/api/firmware/rollout", {
+    method: "POST",
+    body,
+  });
+}

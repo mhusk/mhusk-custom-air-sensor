@@ -13,9 +13,12 @@ import {
   ApiError,
   fetchAuthConfig,
   fetchDashboardOverview,
+  fetchFirmwareReleases,
   fetchReadingsHistory,
   saveDeviceConfig,
+  setDeviceTargetFirmware,
   triggerDeviceReboot,
+  triggerFleetRollout,
 } from "./api.js";
 import {
   clearSession,
@@ -35,11 +38,14 @@ const state = {
   authConfig: null,
   session: null,
   overview: null,
+  releases: [],
+  activeTab: "overview",
   selectedDeviceId: null,
   hours: 24,
   period: "24h",
   historyPayload: null,
   editingDeviceId: null,
+  pendingRollout: null,
   isRefreshing: false,
 };
 
@@ -66,9 +72,25 @@ const els = {
   bearerLoginBtn: document.getElementById("bearer-login-btn"),
 
   dashboardView: document.getElementById("dashboard-view"),
+  dashboardTablist: document.getElementById("dashboard-tablist"),
+  tabOverview: document.getElementById("tab-overview"),
+  tabFleet: document.getElementById("tab-fleet"),
+  tabFleetBadge: document.getElementById("tab-fleet-badge"),
+  panelOverview: document.getElementById("panel-overview"),
+  panelFleet: document.getElementById("panel-fleet"),
   lastRefreshed: document.getElementById("last-refreshed"),
   fleetSummaryPills: document.getElementById("fleet-summary-pills"),
   deviceCards: document.getElementById("device-cards"),
+
+  fleetMeta: document.getElementById("fleet-meta"),
+  fleetOtaSummaryPills: document.getElementById("fleet-ota-summary-pills"),
+  fleetReleaseSelect: document.getElementById("fleet-release-select"),
+  fleetReleaseMeta: document.getElementById("fleet-release-meta"),
+  fleetPromoteBtn: document.getElementById("fleet-promote-btn"),
+  fleetClearBtn: document.getElementById("fleet-clear-btn"),
+  fleetTableBody: document.getElementById("fleet-table-body"),
+  releasesMeta: document.getElementById("releases-meta"),
+  releasesList: document.getElementById("releases-list"),
 
   trendsMeta: document.getElementById("trends-meta"),
   deviceFilterWrap: document.getElementById("device-filter-wrap"),
@@ -99,6 +121,12 @@ const els = {
 
   rebootDialog: document.getElementById("reboot-dialog"),
   rebootDialogBody: document.getElementById("reboot-dialog-body"),
+
+  rolloutDialog: document.getElementById("rollout-dialog"),
+  rolloutDialogTitle: document.getElementById("rollout-dialog-title"),
+  rolloutDialogBody: document.getElementById("rollout-dialog-body"),
+  rolloutDialogNotes: document.getElementById("rollout-dialog-notes"),
+  rolloutConfirmBtn: document.getElementById("rollout-confirm-btn"),
 };
 
 // ============================================================================
@@ -162,7 +190,7 @@ async function closeModalDialog(dialog, returnValue) {
 
 function installDialogEnhancements() {
   // Route native cancel (Esc / closedby light-dismiss) through exit animation fallback
-  for (const dialog of [els.settingsDialog, els.rebootDialog]) {
+  for (const dialog of [els.settingsDialog, els.rebootDialog, els.rolloutDialog]) {
     dialog.addEventListener("cancel", (event) => {
       if (!supportsTopLayerExit()) {
         event.preventDefault();
@@ -347,6 +375,89 @@ function installAccessibleFormValidation() {
   );
 }
 
+function installTabsController() {
+  const tablist = els.dashboardTablist;
+  const tabs = [els.tabOverview, els.tabFleet];
+  const panels = [els.panelOverview, els.panelFleet];
+  const tabKeys = ["overview", "fleet"];
+  const supportsFocusGroup = "focusGroup" in HTMLElement.prototype;
+
+  if (!supportsFocusGroup) {
+    tablist.setAttribute("role", "tablist");
+    for (const tab of tabs) {
+      tab.setAttribute("role", "tab");
+    }
+  }
+
+  const selectTab = (index, { moveFocus = false } = {}) => {
+    const safeIndex = ((index % tabs.length) + tabs.length) % tabs.length;
+    state.activeTab = tabKeys[safeIndex];
+
+    tabs.forEach((tab, i) => {
+      const selected = i === safeIndex;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.toggleAttribute("focusgroupstart", selected);
+      if (!supportsFocusGroup) {
+        tab.tabIndex = selected ? 0 : -1;
+      }
+      if (selected) {
+        tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+        if (moveFocus) {
+          tab.focus();
+        }
+      }
+    });
+
+    panels.forEach((panel, i) => {
+      const selected = i === safeIndex;
+      if (selected) {
+        panel.hidden = false;
+      } else {
+        panel.hidden = "until-found";
+      }
+    });
+  };
+
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => selectTab(i));
+    // Selection follows focus when arrowing through tabs
+    tab.addEventListener("focus", () => {
+      if (tab.getAttribute("aria-selected") !== "true") {
+        selectTab(i);
+      }
+    });
+  });
+
+  if (!supportsFocusGroup) {
+    tablist.addEventListener("keydown", (event) => {
+      const currentIdx = tabs.indexOf(document.activeElement);
+      if (currentIdx === -1) return;
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        selectTab(currentIdx + 1, { moveFocus: true });
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        selectTab(currentIdx - 1, { moveFocus: true });
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        selectTab(0, { moveFocus: true });
+      } else if (event.key === "End") {
+        event.preventDefault();
+        selectTab(tabs.length - 1, { moveFocus: true });
+      }
+    });
+  }
+
+  // Sync tab selection when browser find-in-page matches text in a hidden="until-found" panel
+  panels.forEach((panel, i) => {
+    panel.addEventListener("beforematch", () => {
+      selectTab(i);
+    });
+  });
+
+  selectTab(0);
+}
+
 // ============================================================================
 // Formatting & Presentation Helpers
 // ============================================================================
@@ -375,6 +486,35 @@ function formatLocalTimestamp(isoString) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function describeOtaStatus(status) {
+  switch (status) {
+    case "updating":
+      return { label: "Updating…", tone: "info", withDot: true };
+    case "pending":
+      return { label: "Update pending", tone: "warn", withDot: true };
+    case "rolled_back":
+      return { label: "Rolled back", tone: "danger", withDot: true };
+    case "error":
+      return { label: "OTA error", tone: "danger", withDot: true };
+    default:
+      return { label: "Up to date", tone: "good", withDot: false };
+  }
+}
+
+function getActiveReleases() {
+  return (state.releases || []).filter((r) => r.status !== "yanked");
+}
+
+function findReleaseByVersion(version) {
+  return (state.releases || []).find((r) => r.version === version) || null;
 }
 
 function toneForAqi(aqi) {
@@ -520,6 +660,11 @@ function renderDeviceCards() {
       );
     } else {
       badges.append(createPill("Local defaults", "neutral"));
+    }
+
+    if (item.ota_rollout_status && item.ota_rollout_status !== "up_to_date") {
+      const otaMeta = describeOtaStatus(item.ota_rollout_status);
+      badges.append(createPill(otaMeta.label, otaMeta.tone, otaMeta.withDot));
     }
 
     top.append(idWrap, badges);
@@ -777,6 +922,406 @@ function renderCharts() {
 }
 
 // ============================================================================
+// Fleet & Firmware Rollout Panel
+// ============================================================================
+
+function updateFleetReleasePreview() {
+  const version = els.fleetReleaseSelect.value;
+  const release = findReleaseByVersion(version);
+  if (!release) {
+    els.fleetReleaseMeta.textContent =
+      "No active firmware releases published yet. Publish one via `npm --prefix functions run publish:release`.";
+    return;
+  }
+  const summaryParts = [
+    `v${release.version}`,
+    `${release.file_count} file${release.file_count === 1 ? "" : "s"}`,
+    formatBytes(release.total_size_bytes),
+    release.git_sha ? `git ${release.git_sha.slice(0, 7)}` : null,
+  ].filter(Boolean);
+  els.fleetReleaseMeta.textContent = release.notes
+    ? `${summaryParts.join(" · ")} — ${release.notes}`
+    : summaryParts.join(" · ");
+}
+
+function renderFleetPanel() {
+  const overview = state.overview;
+  const devices = overview?.devices || [];
+  const activeReleases = getActiveReleases();
+
+  // 1. Summary pills & tab badge
+  els.fleetOtaSummaryPills.replaceChildren();
+  let upToDateCount = 0;
+  let updatingCount = 0;
+  let pendingCount = 0;
+  let alertCount = 0;
+  let anyTargetSet = false;
+
+  for (const item of devices) {
+    const status = item.ota_rollout_status || "up_to_date";
+    if (item.desired_config?.target_firmware_version) {
+      anyTargetSet = true;
+    }
+    if (status === "up_to_date") upToDateCount += 1;
+    else if (status === "updating") updatingCount += 1;
+    else if (status === "pending") pendingCount += 1;
+    else alertCount += 1;
+  }
+
+  els.fleetOtaSummaryPills.append(
+    createPill(
+      `${upToDateCount} / ${devices.length} up to date`,
+      devices.length > 0 && upToDateCount === devices.length ? "good" : "neutral"
+    )
+  );
+  if (updatingCount > 0) {
+    els.fleetOtaSummaryPills.append(createPill(`${updatingCount} updating`, "info", true));
+  }
+  if (pendingCount > 0) {
+    els.fleetOtaSummaryPills.append(createPill(`${pendingCount} pending`, "warn", true));
+  }
+  if (alertCount > 0) {
+    els.fleetOtaSummaryPills.append(createPill(`${alertCount} rollback / error`, "danger", true));
+  }
+
+  if (alertCount > 0) {
+    els.tabFleetBadge.textContent = `${alertCount} !`;
+    els.tabFleetBadge.className = "tab-badge tab-badge--danger";
+    els.tabFleetBadge.hidden = false;
+  } else if (updatingCount > 0) {
+    els.tabFleetBadge.textContent = `${updatingCount}`;
+    els.tabFleetBadge.className = "tab-badge tab-badge--info";
+    els.tabFleetBadge.hidden = false;
+  } else if (pendingCount > 0) {
+    els.tabFleetBadge.textContent = `${pendingCount}`;
+    els.tabFleetBadge.className = "tab-badge";
+    els.tabFleetBadge.hidden = false;
+  } else {
+    els.tabFleetBadge.hidden = true;
+    els.tabFleetBadge.textContent = "";
+  }
+
+  // 2. Fleet-wide release selector
+  const prevSelected = els.fleetReleaseSelect.value;
+  els.fleetReleaseSelect.replaceChildren();
+  if (activeReleases.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No active releases";
+    els.fleetReleaseSelect.append(opt);
+    els.fleetReleaseSelect.disabled = true;
+    els.fleetPromoteBtn.disabled = true;
+  } else {
+    for (const rel of activeReleases) {
+      const opt = document.createElement("option");
+      opt.value = rel.version;
+      opt.textContent = `v${rel.version} (${formatLocalTimestamp(rel.created_at)})`;
+      els.fleetReleaseSelect.append(opt);
+    }
+    if (prevSelected && activeReleases.some((r) => r.version === prevSelected)) {
+      els.fleetReleaseSelect.value = prevSelected;
+    }
+    els.fleetReleaseSelect.disabled = false;
+    els.fleetPromoteBtn.disabled = devices.length === 0;
+  }
+  els.fleetClearBtn.disabled = devices.length === 0 || !anyTargetSet;
+  updateFleetReleasePreview();
+
+  // 3. Fleet responsive table rows
+  els.fleetTableBody.replaceChildren();
+  if (devices.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "fleet-empty-cell";
+    td.textContent = "No sensors have reported to Firestore yet.";
+    tr.append(td);
+    els.fleetTableBody.append(tr);
+  } else {
+    for (const item of devices) {
+      const { device, desired_config: desired } = item;
+      const rolloutStatus = item.ota_rollout_status || "up_to_date";
+      const targetVersion = desired?.target_firmware_version ?? null;
+
+      const tr = document.createElement("tr");
+
+      // Col 1: Sensor (<th scope="row"> for sticky row header & mobile card header)
+      const th = document.createElement("th");
+      th.scope = "row";
+      const sensorWrap = document.createElement("div");
+      sensorWrap.className = "fleet-sensor";
+
+      const head = document.createElement("div");
+      head.className = "fleet-sensor__head";
+      const roomSpan = document.createElement("span");
+      roomSpan.className = "fleet-sensor__room";
+      roomSpan.textContent = formatRoomName(device.location);
+      const onlineTone =
+        device.status === "online" ? "good" : device.status === "stale" ? "warn" : "danger";
+      head.append(roomSpan, createPill(device.status.toUpperCase(), onlineTone, true));
+
+      const idSpan = document.createElement("span");
+      idSpan.className = "fleet-sensor__id";
+      idSpan.textContent = `${device.device_id} · seen ${formatMinutesAgo(device.minutes_since_last_seen)}`;
+
+      sensorWrap.append(head, idSpan);
+      th.append(sensorWrap);
+      tr.append(th);
+
+      // Col 2: Running firmware version
+      const tdRunning = document.createElement("td");
+      const runningBadge = document.createElement("span");
+      runningBadge.className = "version-badge";
+      runningBadge.textContent = `v${device.firmware_version}`;
+      tdRunning.append(runningBadge);
+      tr.append(tdRunning);
+
+      // Col 3: Target firmware version
+      const tdTarget = document.createElement("td");
+      const targetBadge = document.createElement("span");
+      if (targetVersion) {
+        targetBadge.className =
+          targetVersion !== device.firmware_version
+            ? "version-badge version-badge--target"
+            : "version-badge";
+        targetBadge.textContent = `v${targetVersion}`;
+      } else {
+        targetBadge.className = "version-badge version-badge--muted";
+        targetBadge.textContent = "None";
+      }
+      tdTarget.append(targetBadge);
+      tr.append(tdTarget);
+
+      // Col 4: OTA Status + rollback/error details
+      const tdStatus = document.createElement("td");
+      const statusWrap = document.createElement("div");
+      statusWrap.className = "ota-status-cell";
+      const otaMeta = describeOtaStatus(rolloutStatus);
+      statusWrap.append(createPill(otaMeta.label, otaMeta.tone, otaMeta.withDot));
+
+      if (device.ota_last_error) {
+        const errNote = document.createElement("p");
+        errNote.className = "ota-error-note";
+        errNote.textContent = device.ota_last_error;
+        statusWrap.append(errNote);
+      } else if (rolloutStatus === "pending" && targetVersion) {
+        const pendingNote = document.createElement("span");
+        pendingNote.className = "fleet-sensor__id";
+        pendingNote.textContent = `Queued for next check-in (v${device.firmware_version} → v${targetVersion})`;
+        statusWrap.append(pendingNote);
+      }
+      tdStatus.append(statusWrap);
+      tr.append(tdStatus);
+
+      // Col 5: Per-device rollout controls
+      const tdAction = document.createElement("td");
+      const actionGroup = document.createElement("div");
+      actionGroup.className = "fleet-action-group";
+
+      if (activeReleases.length > 0) {
+        const select = document.createElement("select");
+        select.className = "select-input";
+        select.setAttribute("aria-label", `Select target firmware for ${device.device_id}`);
+        for (const rel of activeReleases) {
+          const opt = document.createElement("option");
+          opt.value = rel.version;
+          opt.textContent = `v${rel.version}`;
+          select.append(opt);
+        }
+        if (targetVersion && activeReleases.some((r) => r.version === targetVersion)) {
+          select.value = targetVersion;
+        }
+
+        const promoteBtn = document.createElement("button");
+        promoteBtn.type = "button";
+        promoteBtn.className = "btn btn--primary btn--sm";
+        promoteBtn.textContent = "Promote";
+        promoteBtn.addEventListener("click", () => {
+          openRolloutConfirm({
+            scope: "device",
+            deviceId: device.device_id,
+            deviceLocation: device.location,
+            currentVersion: device.firmware_version,
+            targetVersion: select.value,
+          });
+        });
+
+        actionGroup.append(select, promoteBtn);
+      } else {
+        const noRel = document.createElement("span");
+        noRel.className = "fleet-sensor__id";
+        noRel.textContent = "Publish a release first";
+        actionGroup.append(noRel);
+      }
+
+      if (targetVersion) {
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "btn btn--ghost btn--sm";
+        clearBtn.textContent = "Clear";
+        clearBtn.addEventListener("click", () => {
+          openRolloutConfirm({
+            scope: "device",
+            deviceId: device.device_id,
+            deviceLocation: device.location,
+            currentVersion: device.firmware_version,
+            targetVersion: null,
+          });
+        });
+        actionGroup.append(clearBtn);
+      }
+
+      tdAction.append(actionGroup);
+      tr.append(tdAction);
+      els.fleetTableBody.append(tr);
+    }
+  }
+
+  renderReleasesList();
+}
+
+function renderReleasesList() {
+  els.releasesList.replaceChildren();
+  const releases = state.releases || [];
+
+  if (releases.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "section__meta";
+    empty.textContent =
+      "No firmware releases found in Firestore yet. Run `npm --prefix functions run publish:release` to publish your first release.";
+    els.releasesList.append(empty);
+    return;
+  }
+
+  for (const rel of releases) {
+    const card = document.createElement("article");
+    card.className = "release-card";
+
+    const top = document.createElement("div");
+    top.className = "release-card__top";
+
+    const ver = document.createElement("span");
+    ver.className = "version-badge";
+    ver.textContent = `v${rel.version}`;
+
+    const statusPill = createPill(
+      rel.status === "yanked" ? "Yanked" : "Active",
+      rel.status === "yanked" ? "danger" : "good"
+    );
+
+    top.append(ver, statusPill);
+    card.append(top);
+
+    const notes = document.createElement("p");
+    notes.className = "release-card__notes";
+    notes.textContent = rel.notes || "No release notes provided.";
+    card.append(notes);
+
+    const meta = document.createElement("div");
+    meta.className = "release-card__meta";
+    const metaParts = [
+      `${rel.file_count} file${rel.file_count === 1 ? "" : "s"}`,
+      formatBytes(rel.total_size_bytes),
+      `Bootloader >= v${rel.min_bootloader_version}`,
+      rel.git_sha ? `git ${rel.git_sha.slice(0, 7)}` : null,
+      formatLocalTimestamp(rel.created_at),
+    ].filter(Boolean);
+    for (const part of metaParts) {
+      const span = document.createElement("span");
+      span.textContent = part;
+      meta.append(span);
+    }
+    card.append(meta);
+
+    els.releasesList.append(card);
+  }
+}
+
+function openRolloutConfirm(plan) {
+  state.pendingRollout = plan;
+  const isClear = plan.targetVersion === null;
+  const release = isClear ? null : findReleaseByVersion(plan.targetVersion);
+
+  if (isClear) {
+    els.rolloutDialogTitle.textContent =
+      plan.scope === "fleet"
+        ? "Clear firmware targets across all rooms?"
+        : `Clear firmware target for ${plan.deviceId}?`;
+    els.rolloutDialogBody.textContent =
+      plan.scope === "fleet"
+        ? "This removes target_firmware_version from every sensor's device_configs document. Sensors will remain on their currently running firmware."
+        : `This removes target_firmware_version from ${plan.deviceId} (${formatRoomName(plan.deviceLocation)}). It will remain on v${plan.currentVersion}.`;
+    els.rolloutConfirmBtn.textContent = "Clear Target";
+    els.rolloutConfirmBtn.className = "btn btn--danger";
+    els.rolloutDialogNotes.hidden = true;
+    els.rolloutDialogNotes.textContent = "";
+  } else {
+    const deviceCount = state.overview?.devices?.length ?? 0;
+    els.rolloutDialogTitle.textContent =
+      plan.scope === "fleet"
+        ? `Promote all ${deviceCount} sensor${deviceCount === 1 ? "" : "s"} to v${plan.targetVersion}?`
+        : `Promote ${plan.deviceId} to v${plan.targetVersion}?`;
+    els.rolloutDialogBody.textContent =
+      plan.scope === "fleet"
+        ? `Each sensor on wall power will download the SHA-256 verified v${plan.targetVersion} bundle on its next check-in, reboot, and auto-rollback if boot fails.`
+        : `${plan.deviceId} (${formatRoomName(plan.deviceLocation)}) is currently running v${plan.currentVersion}. On its next wall-power check-in, it will download v${plan.targetVersion}, verify SHA-256 checksums, and reboot with automatic rollback protection.`;
+    els.rolloutConfirmBtn.textContent =
+      plan.scope === "fleet" ? `Promote All to v${plan.targetVersion}` : `Promote to v${plan.targetVersion}`;
+    els.rolloutConfirmBtn.className = "btn btn--primary";
+    if (release?.notes) {
+      els.rolloutDialogNotes.textContent = `Release notes: ${release.notes}`;
+      els.rolloutDialogNotes.hidden = false;
+    } else {
+      els.rolloutDialogNotes.hidden = true;
+      els.rolloutDialogNotes.textContent = "";
+    }
+  }
+
+  els.rolloutDialog.showModal();
+}
+
+async function executePendingRollout() {
+  const plan = state.pendingRollout;
+  state.pendingRollout = null;
+  if (!plan) return;
+
+  els.fleetPromoteBtn.disabled = true;
+  els.fleetClearBtn.disabled = true;
+
+  try {
+    if (plan.scope === "fleet") {
+      const res = await triggerFleetRollout(plan.targetVersion);
+      const count = res.updated_count ?? 0;
+      const msg =
+        plan.targetVersion === null
+          ? `Cleared target_firmware_version across ${count} sensor${count === 1 ? "" : "s"}.`
+          : `Queued firmware v${plan.targetVersion} across ${count} sensor${count === 1 ? "" : "s"}. Sensors will update on their next check-in.`;
+      showBanner(msg, plan.targetVersion === null ? "warn" : "success");
+    } else {
+      await setDeviceTargetFirmware(plan.deviceId, plan.targetVersion);
+      const msg =
+        plan.targetVersion === null
+          ? `Cleared target_firmware_version for ${plan.deviceId}.`
+          : `Queued firmware v${plan.targetVersion} for ${plan.deviceId}. Watch status transition from pending → updating → up to date on next check-in.`;
+      showBanner(msg, plan.targetVersion === null ? "warn" : "success");
+    }
+
+    await refreshDashboard({ silentBanner: true });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    showBanner(
+      err instanceof Error ? err.message : "Failed to update target firmware version.",
+      "danger"
+    );
+  } finally {
+    renderFleetPanel();
+  }
+}
+
+// ============================================================================
 // Device Settings Drawer & Remote Reboot Confirmation
 // ============================================================================
 
@@ -947,6 +1492,7 @@ async function executeRemoteReboot() {
 function handleSessionExpired() {
   clearSession();
   state.session = null;
+  if (els.rolloutDialog.open) els.rolloutDialog.close("");
   if (els.rebootDialog.open) els.rebootDialog.close("");
   if (els.settingsDialog.open) els.settingsDialog.close("");
   setView("auth");
@@ -985,8 +1531,12 @@ async function refreshDashboard({ silentBanner = false } = {}) {
   }
 
   try {
-    const overview = await fetchDashboardOverview();
+    const [overview, releasesPayload] = await Promise.all([
+      fetchDashboardOverview(),
+      fetchFirmwareReleases().catch(() => ({ count: 0, releases: [] })),
+    ]);
     state.overview = overview;
+    state.releases = Array.isArray(releasesPayload?.releases) ? releasesPayload.releases : [];
 
     if (
       !state.selectedDeviceId ||
@@ -996,6 +1546,7 @@ async function refreshDashboard({ silentBanner = false } = {}) {
     }
 
     renderDeviceCards();
+    renderFleetPanel();
     await loadCharts();
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
@@ -1047,6 +1598,7 @@ async function init() {
   enhanceNativeSwitches();
   installDialogEnhancements();
   installAccessibleFormValidation();
+  installTabsController();
   setView("loading");
 
   // 1. Check if returning from WorkOS AuthKit redirect (/auth/callback?code=...)
@@ -1119,9 +1671,38 @@ els.signoutBtn.addEventListener("click", async () => {
   clearSession();
   state.session = null;
   state.overview = null;
+  state.releases = [];
   state.historyPayload = null;
   hideBanner();
   await loadAuthScreen();
+});
+
+els.fleetReleaseSelect.addEventListener("change", updateFleetReleasePreview);
+
+els.fleetPromoteBtn.addEventListener("click", () => {
+  const targetVersion = els.fleetReleaseSelect.value;
+  if (!targetVersion) return;
+  openRolloutConfirm({
+    scope: "fleet",
+    targetVersion,
+  });
+});
+
+els.fleetClearBtn.addEventListener("click", () => {
+  openRolloutConfirm({
+    scope: "fleet",
+    targetVersion: null,
+  });
+});
+
+els.rolloutDialog.addEventListener("close", () => {
+  const choice = els.rolloutDialog.returnValue;
+  els.rolloutDialog.returnValue = "";
+  if (choice === "confirm") {
+    executePendingRollout();
+  } else {
+    state.pendingRollout = null;
+  }
 });
 
 els.deviceFilterSelect.addEventListener("change", () => {

@@ -86,6 +86,15 @@ export interface DeviceLatestReadingSnapshot {
   aqi_category: AqiCategory;
 }
 
+export type OtaStatus = "up_to_date" | "updating" | "rolled_back" | "error";
+
+const VALID_OTA_STATUSES = new Set<OtaStatus>([
+  "up_to_date",
+  "updating",
+  "rolled_back",
+  "error",
+]);
+
 export interface DeviceStatus {
   device_id: string;
   location: string;
@@ -102,6 +111,9 @@ export interface DeviceStatus {
   temperature_offset_c?: number | null;
   altitude_m?: number | null;
   led_enabled?: boolean | null;
+  ota_status?: OtaStatus | null;
+  ota_target_version?: string | null;
+  ota_last_error?: string | null;
 }
 
 export interface DeviceConfig {
@@ -442,6 +454,21 @@ function mapDeviceData(docId: string, data: DocumentData, now: Date): DeviceStat
         ? Math.round(data.altitude_m)
         : null,
     led_enabled: typeof data.led_enabled === "boolean" ? data.led_enabled : null,
+    ota_status:
+      typeof data.ota_status === "string" &&
+      VALID_OTA_STATUSES.has(data.ota_status as OtaStatus)
+        ? (data.ota_status as OtaStatus)
+        : null,
+    ota_target_version:
+      typeof data.ota_target_version === "string" &&
+      data.ota_target_version.trim().length > 0
+        ? data.ota_target_version.trim()
+        : null,
+    ota_last_error:
+      typeof data.ota_last_error === "string" &&
+      data.ota_last_error.trim().length > 0
+        ? data.ota_last_error.trim()
+        : null,
   };
 }
 

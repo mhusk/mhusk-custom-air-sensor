@@ -18,17 +18,22 @@ import {
   getAirQualitySummary,
   getDb,
   getDeviceConfig,
+  getFirmwareRelease,
   getLatestReading,
   getReadingsHistory,
   getSensorStatus,
+  isValidFirmwareVersion,
   listDeviceConfigs,
+  listFirmwareReleases,
   requestDeviceReboot,
+  setDeviceTargetFirmwareVersion,
   updateDeviceConfig,
   type AirQualityReading,
   type AirQualitySummaryOptions,
   type AirQualitySummaryResult,
   type DeviceConfig,
   type DeviceStatus,
+  type FirmwareReleaseManifest,
   type LatestReadingOptions,
   type LatestReadingResult,
   type ReadingHealthContext,
@@ -62,12 +67,27 @@ export interface DashboardDataService {
     updatedBy: string
   ) => Promise<DeviceConfig>;
   requestDeviceReboot: (deviceId: string, updatedBy: string) => Promise<DeviceConfig>;
+  listFirmwareReleases: () => Promise<FirmwareReleaseManifest[]>;
+  getFirmwareRelease: (version: string) => Promise<FirmwareReleaseManifest | null>;
+  setDeviceTargetFirmwareVersion: (
+    deviceId: string,
+    targetVersion: string | null,
+    updatedBy: string
+  ) => Promise<DeviceConfig>;
 }
+
+export type OtaRolloutStatus =
+  | "up_to_date"
+  | "pending"
+  | "updating"
+  | "rolled_back"
+  | "error";
 
 export interface DashboardDeviceOverviewItem {
   device: DeviceStatus;
   desired_config: DeviceConfig | null;
   config_sync_status: "synced" | "pending" | "local_defaults";
+  ota_rollout_status: OtaRolloutStatus;
   health_context: ReadingHealthContext | null;
 }
 
@@ -121,6 +141,45 @@ const authRefreshSchema = z
   })
   .strict();
 
+export const setTargetFirmwareSchema = z
+  .object({
+    target_firmware_version: z
+      .string()
+      .trim()
+      .refine(
+        isValidFirmwareVersion,
+        "target_firmware_version must be a valid SemVer string (e.g. 1.3.2)."
+      )
+      .nullable(),
+  })
+  .strict();
+
+export const fleetRolloutSchema = z
+  .object({
+    target_firmware_version: z
+      .string()
+      .trim()
+      .refine(
+        isValidFirmwareVersion,
+        "target_firmware_version must be a valid SemVer string (e.g. 1.3.2)."
+      )
+      .nullable(),
+    device_ids: z
+      .array(
+        z
+          .string()
+          .trim()
+          .regex(
+            DEVICE_ID_REGEX,
+            "Each device_id must be 1-64 characters using letters, numbers, underscores, or hyphens."
+          )
+      )
+      .min(1, "device_ids must contain at least one device ID when provided.")
+      .max(50, "device_ids cannot exceed 50 devices in a single rollout.")
+      .optional(),
+  })
+  .strict();
+
 const SUMMARY_PERIOD_VALUES = new Set<SummaryPeriod>(["1h", "6h", "24h", "7d", "30d"]);
 
 export function createFirestoreDashboardService(
@@ -137,6 +196,10 @@ export function createFirestoreDashboardService(
       updateDeviceConfig(deviceId, input, updatedBy, db),
     requestDeviceReboot: (deviceId, updatedBy) =>
       requestDeviceReboot(deviceId, updatedBy, db),
+    listFirmwareReleases: () => listFirmwareReleases(db),
+    getFirmwareRelease: (version) => getFirmwareRelease(version, db),
+    setDeviceTargetFirmwareVersion: (deviceId, targetVersion, updatedBy) =>
+      setDeviceTargetFirmwareVersion(deviceId, targetVersion, updatedBy, db),
   };
 }
 
@@ -245,6 +308,29 @@ function computeConfigSyncStatus(
   return "pending";
 }
 
+export function computeOtaRolloutStatus(
+  device: DeviceStatus,
+  desired: DeviceConfig | null
+): OtaRolloutStatus {
+  const target = desired?.target_firmware_version ?? null;
+  if (device.ota_status === "updating") {
+    return "updating";
+  }
+  if (target && target !== device.firmware_version) {
+    if (
+      (device.ota_status === "rolled_back" || device.ota_status === "error") &&
+      device.ota_target_version === target
+    ) {
+      return device.ota_status;
+    }
+    return "pending";
+  }
+  if (device.ota_status === "rolled_back" || device.ota_status === "error") {
+    return device.ota_status;
+  }
+  return "up_to_date";
+}
+
 function buildHealthContextFromLatest(device: DeviceStatus): ReadingHealthContext | null {
   const latest = device.latest_reading;
   if (!latest) {
@@ -283,7 +369,7 @@ function resolvePeriodFromHours(hours: number): SummaryPeriod {
 
 function matchDeviceConfigRoute(
   pathname: string
-): { deviceId: string; action: "config" | "reboot" } | null {
+): { deviceId: string; action: "config" | "reboot" | "firmware" } | null {
   const configMatch = /^\/api\/devices\/([^/]+)\/config$/.exec(pathname);
   if (configMatch) {
     return { deviceId: decodeURIComponent(configMatch[1]), action: "config" };
@@ -291,6 +377,10 @@ function matchDeviceConfigRoute(
   const rebootMatch = /^\/api\/devices\/([^/]+)\/reboot$/.exec(pathname);
   if (rebootMatch) {
     return { deviceId: decodeURIComponent(rebootMatch[1]), action: "reboot" };
+  }
+  const firmwareMatch = /^\/api\/devices\/([^/]+)\/firmware$/.exec(pathname);
+  if (firmwareMatch) {
+    return { deviceId: decodeURIComponent(firmwareMatch[1]), action: "firmware" };
   }
   return null;
 }
@@ -307,8 +397,11 @@ function matchDeviceConfigRoute(
  *   - GET  /api/me
  *   - GET  /api/dashboard/overview
  *   - GET  /api/readings/history
+ *   - GET  /api/firmware/releases
+ *   - POST /api/firmware/rollout
  *   - GET  /api/devices/:deviceId/config
  *   - PUT  /api/devices/:deviceId/config
+ *   - PUT  /api/devices/:deviceId/firmware
  *   - POST /api/devices/:deviceId/reboot
  */
 export async function handleDashboardApiRequest(
@@ -480,6 +573,7 @@ export async function handleDashboardApiRequest(
           device,
           desired_config: desired,
           config_sync_status: computeConfigSyncStatus(device, desired),
+          ota_rollout_status: computeOtaRolloutStatus(device, desired),
           health_context: buildHealthContextFromLatest(device),
         };
       });
@@ -573,7 +667,102 @@ export async function handleDashboardApiRequest(
       return;
     }
 
-    // 8. /api/devices/:deviceId/config & /api/devices/:deviceId/reboot
+    // 8. GET /api/firmware/releases — list published OTA release manifests (newest-first)
+    if (pathname === "/api/firmware/releases") {
+      if (method !== "GET") {
+        sendJson(res, 405, {
+          error: "method_not_allowed",
+          message: `Method ${method} is not allowed for ${pathname}.`,
+        });
+        return;
+      }
+
+      const releases = await service.listFirmwareReleases();
+      sendJson(res, 200, {
+        count: releases.length,
+        releases,
+      });
+      return;
+    }
+
+    // 9. POST /api/firmware/rollout — promote or clear target_firmware_version across the fleet
+    if (pathname === "/api/firmware/rollout") {
+      if (method !== "POST") {
+        sendJson(res, 405, {
+          error: "method_not_allowed",
+          message: `Method ${method} is not allowed for ${pathname}.`,
+        });
+        return;
+      }
+
+      let rawBody: unknown;
+      try {
+        rawBody = await readJsonBody(req);
+      } catch (err) {
+        if (err instanceof BodyReadError) {
+          sendJson(res, err.statusCode, { error: err.code, message: err.message });
+          return;
+        }
+        throw err;
+      }
+
+      const parsed = fleetRolloutSchema.safeParse(rawBody);
+      if (!parsed.success) {
+        sendJson(res, 400, formatZodError(parsed.error));
+        return;
+      }
+
+      const targetVersion = parsed.data.target_firmware_version;
+      if (targetVersion !== null) {
+        const release = await service.getFirmwareRelease(targetVersion);
+        if (!release) {
+          sendJson(res, 404, {
+            error: "release_not_found",
+            message: `Firmware release '${targetVersion}' does not exist in firmware_releases.`,
+          });
+          return;
+        }
+        if (release.status === "yanked") {
+          sendJson(res, 409, {
+            error: "release_yanked",
+            message: `Firmware release '${targetVersion}' is yanked and cannot be rolled out.`,
+          });
+          return;
+        }
+      }
+
+      let targetDeviceIds: string[];
+      if (parsed.data.device_ids && parsed.data.device_ids.length > 0) {
+        targetDeviceIds = Array.from(new Set(parsed.data.device_ids));
+      } else {
+        const statusResult = await service.getSensorStatus();
+        targetDeviceIds = statusResult.devices.map((d) => d.device_id);
+      }
+
+      if (targetDeviceIds.length === 0) {
+        sendJson(res, 404, {
+          error: "no_devices",
+          message: "No registered sensor devices found to update.",
+        });
+        return;
+      }
+
+      const configs = await Promise.all(
+        targetDeviceIds.map((id) =>
+          service.setDeviceTargetFirmwareVersion(id, targetVersion, actor)
+        )
+      );
+
+      sendJson(res, 200, {
+        updated: true,
+        target_firmware_version: targetVersion,
+        updated_count: configs.length,
+        configs,
+      });
+      return;
+    }
+
+    // 10. /api/devices/:deviceId/config, /firmware & /reboot
     const deviceRoute = matchDeviceConfigRoute(pathname);
     if (deviceRoute) {
       const { deviceId, action } = deviceRoute;
@@ -602,6 +791,11 @@ export async function handleDashboardApiRequest(
             : desired
               ? "pending"
               : "local_defaults",
+          ota_rollout_status: device
+            ? computeOtaRolloutStatus(device, desired)
+            : desired?.target_firmware_version
+              ? "pending"
+              : "up_to_date",
         });
         return;
       }
@@ -627,6 +821,57 @@ export async function handleDashboardApiRequest(
         const saved = await service.updateDeviceConfig(deviceId, parsed.data, actor);
         sendJson(res, 200, {
           updated: true,
+          config: saved,
+        });
+        return;
+      }
+
+      if (action === "firmware" && method === "PUT") {
+        let rawBody: unknown;
+        try {
+          rawBody = await readJsonBody(req);
+        } catch (err) {
+          if (err instanceof BodyReadError) {
+            sendJson(res, err.statusCode, { error: err.code, message: err.message });
+            return;
+          }
+          throw err;
+        }
+
+        const parsed = setTargetFirmwareSchema.safeParse(rawBody);
+        if (!parsed.success) {
+          sendJson(res, 400, formatZodError(parsed.error));
+          return;
+        }
+
+        const targetVersion = parsed.data.target_firmware_version;
+        if (targetVersion !== null) {
+          const release = await service.getFirmwareRelease(targetVersion);
+          if (!release) {
+            sendJson(res, 404, {
+              error: "release_not_found",
+              message: `Firmware release '${targetVersion}' does not exist in firmware_releases.`,
+            });
+            return;
+          }
+          if (release.status === "yanked") {
+            sendJson(res, 409, {
+              error: "release_yanked",
+              message: `Firmware release '${targetVersion}' is yanked and cannot be rolled out.`,
+            });
+            return;
+          }
+        }
+
+        const saved = await service.setDeviceTargetFirmwareVersion(
+          deviceId,
+          targetVersion,
+          actor
+        );
+        sendJson(res, 200, {
+          updated: true,
+          device_id: deviceId,
+          target_firmware_version: targetVersion,
           config: saved,
         });
         return;

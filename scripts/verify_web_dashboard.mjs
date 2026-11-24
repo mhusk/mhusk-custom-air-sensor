@@ -107,10 +107,17 @@ await runCheck("index.html meets modern web guidance semantics and accessibility
   const html = fs.readFileSync(path.join(repoRoot, "web/index.html"), "utf8");
   assert.match(html, /<meta\s+name="color-scheme"\s+content="light dark">/);
   assert.match(html, /<dialog\s+id="settings-dialog"[^>]*closedby="any"/);
+  assert.match(html, /<dialog\s+id="rollout-dialog"/);
   assert.doesNotMatch(html, /role="dialog"/);
   assert.doesNotMatch(html, /aria-modal=/);
   assert.match(html, /<input[^>]*id="cfg-led-enabled"[^>]*type="checkbox"[^>]*switch/s);
   assert.match(html, /<button[^>]*value="cancel"[^>]*autofocus/);
+  // Step 19 tabs & responsive table checks
+  assert.match(html, /focusgroup="tablist nomemory"/);
+  assert.match(html, /id="tab-overview"[^>]*aria-selected="true"[^>]*focusgroupstart/s);
+  assert.match(html, /id="panel-fleet"[^>]*role="tabpanel"[^>]*hidden="until-found"/s);
+  assert.doesNotMatch(html, /aria-controls=/);
+  assert.match(html, /tabindex="0"\s+role="region"\s+aria-labelledby="fleet-table-caption"/s);
 });
 
 await runCheck("firebase.json configures Hosting public=web and 2nd Gen API rewrites", () => {
