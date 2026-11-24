@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Firestore } from "firebase-admin/firestore";
 import { defineSecret } from "firebase-functions/params";
+import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 
 import {
@@ -23,6 +24,7 @@ import {
 import { handleStatelessMcpHttpRequest, MCP_SERVER_INFO } from "./mcp/server.js";
 import type { AirQualityDataService } from "./mcp/tools.js";
 import { getDb } from "./services/firestore.js";
+import { syncOutdoorReadingIfStale } from "./services/outdoor.js";
 
 // Google Cloud Secret Manager bindings (injected at Cloud Run runtime; never committed to Git)
 const workosApiKey = defineSecret("WORKOS_API_KEY");
@@ -320,5 +322,33 @@ export const mcp = onRequest(
   },
   async (req, res) => {
     await cloudFunctionHandler(req as IncomingMcpRequest, res);
+  }
+);
+
+/**
+ * Firestore trigger (2nd Gen): whenever an ESP32-S3 sensor publishes a new
+ * indoor reading, opportunistically captures an Open-Meteo outdoor weather +
+ * US EPA AQI snapshot into `outdoor_readings` (throttled by `site_configs/home`'s
+ * `outdoor_poll_interval_minutes`, default 15 min) so indoor-vs-outdoor deltas
+ * and chart overlays stay populated with zero firmware changes.
+ */
+export const syncOutdoorOnReading = onDocumentCreated(
+  {
+    document: "readings/{readingId}",
+    region: "us-east1",
+    memory: "256MiB",
+    timeoutSeconds: 30,
+    maxInstances: 2,
+  },
+  async () => {
+    try {
+      const outcome = await syncOutdoorReadingIfStale({ db: getDb() });
+      console.log(`[outdoor] syncOutdoorOnReading: synced=${outcome.synced} (${outcome.reason})`);
+    } catch (error) {
+      console.error(
+        "[outdoor] syncOutdoorOnReading failed (non-fatal):",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
 );

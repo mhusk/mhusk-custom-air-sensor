@@ -16,9 +16,11 @@ import {
   fetchFirmwareReleases,
   fetchReadingsHistory,
   saveDeviceConfig,
+  saveSiteLocationConfig,
   setDeviceTargetFirmware,
   triggerDeviceReboot,
   triggerFleetRollout,
+  triggerOutdoorRefresh,
 } from "./api.js";
 import {
   clearSession,
@@ -80,6 +82,7 @@ const els = {
   panelFleet: document.getElementById("panel-fleet"),
   lastRefreshed: document.getElementById("last-refreshed"),
   fleetSummaryPills: document.getElementById("fleet-summary-pills"),
+  outdoorCardSlot: document.getElementById("outdoor-card-slot"),
   deviceCards: document.getElementById("device-cards"),
 
   fleetMeta: document.getElementById("fleet-meta"),
@@ -127,6 +130,20 @@ const els = {
   rolloutDialogBody: document.getElementById("rollout-dialog-body"),
   rolloutDialogNotes: document.getElementById("rollout-dialog-notes"),
   rolloutConfirmBtn: document.getElementById("rollout-confirm-btn"),
+
+  siteDialog: document.getElementById("site-dialog"),
+  siteCloseBtn: document.getElementById("site-close-btn"),
+  siteCancelBtn: document.getElementById("site-cancel-btn"),
+  siteError: document.getElementById("site-error"),
+  siteSuccess: document.getElementById("site-success"),
+  siteForm: document.getElementById("site-form"),
+  siteSaveBtn: document.getElementById("site-save-btn"),
+  siteLabel: document.getElementById("site-label"),
+  siteLatitude: document.getElementById("site-latitude"),
+  siteLongitude: document.getElementById("site-longitude"),
+  sitePollInterval: document.getElementById("site-poll-interval"),
+  siteGeolocateBtn: document.getElementById("site-geolocate-btn"),
+  outdoorIntervalPresets: Array.from(document.querySelectorAll("[data-outdoor-interval]")),
 };
 
 // ============================================================================
@@ -190,7 +207,7 @@ async function closeModalDialog(dialog, returnValue) {
 
 function installDialogEnhancements() {
   // Route native cancel (Esc / closedby light-dismiss) through exit animation fallback
-  for (const dialog of [els.settingsDialog, els.rebootDialog, els.rolloutDialog]) {
+  for (const dialog of [els.settingsDialog, els.rebootDialog, els.rolloutDialog, els.siteDialog]) {
     dialog.addEventListener("cancel", (event) => {
       if (!supportsTopLayerExit()) {
         event.preventDefault();
@@ -581,10 +598,181 @@ function setView(mode) {
 }
 
 // ============================================================================
-// Rendering: Live Device Cards, Charts & Spikes
+// Rendering: Outdoor Weather & AQI, Live Device Cards, Charts & Spikes
 // ============================================================================
 
+function formatSignedDelta(value, unit, decimals = 1) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  const num = Number(value);
+  const sign = num > 0 ? "+" : "";
+  const formatted = decimals > 0 ? num.toFixed(decimals) : String(Math.round(num));
+  return `${sign}${formatted}${unit}`;
+}
+
+function describeWindowRecommendation(rec) {
+  if (rec === "open_recommended") {
+    return { label: "Open window recommended", tone: "good" };
+  }
+  if (rec === "keep_closed") {
+    return { label: "Keep windows closed", tone: "warn" };
+  }
+  return { label: "Ventilation neutral", tone: "neutral" };
+}
+
+function renderOutdoorCard() {
+  els.outdoorCardSlot.replaceChildren();
+  const overview = state.overview;
+  if (!overview) return;
+
+  const siteConfig = overview.site_config ?? null;
+  const outdoorLatest = overview.outdoor_latest ?? null;
+
+  if (!siteConfig) {
+    const card = document.createElement("article");
+    card.className = "outdoor-card outdoor-card--setup";
+
+    const copy = document.createElement("div");
+    const title = document.createElement("h2");
+    title.className = "outdoor-card__title";
+    title.textContent = "Outdoor Weather & AQI Context";
+    const meta = document.createElement("p");
+    meta.className = "outdoor-card__meta";
+    meta.textContent =
+      "Set your home coordinates privately in Firestore to capture Open-Meteo outdoor weather + US EPA AQI alongside sensor readings and see indoor-vs-outdoor deltas.";
+    copy.append(title, meta);
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn--primary";
+    btn.textContent = "Configure Home Location";
+    btn.addEventListener("click", () => openSiteLocationDrawer());
+
+    card.append(copy, btn);
+    els.outdoorCardSlot.append(card);
+    return;
+  }
+
+  const card = document.createElement("article");
+  card.className = "outdoor-card";
+
+  const top = document.createElement("div");
+  top.className = "outdoor-card__top";
+
+  const idWrap = document.createElement("div");
+  const title = document.createElement("h2");
+  title.className = "outdoor-card__title";
+  title.textContent = siteConfig.label || "Home Outdoor";
+
+  const meta = document.createElement("p");
+  meta.className = "outdoor-card__meta";
+  if (outdoorLatest?.reading) {
+    const r = outdoorLatest.reading;
+    meta.textContent = `Open-Meteo · ${r.weather_description} · updated ${formatMinutesAgo(outdoorLatest.minutes_ago)} (every ${siteConfig.outdoor_poll_interval_minutes}m)`;
+  } else {
+    meta.textContent = `Open-Meteo · waiting for first outdoor snapshot (every ${siteConfig.outdoor_poll_interval_minutes}m)`;
+  }
+  idWrap.append(title, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "outdoor-card__actions";
+  if (outdoorLatest?.reading) {
+    actions.append(
+      createPill(
+        outdoorLatest.is_stale ? "STALE" : "OUTDOOR LIVE",
+        outdoorLatest.is_stale ? "warn" : "info",
+        true
+      )
+    );
+  }
+
+  const refreshBtn = document.createElement("button");
+  refreshBtn.type = "button";
+  refreshBtn.className = "btn btn--ghost btn--sm";
+  refreshBtn.textContent = "Refresh Outdoor";
+  refreshBtn.addEventListener("click", () => handleOutdoorRefresh(refreshBtn));
+
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn btn--secondary btn--sm";
+  editBtn.textContent = "Location";
+  editBtn.addEventListener("click", () => openSiteLocationDrawer());
+
+  actions.append(refreshBtn, editBtn);
+  top.append(idWrap, actions);
+  card.append(top);
+
+  if (outdoorLatest?.reading) {
+    const r = outdoorLatest.reading;
+    const grid = document.createElement("div");
+    grid.className = "metrics-grid";
+
+    const buildOutdoorTile = (label, valueText, unitText, subText, pillTone) => {
+      const tile = document.createElement("div");
+      tile.className = "metric-tile";
+
+      const lbl = document.createElement("span");
+      lbl.className = "metric-tile__label";
+      lbl.textContent = label;
+
+      const val = document.createElement("div");
+      val.className = "metric-tile__value";
+      val.append(document.createTextNode(valueText));
+      if (unitText) {
+        const unit = document.createElement("span");
+        unit.className = "metric-tile__unit";
+        unit.textContent = ` ${unitText}`;
+        val.append(unit);
+      }
+
+      const sub = document.createElement("div");
+      sub.className = "metric-tile__sub";
+      if (pillTone) {
+        sub.append(createPill(subText, pillTone));
+      } else {
+        sub.textContent = subText;
+      }
+
+      tile.append(lbl, val, sub);
+      return tile;
+    };
+
+    grid.append(
+      buildOutdoorTile(
+        "Outdoor US AQI",
+        r.us_aqi !== null ? String(Math.round(r.us_aqi)) : "—",
+        "",
+        r.us_aqi_category || "Unavailable",
+        r.us_aqi !== null ? toneForAqi(r.us_aqi) : "neutral"
+      ),
+      buildOutdoorTile(
+        "Outdoor PM2.5",
+        r.pm2_5_ug_m3 !== null ? Number(r.pm2_5_ug_m3).toFixed(1) : "—",
+        r.pm2_5_ug_m3 !== null ? "µg/m³" : "",
+        r.pm10_0_ug_m3 !== null ? `PM10 ${Number(r.pm10_0_ug_m3).toFixed(1)} µg/m³` : "Open-Meteo AQ"
+      ),
+      buildOutdoorTile(
+        "Outdoor Temp",
+        `${Number(r.temperature_f).toFixed(1)}°F`,
+        "",
+        r.apparent_temperature_f !== null
+          ? `Feels like ${Number(r.apparent_temperature_f).toFixed(1)}°F`
+          : r.weather_description
+      ),
+      buildOutdoorTile(
+        "Outdoor RH",
+        `${Math.round(r.humidity_percent)}%`,
+        "RH",
+        r.wind_speed_mph !== null ? `Wind ${Number(r.wind_speed_mph).toFixed(1)} mph` : r.weather_description
+      )
+    );
+    card.append(grid);
+  }
+
+  els.outdoorCardSlot.append(card);
+}
+
 function renderDeviceCards() {
+  renderOutdoorCard();
   const overview = state.overview;
   els.deviceCards.replaceChildren();
   els.fleetSummaryPills.replaceChildren();
@@ -734,6 +922,52 @@ function renderDeviceCards() {
     }
     card.append(grid);
 
+    // Indoor vs. Outdoor Delta Strip
+    if (item.outdoor_delta) {
+      const d = item.outdoor_delta;
+      const strip = document.createElement("div");
+      strip.className = "delta-strip";
+
+      const row = document.createElement("div");
+      row.className = "delta-strip__row";
+
+      const metricsWrap = document.createElement("div");
+      metricsWrap.className = "delta-strip__metrics";
+      const deltaParts = [
+        formatSignedDelta(d.temperature_diff_f, "°F", 1)
+          ? `Temp ${formatSignedDelta(d.temperature_diff_f, "°F", 1)}`
+          : null,
+        formatSignedDelta(d.humidity_diff_percent, "% RH", 0)
+          ? `RH ${formatSignedDelta(d.humidity_diff_percent, "%", 0)}`
+          : null,
+        d.pm2_5_diff_ug_m3 !== null
+          ? `PM2.5 ${formatSignedDelta(d.pm2_5_diff_ug_m3, " µg/m³", 1)}`
+          : null,
+        d.aqi_diff !== null ? `AQI ${formatSignedDelta(d.aqi_diff, "", 0)}` : null,
+      ].filter(Boolean);
+
+      const prefix = document.createElement("span");
+      prefix.textContent = "vs Outdoor:";
+      metricsWrap.append(prefix);
+      for (const part of deltaParts) {
+        const span = document.createElement("span");
+        span.textContent = part;
+        metricsWrap.append(span);
+      }
+
+      const recMeta = describeWindowRecommendation(d.window_recommendation);
+      row.append(metricsWrap, createPill(recMeta.label, recMeta.tone));
+      strip.append(row);
+
+      if (d.window_reason) {
+        const reasonEl = document.createElement("p");
+        reasonEl.className = "delta-strip__reason";
+        reasonEl.textContent = d.window_reason;
+        strip.append(reasonEl);
+      }
+      card.append(strip);
+    }
+
     // Health guidance notes
     if (health) {
       const notes = document.createElement("div");
@@ -809,7 +1043,7 @@ function renderCharts() {
   const payload = state.historyPayload;
   if (!payload) return;
 
-  const { history, summary } = payload;
+  const { history, summary, outdoor_history: outdoorHistory = [] } = payload;
   const readings = history?.readings || [];
   const metrics = summary?.metrics || null;
 
@@ -817,7 +1051,11 @@ function renderCharts() {
   const sampleNote = history.downsampled
     ? `${history.returned_count} plotted (${history.total_matching} total samples)`
     : `${history.returned_count} samples`;
-  els.trendsMeta.textContent = `Last ${state.period}${deviceLabel} · ${sampleNote}`;
+  const outdoorNote =
+    Array.isArray(outdoorHistory) && outdoorHistory.length > 0
+      ? ` · ${outdoorHistory.length} outdoor samples overlaid`
+      : "";
+  els.trendsMeta.textContent = `Last ${state.period}${deviceLabel} · ${sampleNote}${outdoorNote}`;
 
   renderTrendChartCard(els.chartsGrid, {
     id: "co2",
@@ -851,6 +1089,10 @@ function renderCharts() {
       { value: 9.0, label: "9.0 EPA Good", tone: "warn" },
       { value: 35.4, label: "35.4 USG", tone: "danger" },
     ],
+    overlay:
+      outdoorHistory.length > 0
+        ? { label: "Outdoor", readings: outdoorHistory, field: "pm2_5_ug_m3" }
+        : null,
   });
 
   renderTrendChartCard(els.chartsGrid, {
@@ -864,6 +1106,10 @@ function renderCharts() {
     field: "temperature_f",
     stats: metrics?.temperature_f ?? null,
     domainOptions: { suggestedMin: 64, suggestedMax: 76 },
+    overlay:
+      outdoorHistory.length > 0
+        ? { label: "Outdoor", readings: outdoorHistory, field: "temperature_f" }
+        : null,
   });
 
   renderTrendChartCard(els.chartsGrid, {
@@ -878,6 +1124,10 @@ function renderCharts() {
     stats: metrics?.humidity_percent ?? null,
     domainOptions: { minFloor: 0, suggestedMin: 25, suggestedMax: 60 },
     idealBand: { min: 30, max: 50, label: "30–50% ideal" },
+    overlay:
+      outdoorHistory.length > 0
+        ? { label: "Outdoor", readings: outdoorHistory, field: "humidity_percent" }
+        : null,
   });
 
   // Render notable spikes panel
@@ -1486,6 +1736,95 @@ async function executeRemoteReboot() {
 }
 
 // ============================================================================
+// Home Outdoor Location Drawer & On-Demand Outdoor Refresh
+// ============================================================================
+
+function openSiteLocationDrawer() {
+  const cfg = state.overview?.site_config ?? null;
+  els.siteError.hidden = true;
+  els.siteSuccess.hidden = true;
+  els.siteForm.reset();
+
+  els.siteLabel.value = cfg?.label ?? "Home Outdoor";
+  els.siteLatitude.value = cfg?.latitude !== undefined ? String(cfg.latitude) : "";
+  els.siteLongitude.value = cfg?.longitude !== undefined ? String(cfg.longitude) : "";
+  els.sitePollInterval.value = String(cfg?.outdoor_poll_interval_minutes ?? 15);
+
+  if (!els.siteDialog.open) {
+    els.siteDialog.showModal();
+  }
+}
+
+async function handleSiteLocationSubmit(event) {
+  event.preventDefault();
+  els.siteError.hidden = true;
+  els.siteSuccess.hidden = true;
+
+  if (!els.siteForm.checkValidity()) {
+    els.siteForm.reportValidity();
+    const firstInvalid = els.siteForm.querySelector(":invalid");
+    firstInvalid?.focus();
+    return;
+  }
+
+  const payload = {
+    label: els.siteLabel.value.trim(),
+    latitude: Number(els.siteLatitude.value),
+    longitude: Number(els.siteLongitude.value),
+    outdoor_poll_interval_minutes: Math.round(Number(els.sitePollInterval.value)),
+  };
+
+  els.siteSaveBtn.disabled = true;
+  els.siteSaveBtn.textContent = "Saving & Fetching…";
+
+  try {
+    const res = await saveSiteLocationConfig(payload);
+    const syncedTemp = res.outdoor_sync?.reading?.temperature_f;
+    els.siteSuccess.textContent =
+      syncedTemp !== undefined
+        ? `Saved ${payload.label} and fetched live outdoor reading (${Number(syncedTemp).toFixed(1)}°F).`
+        : `Saved ${payload.label} to Firestore.`;
+    els.siteSuccess.hidden = false;
+    await refreshDashboard({ silentBanner: true });
+    showBanner(`Outdoor location "${payload.label}" saved and synced from Open-Meteo.`, "success");
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    els.siteError.textContent =
+      err instanceof Error ? err.message : "Failed to save outdoor location.";
+    els.siteError.hidden = false;
+  } finally {
+    els.siteSaveBtn.disabled = false;
+    els.siteSaveBtn.textContent = "Save & Fetch Outdoor";
+  }
+}
+
+async function handleOutdoorRefresh(button) {
+  button.disabled = true;
+  const prevText = button.textContent;
+  button.textContent = "Fetching…";
+  try {
+    await triggerOutdoorRefresh();
+    await refreshDashboard({ silentBanner: true });
+    showBanner("Fetched fresh outdoor weather & AQI snapshot from Open-Meteo.", "success");
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    showBanner(
+      err instanceof Error ? err.message : "Failed to refresh outdoor weather.",
+      "danger"
+    );
+  } finally {
+    button.disabled = false;
+    button.textContent = prevText;
+  }
+}
+
+// ============================================================================
 // Data Loading & Auth Lifecycle
 // ============================================================================
 
@@ -1495,6 +1834,7 @@ function handleSessionExpired() {
   if (els.rolloutDialog.open) els.rolloutDialog.close("");
   if (els.rebootDialog.open) els.rebootDialog.close("");
   if (els.settingsDialog.open) els.settingsDialog.close("");
+  if (els.siteDialog.open) els.siteDialog.close("");
   setView("auth");
   showAuthError("Your session expired. Please sign in again.");
 }
@@ -1760,6 +2100,49 @@ els.rebootDialog.addEventListener("close", () => {
   if (choice === "reboot") {
     executeRemoteReboot();
   }
+});
+
+// Outdoor Home Location drawer controls
+els.siteCloseBtn.addEventListener("click", () => closeModalDialog(els.siteDialog, ""));
+els.siteCancelBtn.addEventListener("click", () => closeModalDialog(els.siteDialog, ""));
+els.siteDialog.addEventListener("close", () => {
+  els.siteDialog.returnValue = "";
+});
+els.siteForm.addEventListener("submit", handleSiteLocationSubmit);
+
+for (const chip of els.outdoorIntervalPresets) {
+  chip.addEventListener("click", () => {
+    els.sitePollInterval.value = chip.dataset.outdoorInterval;
+    els.sitePollInterval.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+els.siteGeolocateBtn.addEventListener("click", () => {
+  els.siteError.hidden = true;
+  if (!("geolocation" in navigator)) {
+    els.siteError.textContent = "Browser geolocation is not available. Enter coordinates manually.";
+    els.siteError.hidden = false;
+    return;
+  }
+  els.siteGeolocateBtn.disabled = true;
+  els.siteGeolocateBtn.textContent = "Locating…";
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      els.siteLatitude.value = pos.coords.latitude.toFixed(5);
+      els.siteLongitude.value = pos.coords.longitude.toFixed(5);
+      els.siteLatitude.dispatchEvent(new Event("input", { bubbles: true }));
+      els.siteLongitude.dispatchEvent(new Event("input", { bubbles: true }));
+      els.siteGeolocateBtn.disabled = false;
+      els.siteGeolocateBtn.textContent = "Use Browser Location";
+    },
+    (err) => {
+      els.siteError.textContent = `Unable to read browser location (${err.message}). Enter latitude/longitude manually.`;
+      els.siteError.hidden = false;
+      els.siteGeolocateBtn.disabled = false;
+      els.siteGeolocateBtn.textContent = "Use Browser Location";
+    },
+    { enableHighAccuracy: false, timeout: 10000 }
+  );
 });
 
 init();

@@ -107,7 +107,9 @@ await runCheck("index.html meets modern web guidance semantics and accessibility
   const html = fs.readFileSync(path.join(repoRoot, "web/index.html"), "utf8");
   assert.match(html, /<meta\s+name="color-scheme"\s+content="light dark">/);
   assert.match(html, /<dialog\s+id="settings-dialog"[^>]*closedby="any"/);
+  assert.match(html, /<dialog\s+id="site-dialog"[^>]*closedby="any"/);
   assert.match(html, /<dialog\s+id="rollout-dialog"/);
+  assert.match(html, /id="outdoor-card-slot"/);
   assert.doesNotMatch(html, /role="dialog"/);
   assert.doesNotMatch(html, /aria-modal=/);
   assert.match(html, /<input[^>]*id="cfg-led-enabled"[^>]*type="checkbox"[^>]*switch/s);

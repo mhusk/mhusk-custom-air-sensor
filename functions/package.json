@@ -16,6 +16,7 @@
     "verify:mcp": "npm run build && node lib/scripts/verifyMcp.js",
     "verify:auth": "npm run build && node lib/scripts/verifyAuth.js",
     "verify:api": "npm run build && node lib/scripts/verifyApi.js",
+    "verify:outdoor": "npm run build && node lib/scripts/verifyOutdoor.js",
     "verify:release": "npm run build && node lib/scripts/verifyRelease.js",
     "publish:release": "npm run build && node lib/scripts/publishRelease.js",
     "mcp:local": "npm run build && node lib/scripts/localMcpServer.js"

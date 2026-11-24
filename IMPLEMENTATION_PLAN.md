@@ -35,23 +35,24 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [x] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
-- [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *currently printing on Bambu Lab X1 Carbon*
+- [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *printed on Bambu Lab X1 Carbon; commissioning & thermal calibration in progress*
 
 ### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — Completed)*
-- [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 pending finished print)*
+- [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 in progress)*
 - [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 live-verified end-to-end on ESP32-S3 hardware: `v1` → `v2` 60s/LED-off → `v3` 300s/LED-on)*
 - [x] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [x] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
 
-### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2 — In Progress)*
+### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2 — Completed)*
 - [x] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback) *(live-verified on ESP32-S3 hardware: broken `app.py` on wall power auto-rolled back to `app.py.bak` and resumed publishing `v1.2.0`)*
 - [x] **Step 17**: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI *(live-verified: `firestore.rules` deployed, `firmware_releases/1.2.0-rc1` published atomically, all 6 offline + 9 live REST security/SHA-256 checks passed)*
-- [ ] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check)
-- [ ] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard
+- [x] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check) *(live-verified on ESP32-S3 wall power: wireless `1.3.0` → `1.3.2` upgrade + live tampered SHA-256 rejection)*
+- [x] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard *(live-verified on ESP32-S3 wall power: `1.3.2` → `1.3.3` promoted from the web dashboard)*
 
-### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — Backlog)*
+### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — In Progress)*
+- [x] **Step 20**: Outdoor Weather & AQI Feed (Open-Meteo Trigger, Dashboard Deltas & Chart Overlays, MCP `get_outdoor_air_quality` + `outdoor_comparison`)
 - [ ] **Multi-Room Sensor Network**: Per-device UID-to-`device_id` isolation in `firestore.rules`, `compare_rooms` MCP tool, optional CO₂-only (`SCD-40`) satellite nodes, and additional 3D-printed enclosures
-- [ ] **Proactive Alerts & Outdoor AQI Context**: Firestore `onDocumentCreated` push alerts with cooldowns (CO₂ / PM₂.₅ / stale sensor) and an outdoor AQI + weather MCP tool for "should I open the window?" advice
+- [ ] **Proactive Alerts**: Firestore `onDocumentCreated` push alerts with cooldowns (CO₂ / PM₂.₅ / stale sensor)
 - [ ] **Optional Smart-Home Actuation & VOC/NOₓ Expansion**: Triggering a HEPA air purifier smart plug on PM₂.₅ spikes and adding a Sensirion `SGP41` VOC/NOₓ breakout on STEMMA QT
 
 ---
@@ -323,9 +324,23 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ---
 
-### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — Backlog)*
+### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — In Progress)*
 
-Planned enhancements once Phases 2 and 3 are live (will be broken into atomic steps when ready):
+#### Step 20: Outdoor Weather & AQI Context (Open-Meteo Trigger, Dashboard Deltas & MCP)
+- **Status**: `[x] Completed (Live-Verified on Cloud Functions 2nd Gen & Firebase Hosting)`
+- **Goal**: Capture free, keyless Open-Meteo outdoor weather and US EPA AQI snapshots automatically whenever a sensor publishes a reading (throttled via a private `site_configs/home` Firestore doc), display outdoor metrics, indoor-vs-outdoor deltas, and dashed chart overlays on the Web Dashboard, and expose outdoor context to AI assistants via MCP.
+- **Deliverables**:
+  - `functions/src/services/outdoor.ts` (`fetchOpenMeteoSnapshot()`, WMO weather & US EPA AQI mappers, `computeIndoorOutdoorDelta()` with window ventilation advice, `site_configs/home` + `outdoor_readings` helpers, and cache-throttled `syncOutdoorReadingIfStale()`)
+  - `functions/src/index.ts` (2nd Gen Firestore trigger `syncOutdoorOnReading` on `readings/{readingId}` in `us-east1`)
+  - `functions/src/api/dashboard.ts` (`GET/PUT /api/site/config`, `POST /api/outdoor/refresh`, `site_config`/`outdoor_latest`/`outdoor_delta` on `/api/dashboard/overview`, and `outdoor_history` on `/api/readings/history`)
+  - `functions/src/mcp/tools.ts` & `functions/src/mcp/prompts.ts` (new `get_outdoor_air_quality` tool, `outdoor` + `outdoor_comparison` appended to `get_latest_reading`, and updated `analyze_indoor_air` prompt)
+  - `web/` (Outdoor Weather & AQI card, private Home Location `<dialog>` drawer with browser geolocation helper, indoor-vs-outdoor delta strip + window advice on room cards, and dashed Outdoor overlays on PM₂.₅/Temp/Humidity charts)
+  - `functions/src/scripts/verifyOutdoor.ts` (`npm --prefix functions run verify:outdoor`) & `docs/11-outdoor-weather-and-aqi.md`
+- **Single Focused Validation**:
+  - Passed `verify:outdoor`, `verify:mcp`, `verify:api`, `verify:auth`, `node scripts/verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`, deployed `mcp`, `syncOutdoorOnReading`, and Firebase Hosting, and verified live on the deployed Web Dashboard.
+- **Target Commit**: `feat(outdoor): add Open-Meteo trigger, dashboard deltas/overlays, and MCP outdoor tool`
+
+Remaining Phase 4 enhancements (will be broken into atomic steps when ready):
 - **Multi-Room Sensor Network**: Print additional enclosures for bedroom / office / kitchen, tighten `authorized_devices/{uid}` in `firestore.rules` to bind each Auth UID to a specific `device_id`, add a `compare_rooms` MCP tool, and support lower-cost `SCD-40`-only satellite nodes.
-- **Proactive Alerts & Outdoor AQI Context**: Add a Firestore `onDocumentCreated` Cloud Function for push notifications (CO₂ > 1,200 ppm, PM₂.₅ > 35 µg/m³, or offline > 20 min) with cooldowns, plus an outdoor AQI + weather MCP tool (Open-Meteo / AirNow) so AI assistants know whether opening a window will actually help.
+- **Proactive Alerts**: Add a Firestore `onDocumentCreated` Cloud Function for push notifications (CO₂ > 1,200 ppm, PM₂.₅ > 35 µg/m³, or offline > 20 min) with cooldowns.
 - **Smart-Home Actuation & Extra Sensors**: Optional webhook/Matter/Home Assistant trigger for a HEPA purifier smart plug on PM₂.₅ spikes, and a future STEMMA QT `SGP41` (VOC + NOₓ) breakout for cooking fumes and off-gassing.

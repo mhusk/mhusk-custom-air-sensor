@@ -127,6 +127,8 @@
                 <div id="fleet-summary-pills" class="pill-row"></div>
               </div>
 
+              <div id="outdoor-card-slot" class="outdoor-slot"></div>
+
               <div id="device-cards" class="device-grid"></div>
             </section>
 
@@ -415,6 +417,131 @@
         Promote Firmware
       </button>
     </form>
+  </dialog>
+
+  <!-- Home Location Settings Drawer for Open-Meteo Outdoor Feed (native modal <dialog>) -->
+  <dialog id="site-dialog" class="drawer-dialog" closedby="any" aria-labelledby="site-dialog-title">
+    <div class="drawer__header">
+      <div>
+        <h1 id="site-dialog-title" class="drawer__title">Outdoor Weather Location</h1>
+        <p class="drawer__subtitle">Stored privately in Firestore (<code>site_configs/home</code>) · Open-Meteo API</p>
+      </div>
+      <button type="button" id="site-close-btn" class="icon-btn" aria-label="Close outdoor location settings">
+        &times;
+      </button>
+    </div>
+
+    <div class="drawer__body">
+      <div id="site-error" class="inline-alert inline-alert--danger" role="alert" hidden></div>
+      <div id="site-success" class="inline-alert inline-alert--success" role="status" hidden></div>
+
+      <form id="site-form" class="settings-form" novalidate>
+        <div class="field">
+          <label for="site-label">Outdoor Location Label</label>
+          <span id="site-label-hint" class="field__hint">
+            Friendly display name (e.g. <code>Home Outdoor</code> or your city).
+          </span>
+          <input
+            id="site-label"
+            name="label"
+            type="text"
+            required
+            maxlength="64"
+            placeholder="Home Outdoor"
+            aria-describedby="site-label-hint"
+            data-error="site-label-error"
+            autofocus
+          >
+          <div id="site-label-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Enter a location label (1–64 characters).
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="coord-header">
+            <label for="site-latitude">Coordinates (Latitude / Longitude)</label>
+            <button type="button" id="site-geolocate-btn" class="chip-btn">Use Browser Location</button>
+          </div>
+          <span id="site-coords-hint" class="field__hint">
+            Used server-side by Cloud Functions to query Open-Meteo Weather &amp; Air Quality. Never committed to Git.
+          </span>
+          <div class="coord-grid">
+            <div>
+              <label for="site-latitude" class="visually-hidden">Latitude</label>
+              <input
+                id="site-latitude"
+                name="latitude"
+                type="number"
+                required
+                min="-90"
+                max="90"
+                step="any"
+                inputmode="decimal"
+                placeholder="Latitude (e.g. 37.7749)"
+                aria-describedby="site-coords-hint"
+                data-error="site-latitude-error"
+              >
+              <div id="site-latitude-error" class="error-msg">
+                <span role="img" aria-label="Error">!</span> Latitude must be between -90 and 90.
+              </div>
+            </div>
+            <div>
+              <label for="site-longitude" class="visually-hidden">Longitude</label>
+              <input
+                id="site-longitude"
+                name="longitude"
+                type="number"
+                required
+                min="-180"
+                max="180"
+                step="any"
+                inputmode="decimal"
+                placeholder="Longitude (e.g. -122.4194)"
+                aria-describedby="site-coords-hint"
+                data-error="site-longitude-error"
+              >
+              <div id="site-longitude-error" class="error-msg">
+                <span role="img" aria-label="Error">!</span> Longitude must be between -180 and 180.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="site-poll-interval">Outdoor Capture Interval (minutes)</label>
+          <span id="site-poll-hint" class="field__hint">
+            Minimum minutes between automatic Open-Meteo fetches triggered by incoming sensor readings (5–60 min).
+          </span>
+          <input
+            id="site-poll-interval"
+            name="outdoor_poll_interval_minutes"
+            type="number"
+            required
+            min="5"
+            max="60"
+            step="1"
+            inputmode="numeric"
+            value="15"
+            aria-describedby="site-poll-hint"
+            data-error="site-poll-error"
+          >
+          <div id="site-poll-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Enter a whole number between 5 and 60 minutes.
+          </div>
+          <div class="preset-row" role="group" aria-label="Outdoor interval presets">
+            <button type="button" class="chip-btn" data-outdoor-interval="5">5 min</button>
+            <button type="button" class="chip-btn" data-outdoor-interval="15">15 min</button>
+            <button type="button" class="chip-btn" data-outdoor-interval="30">30 min</button>
+            <button type="button" class="chip-btn" data-outdoor-interval="60">60 min</button>
+          </div>
+        </div>
+
+        <div class="drawer__actions">
+          <button type="button" id="site-cancel-btn" class="btn btn--secondary">Cancel</button>
+          <button type="submit" id="site-save-btn" class="btn btn--primary">Save &amp; Fetch Outdoor</button>
+        </div>
+      </form>
+    </div>
   </dialog>
 
   <script type="module" src="/app.js"></script>

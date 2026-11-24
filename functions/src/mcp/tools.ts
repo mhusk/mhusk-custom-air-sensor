@@ -22,6 +22,14 @@ import {
   type SensorStatusOptions,
   type SensorStatusResult,
 } from "../services/firestore.js";
+import {
+  computeIndoorOutdoorDelta,
+  getLatestOutdoorReading,
+  getOutdoorReadingsHistory,
+  syncOutdoorReadingIfStale,
+  type LatestOutdoorReadingResult,
+  type OutdoorReading,
+} from "../services/outdoor.js";
 
 /**
  * Injectable data service interface so MCP tools can run against live Cloud
@@ -32,6 +40,13 @@ export interface AirQualityDataService {
   getReadingsHistory(options?: ReadingsHistoryOptions): Promise<ReadingsHistoryResult>;
   getAirQualitySummary(options: AirQualitySummaryOptions): Promise<AirQualitySummaryResult>;
   getSensorStatus(options?: SensorStatusOptions): Promise<SensorStatusResult>;
+  getLatestOutdoorReading?: () => Promise<LatestOutdoorReadingResult | null>;
+  getOutdoorReadingsHistory?: (hours?: number, limit?: number) => Promise<OutdoorReading[]>;
+  syncOutdoorReadingIfStale?: (options?: { force?: boolean }) => Promise<{
+    synced: boolean;
+    reason: string;
+    reading: OutdoorReading | null;
+  }>;
 }
 
 /**
@@ -44,6 +59,11 @@ export function createFirestoreDataService(db?: Firestore): AirQualityDataServic
     getReadingsHistory: (options) => getReadingsHistory(options, resolveDb()),
     getAirQualitySummary: (options) => getAirQualitySummary(options, resolveDb()),
     getSensorStatus: (options) => getSensorStatus(options, resolveDb()),
+    getLatestOutdoorReading: () => getLatestOutdoorReading(resolveDb()),
+    getOutdoorReadingsHistory: (hours, limit) =>
+      getOutdoorReadingsHistory(hours, limit, resolveDb()),
+    syncOutdoorReadingIfStale: (options) =>
+      syncOutdoorReadingIfStale({ ...options, db: resolveDb() }),
   };
 }
 
@@ -116,7 +136,12 @@ export function registerAirQualityTools(
     },
     async ({ device_id, location }) => {
       try {
-        const result = await service.getLatestReading({ device_id, location });
+        const [result, outdoor] = await Promise.all([
+          service.getLatestReading({ device_id, location }),
+          service.getLatestOutdoorReading
+            ? service.getLatestOutdoorReading().catch(() => null)
+            : Promise.resolve(null),
+        ]);
         if (!result) {
           return jsonToolResult({
             found: false,
@@ -127,9 +152,14 @@ export function registerAirQualityTools(
             message: "No air quality readings found matching the specified filters.",
           });
         }
+        const outdoorComparison = outdoor
+          ? computeIndoorOutdoorDelta(result.reading, outdoor.reading)
+          : null;
         return jsonToolResult({
           found: true,
           ...result,
+          outdoor: outdoor ?? null,
+          outdoor_comparison: outdoorComparison,
         });
       } catch (error) {
         return errorToolResult("get_latest_reading", error);
@@ -269,6 +299,73 @@ export function registerAirQualityTools(
         return jsonToolResult(result);
       } catch (error) {
         return errorToolResult("get_sensor_status", error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "get_outdoor_air_quality",
+    {
+      title: "Get Outdoor Weather & Air Quality",
+      description:
+        "Fetches the latest outdoor weather (temperature, feels-like, humidity, wind, conditions) and outdoor air quality (PM2.5, PM10, US EPA AQI, ozone, NO2) captured from Open-Meteo for the configured home location, plus optional recent outdoor history.",
+      inputSchema: {
+        hours: z
+          .number()
+          .min(1)
+          .max(MAX_HISTORY_HOURS)
+          .optional()
+          .describe(
+            `Optional lookback window in hours (1-${MAX_HISTORY_HOURS}) to also include chronological outdoor readings.`
+          ),
+        refresh: z
+          .boolean()
+          .optional()
+          .describe(
+            "Optional flag to force a fresh Open-Meteo fetch if home location is configured."
+          ),
+      },
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    },
+    async ({ hours, refresh }) => {
+      try {
+        if (service.syncOutdoorReadingIfStale && refresh) {
+          await service.syncOutdoorReadingIfStale({ force: true });
+        }
+
+        let latest = service.getLatestOutdoorReading
+          ? await service.getLatestOutdoorReading()
+          : null;
+
+        if ((!latest || latest.is_stale) && service.syncOutdoorReadingIfStale) {
+          const synced = await service.syncOutdoorReadingIfStale({ force: false });
+          if (synced.synced) {
+            latest = service.getLatestOutdoorReading
+              ? await service.getLatestOutdoorReading()
+              : latest;
+          }
+        }
+
+        if (!latest) {
+          return jsonToolResult({
+            found: false,
+            message:
+              "No outdoor weather/AQI readings found yet. Configure Home Location in the Web Dashboard (site_configs/home) to enable automatic Open-Meteo tracking.",
+          });
+        }
+
+        const history =
+          hours !== undefined && service.getOutdoorReadingsHistory
+            ? await service.getOutdoorReadingsHistory(hours, 100)
+            : undefined;
+
+        return jsonToolResult({
+          found: true,
+          ...latest,
+          ...(history !== undefined ? { history_count: history.length, history } : {}),
+        });
+      } catch (error) {
+        return errorToolResult("get_outdoor_air_quality", error);
       }
     }
   );

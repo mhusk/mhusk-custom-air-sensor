@@ -200,3 +200,30 @@ export function triggerFleetRollout(targetFirmwareVersion, deviceIds) {
     body,
   });
 }
+
+/**
+ * Saves private Home Location settings (`site_configs/home`) for Open-Meteo
+ * outdoor weather & AQI tracking, and immediately fetches a fresh reading.
+ *
+ * @param {{
+ *   label: string,
+ *   latitude: number,
+ *   longitude: number,
+ *   outdoor_poll_interval_minutes: number,
+ * }} config
+ */
+export function saveSiteLocationConfig(config) {
+  return authenticatedJsonFetch("/api/site/config", {
+    method: "PUT",
+    body: config,
+  });
+}
+
+/**
+ * Forces an on-demand Open-Meteo outdoor weather + AQI refresh.
+ */
+export function triggerOutdoorRefresh() {
+  return authenticatedJsonFetch("/api/outdoor/refresh", {
+    method: "POST",
+  });
+}

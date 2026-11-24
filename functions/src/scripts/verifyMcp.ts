@@ -113,6 +113,7 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
     assert.deepEqual(toolNames, [
       "get_air_quality_summary",
       "get_latest_reading",
+      "get_outdoor_air_quality",
       "get_readings_history",
       "get_sensor_status",
     ]);

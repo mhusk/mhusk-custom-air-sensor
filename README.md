@@ -22,15 +22,15 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 | :--- | :---: | :--- |
 | **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.3` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
 | **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
-| **Enclosure — 3D-Printed Hub** | `Printing` | Screwless, support-free, thermally baffled bedroom enclosure ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
+| **Enclosure — 3D-Printed Hub** | `Commissioning` | Screwless, support-free, thermally baffled bedroom enclosure — printed and calibrating ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
 | **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Live` | Zero-build Firebase Hosting dashboard (WorkOS AuthKit PKCE login, live °F cards, 6h/24h/7d interactive SVG charts, Device Settings drawer) + Firestore-backed `device_configs` remote tuning ([`docs/09-remote-config-and-dashboard.md`](./docs/09-remote-config-and-dashboard.md)) |
 | **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `Live` | Steps 16–19 live-verified on wall power (`boot.py` + immutable `code.py` auto-rollback + SHA-256 `firmware_releases` pipeline + on-device `ota_updater.py` + Web Dashboard **Fleet & Firmware** one-click rollout UI in [`docs/10-cloud-ota-and-rollback.md`](./docs/10-cloud-ota-and-rollback.md)) |
-| **Phase 4 — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, outdoor AQI context for "should I open the window?" decisions, and optional smart-home actuation |
+| **Phase 4A — Outdoor Weather & AQI Context** | `Live` | Keyless Open-Meteo Weather & Air Quality sync via `syncOutdoorOnReading` Firestore trigger, private `site_configs/home` setup, dashboard outdoor card + indoor-vs-outdoor deltas + dashed chart overlays, and `get_outdoor_air_quality` MCP tool ([`docs/11-outdoor-weather-and-aqi.md`](./docs/11-outdoor-weather-and-aqi.md)) |
+| **Phase 4B — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, and optional smart-home actuation |
 
-### What's Next (The 2-Layer Remote Update Plan)
-1. **Finish enclosure commissioning & launch Phase 2 (Remote Config + Web Dashboard):** Dial in enclosed SCD-40 temperature offset and altitude compensation, then manage day-to-day settings and view 24h/7d room charts from a lightweight WorkOS-protected Firebase Hosting dashboard—with zero flash wear or brick risk.
-2. **Build Phase 3 (Cloud Pull-Based OTA with A/B Rollback):** Refactor firmware into an immutable `code.py` bootloader + updatable `app.py` with SHA-256 checksum verification and one-click fleet rollouts from the dashboard so future updates never require unplugging a sensor.
-3. **Scale to Phase 4 (Multi-Room & Proactive Intelligence):** Print additional enclosures for more rooms, add `compare_rooms` and outdoor AQI context to the MCP server, and trigger push alerts when CO<sub>2</sub> or PM<sub>2.5</sub> spikes.
+### What's Next (Phase 4B)
+1. **Finish enclosure commissioning log:** Record the 60-minute thermal offset, altitude, acoustic, and LED check in [`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md) and apply the final offset via the web dashboard.
+2. **Scale to Multi-Room & Proactive Alerts:** Print additional enclosures for more rooms, add `compare_rooms` + per-device UID isolation, and trigger push alerts when CO<sub>2</sub> or PM<sub>2.5</sub> spikes.
 
 Track every atomic step and validation checkpoint in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
 
@@ -104,13 +104,14 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 8. [**`docs/08-enclosure-hardware-plan.md`**](./docs/08-enclosure-hardware-plan.md) — Screwless, support-free 3D-printed enclosure design (Bambu Lab X1 Carbon) with a ready-to-paste SpeakCAD prompt in [`enclosure/speakcad-prompt.txt`](./enclosure/speakcad-prompt.txt).
 9. [**`docs/09-remote-config-and-dashboard.md`**](./docs/09-remote-config-and-dashboard.md) — Device Shadow remote config (`device_configs`), live firmware polling & SCD-40 RAM calibration, WorkOS-protected Dashboard API, and zero-build Firebase Hosting web UI.
 10. [**`docs/10-cloud-ota-and-rollback.md`**](./docs/10-cloud-ota-and-rollback.md) — USB-aware `boot.py` NVM handoff, minimal immutable `code.py` auto-rollback bootloader, SHA-256 `firmware_releases` manifest/publish CLI, and on-device pull-based OTA updater (`ota_updater.py`).
+11. [**`docs/11-outdoor-weather-and-aqi.md`**](./docs/11-outdoor-weather-and-aqi.md) — Keyless Open-Meteo outdoor weather & US EPA AQI sync on incoming sensor readings, private `site_configs/home` location setup, indoor-vs-outdoor deltas, dashed chart overlays, and `get_outdoor_air_quality` MCP integration.
 
 ---
 
 ## Project Documents & Progress Tracking
 
 - [**`PRD.md`**](./PRD.md) — Complete Product Requirements Document, data schemas, and component specifications.
-- [**`IMPLEMENTATION_PLAN.md`**](./IMPLEMENTATION_PLAN.md) — Our phased, step-by-step commit & validation roadmap (Phase 1 completed; Phases 2–4 queued).
+- [**`IMPLEMENTATION_PLAN.md`**](./IMPLEMENTATION_PLAN.md) — Our phased, step-by-step commit & validation roadmap (Phases 1–3 completed; Phase 4 up next).
 
 ---
 
@@ -122,14 +123,17 @@ Every layer can be validated independently before deploying or flashing hardware
 # 1. Secret & privacy guardrails (always run before committing)
 ./scripts/check-secrets.sh
 
-# 2. Firmware EPA AQI math & Firestore REST encoding (add --publish for a live test write)
+# 2. Firmware EPA AQI math, bootloader rollback, OTA staging & Firestore REST encoding
 python3 scripts/test_firmware_local.py
+python3 scripts/verify_device_configs_rules.py
 
-# 3. Cloud Functions TypeScript build + Firestore stats, MCP protocol, WorkOS OAuth, and Dashboard API checks
+# 3. Cloud Functions TypeScript build + Firestore stats, MCP protocol, WorkOS OAuth, Dashboard API & OTA release checks
 npm --prefix functions run verify:firestore
 npm --prefix functions run verify:mcp
 npm --prefix functions run verify:auth
 npm --prefix functions run verify:api
+npm --prefix functions run verify:outdoor
+npm --prefix functions run verify:release
 
 # 4. Lightweight Web Dashboard (PKCE, SVG charts, HTML semantics, Firebase Hosting rewrites)
 node scripts/verify_web_dashboard.mjs

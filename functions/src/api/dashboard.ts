@@ -44,6 +44,22 @@ import {
   type SummaryPeriod,
   type UpdateDeviceConfigInput,
 } from "../services/firestore.js";
+import {
+  DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES,
+  MAX_OUTDOOR_POLL_INTERVAL_MINUTES,
+  MIN_OUTDOOR_POLL_INTERVAL_MINUTES,
+  computeIndoorOutdoorDelta,
+  getLatestOutdoorReading,
+  getOutdoorReadingsHistory,
+  getSiteLocationConfig,
+  syncOutdoorReadingIfStale,
+  updateSiteLocationConfig,
+  type IndoorOutdoorDelta,
+  type LatestOutdoorReadingResult,
+  type OutdoorReading,
+  type SiteLocationConfig,
+  type UpdateSiteLocationConfigInput,
+} from "../services/outdoor.js";
 
 export const DEVICE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MAX_JSON_BODY_BYTES = 64 * 1024;
@@ -74,6 +90,18 @@ export interface DashboardDataService {
     targetVersion: string | null,
     updatedBy: string
   ) => Promise<DeviceConfig>;
+  getSiteLocationConfig?: () => Promise<SiteLocationConfig | null>;
+  updateSiteLocationConfig?: (
+    input: UpdateSiteLocationConfigInput,
+    updatedBy: string
+  ) => Promise<SiteLocationConfig>;
+  getLatestOutdoorReading?: () => Promise<LatestOutdoorReadingResult | null>;
+  getOutdoorReadingsHistory?: (hours?: number, limit?: number) => Promise<OutdoorReading[]>;
+  syncOutdoorReadingIfStale?: (options?: { force?: boolean }) => Promise<{
+    synced: boolean;
+    reason: string;
+    reading: OutdoorReading | null;
+  }>;
 }
 
 export type OtaRolloutStatus =
@@ -89,6 +117,7 @@ export interface DashboardDeviceOverviewItem {
   config_sync_status: "synced" | "pending" | "local_defaults";
   ota_rollout_status: OtaRolloutStatus;
   health_context: ReadingHealthContext | null;
+  outdoor_delta?: IndoorOutdoorDelta | null;
 }
 
 export interface HandleDashboardApiOptions {
@@ -180,6 +209,38 @@ export const fleetRolloutSchema = z
   })
   .strict();
 
+export const updateSiteLocationConfigSchema = z
+  .object({
+    label: z
+      .string()
+      .trim()
+      .min(1, "label must be 1-64 characters.")
+      .max(64, "label must be 1-64 characters."),
+    latitude: z
+      .number()
+      .finite("latitude must be a valid number.")
+      .min(-90, "latitude must be between -90 and 90.")
+      .max(90, "latitude must be between -90 and 90."),
+    longitude: z
+      .number()
+      .finite("longitude must be a valid number.")
+      .min(-180, "longitude must be between -180 and 180.")
+      .max(180, "longitude must be between -180 and 180."),
+    outdoor_poll_interval_minutes: z
+      .number()
+      .int("outdoor_poll_interval_minutes must be a whole number.")
+      .min(
+        MIN_OUTDOOR_POLL_INTERVAL_MINUTES,
+        `outdoor_poll_interval_minutes must be at least ${MIN_OUTDOOR_POLL_INTERVAL_MINUTES}.`
+      )
+      .max(
+        MAX_OUTDOOR_POLL_INTERVAL_MINUTES,
+        `outdoor_poll_interval_minutes must be at most ${MAX_OUTDOOR_POLL_INTERVAL_MINUTES}.`
+      )
+      .default(DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES),
+  })
+  .strict();
+
 const SUMMARY_PERIOD_VALUES = new Set<SummaryPeriod>(["1h", "6h", "24h", "7d", "30d"]);
 
 export function createFirestoreDashboardService(
@@ -200,6 +261,12 @@ export function createFirestoreDashboardService(
     getFirmwareRelease: (version) => getFirmwareRelease(version, db),
     setDeviceTargetFirmwareVersion: (deviceId, targetVersion, updatedBy) =>
       setDeviceTargetFirmwareVersion(deviceId, targetVersion, updatedBy, db),
+    getSiteLocationConfig: () => getSiteLocationConfig(db),
+    updateSiteLocationConfig: (input, updatedBy) =>
+      updateSiteLocationConfig(input, updatedBy, db),
+    getLatestOutdoorReading: () => getLatestOutdoorReading(db),
+    getOutdoorReadingsHistory: (hours, limit) => getOutdoorReadingsHistory(hours, limit, db),
+    syncOutdoorReadingIfStale: (opts) => syncOutdoorReadingIfStale({ ...opts, db }),
   };
 }
 
@@ -560,21 +627,30 @@ export async function handleDashboardApiRequest(
     options.dashboardService ?? createFirestoreDashboardService(options.db ?? getDb());
 
   try {
-    // 6. GET /api/dashboard/overview — live device cards + desired config + sync status
+    // 6. GET /api/dashboard/overview — live device cards + outdoor weather/AQI + deltas
     if (pathname === "/api/dashboard/overview" && method === "GET") {
-      const [statusResult, configMap] = await Promise.all([
+      const [statusResult, configMap, siteConfig, outdoorLatest] = await Promise.all([
         service.getSensorStatus(),
         service.listDeviceConfigs(),
+        service.getSiteLocationConfig ? service.getSiteLocationConfig() : Promise.resolve(null),
+        service.getLatestOutdoorReading
+          ? service.getLatestOutdoorReading()
+          : Promise.resolve(null),
       ]);
 
       const items: DashboardDeviceOverviewItem[] = statusResult.devices.map((device) => {
         const desired = configMap[device.device_id] ?? null;
+        const outdoorDelta =
+          device.latest_reading && outdoorLatest
+            ? computeIndoorOutdoorDelta(device.latest_reading, outdoorLatest.reading)
+            : null;
         return {
           device,
           desired_config: desired,
           config_sync_status: computeConfigSyncStatus(device, desired),
           ota_rollout_status: computeOtaRolloutStatus(device, desired),
           health_context: buildHealthContextFromLatest(device),
+          outdoor_delta: outdoorDelta,
         };
       });
 
@@ -585,6 +661,8 @@ export async function handleDashboardApiRequest(
         online_count: statusResult.online_count,
         stale_or_offline_count: statusResult.stale_or_offline_count,
         devices: items,
+        site_config: siteConfig,
+        outdoor_latest: outdoorLatest,
       });
       return;
     }
@@ -651,19 +729,122 @@ export async function handleDashboardApiRequest(
         summaryPeriod = rawPeriod as SummaryPeriod;
       }
 
-      const [history, summary] = await Promise.all([
+      const [history, summary, outdoorHistory] = await Promise.all([
         service.getReadingsHistory({ hours, limit, device_id: deviceId, location }),
         service.getAirQualitySummary({
           period: summaryPeriod,
           device_id: deviceId,
           location,
         }),
+        service.getOutdoorReadingsHistory
+          ? service.getOutdoorReadingsHistory(hours, limit)
+          : Promise.resolve([]),
       ]);
 
       sendJson(res, 200, {
         history,
         summary,
+        outdoor_history: outdoorHistory,
       });
+      return;
+    }
+
+    // 7b. GET / PUT /api/site/config — private Home Location for Open-Meteo outdoor feed
+    if (pathname === "/api/site/config") {
+      if (method === "GET") {
+        const siteConfig = service.getSiteLocationConfig
+          ? await service.getSiteLocationConfig()
+          : null;
+        sendJson(res, 200, {
+          configured: Boolean(siteConfig),
+          config: siteConfig,
+        });
+        return;
+      }
+
+      if (method === "PUT") {
+        let rawBody: unknown;
+        try {
+          rawBody = await readJsonBody(req);
+        } catch (err) {
+          if (err instanceof BodyReadError) {
+            sendJson(res, err.statusCode, { error: err.code, message: err.message });
+            return;
+          }
+          throw err;
+        }
+
+        const parsed = updateSiteLocationConfigSchema.safeParse(rawBody);
+        if (!parsed.success) {
+          sendJson(res, 400, formatZodError(parsed.error));
+          return;
+        }
+
+        if (!service.updateSiteLocationConfig) {
+          sendJson(res, 501, {
+            error: "not_implemented",
+            message: "Site location config storage is not enabled.",
+          });
+          return;
+        }
+
+        const saved = await service.updateSiteLocationConfig(parsed.data, actor);
+        let syncResult: { synced: boolean; reason: string; reading: OutdoorReading | null } | null =
+          null;
+        if (service.syncOutdoorReadingIfStale) {
+          try {
+            syncResult = await service.syncOutdoorReadingIfStale({ force: true });
+          } catch (syncErr) {
+            console.error(
+              "[outdoor] Immediate refresh after /api/site/config update failed:",
+              syncErr instanceof Error ? syncErr.message : String(syncErr)
+            );
+          }
+        }
+
+        sendJson(res, 200, {
+          updated: true,
+          config: saved,
+          outdoor_sync: syncResult,
+        });
+        return;
+      }
+
+      sendJson(res, 405, {
+        error: "method_not_allowed",
+        message: `Method ${method} is not allowed for ${pathname}.`,
+      });
+      return;
+    }
+
+    // 7c. POST /api/outdoor/refresh — on-demand Open-Meteo fetch into outdoor_readings
+    if (pathname === "/api/outdoor/refresh") {
+      if (method !== "POST") {
+        sendJson(res, 405, {
+          error: "method_not_allowed",
+          message: `Method ${method} is not allowed for ${pathname}.`,
+        });
+        return;
+      }
+
+      if (!service.syncOutdoorReadingIfStale) {
+        sendJson(res, 501, {
+          error: "not_implemented",
+          message: "Outdoor refresh is not enabled.",
+        });
+        return;
+      }
+
+      const outcome = await service.syncOutdoorReadingIfStale({ force: true });
+      if (!outcome.reading && outcome.reason === "site_location_not_configured") {
+        sendJson(res, 400, {
+          error: "site_location_not_configured",
+          message: "Configure your Home Location first before refreshing outdoor weather.",
+        });
+        return;
+      }
+
+      sendJson(res, 200, outcome);
       return;
     }
 

@@ -220,6 +220,11 @@ function formatHoverTime(timeMs, hours) {
  *   domainOptions?: { minFloor?: number, suggestedMin?: number, suggestedMax?: number },
  *   thresholds?: Array<{ value: number, label: string, tone: "warn" | "danger" }>,
  *   idealBand?: { min: number, max: number, label: string } | null,
+ *   overlay?: {
+ *     label: string,
+ *     readings: Array<Record<string, unknown>>,
+ *     field: string,
+ *   } | null,
  * }} spec
  */
 export function renderTrendChartCard(container, spec) {
@@ -234,22 +239,56 @@ export function renderTrendChartCard(container, spec) {
     .filter((p) => Number.isFinite(p.timeMs) && Number.isFinite(p.value))
     .sort((a, b) => a.timeMs - b.timeMs);
 
+  const overlayPoints = spec.overlay
+    ? (spec.overlay.readings || [])
+        .map((r) => ({
+          timeMs: Date.parse(String(r.timestamp)),
+          value: r[spec.overlay.field] === null || r[spec.overlay.field] === undefined
+            ? Number.NaN
+            : Number(r[spec.overlay.field]),
+        }))
+        .filter((p) => Number.isFinite(p.timeMs) && Number.isFinite(p.value))
+        .sort((a, b) => a.timeMs - b.timeMs)
+    : [];
+
   const card = document.createElement("article");
   card.className = "chart-card";
 
-  // Header with title, live/hover readout, and summary stats
+  // Header with title, optional outdoor legend, and live/hover readout
   const header = document.createElement("div");
   header.className = "chart-card__header";
 
   const titleWrap = document.createElement("div");
+  titleWrap.className = "chart-card__title-wrap";
   const titleEl = document.createElement("h3");
   titleEl.className = "chart-card__title";
   titleEl.textContent = spec.title;
   titleWrap.append(titleEl);
 
+  if (overlayPoints.length > 0 && spec.overlay) {
+    const legend = document.createElement("span");
+    legend.className = "chart-legend";
+    const indoorSwatch = document.createElement("span");
+    indoorSwatch.className = "chart-legend__item";
+    const indoorBar = document.createElement("span");
+    indoorBar.className = "chart-legend__line";
+    indoorBar.style.backgroundColor = `var(${spec.colorVar})`;
+    indoorSwatch.append(indoorBar, document.createTextNode("Indoor"));
+
+    const outdoorSwatch = document.createElement("span");
+    outdoorSwatch.className = "chart-legend__item";
+    const outdoorBar = document.createElement("span");
+    outdoorBar.className = "chart-legend__line chart-legend__line--dashed";
+    outdoorSwatch.append(outdoorBar, document.createTextNode(spec.overlay.label));
+
+    legend.append(indoorSwatch, outdoorSwatch);
+    titleWrap.append(legend);
+  }
+
   const readoutEl = document.createElement("div");
   readoutEl.className = "chart-card__readout";
   const latestPoint = points[points.length - 1] ?? null;
+  const latestOverlay = overlayPoints[overlayPoints.length - 1] ?? null;
 
   const setDefaultReadout = () => {
     readoutEl.replaceChildren();
@@ -259,10 +298,17 @@ export function renderTrendChartCard(container, spec) {
     }
     const valSpan = document.createElement("strong");
     valSpan.textContent = `${formatVal(latestPoint.value)} ${spec.unit}`;
+    readoutEl.append(valSpan);
+    if (latestOverlay && spec.overlay) {
+      const outSpan = document.createElement("span");
+      outSpan.className = "chart-card__outdoor-val";
+      outSpan.textContent = `Out ${formatVal(latestOverlay.value)} ${spec.unit}`;
+      readoutEl.append(outSpan);
+    }
     const timeSpan = document.createElement("span");
     timeSpan.className = "chart-card__time";
     timeSpan.textContent = `Latest · ${formatHoverTime(latestPoint.timeMs, spec.hours)}`;
-    readoutEl.append(valSpan, timeSpan);
+    readoutEl.append(timeSpan);
   };
   setDefaultReadout();
 
@@ -282,7 +328,7 @@ export function renderTrendChartCard(container, spec) {
   const plotHeight = CHART_HEIGHT - PAD_TOP - PAD_BOTTOM;
 
   const domain = computeNiceDomain(
-    points.map((p) => p.value),
+    [...points.map((p) => p.value), ...overlayPoints.map((p) => p.value)],
     spec.domainOptions
   );
 
@@ -454,6 +500,39 @@ export function renderTrendChartCard(container, spec) {
     );
   }
 
+  // Optional dashed outdoor comparison overlay
+  if (overlayPoints.length > 0) {
+    const inWindowOverlay = overlayPoints.filter(
+      (p) => p.timeMs >= minTime - 30 * 60_000 && p.timeMs <= maxTime + 30 * 60_000
+    );
+    const outdoorGapMs = spec.hours <= 24 ? 90 * 60 * 1000 : 6 * 60 * 60 * 1000;
+    const outdoorSegments = buildSeriesSegments(inWindowOverlay, outdoorGapMs);
+    for (const seg of outdoorSegments) {
+      if (seg.length === 1) {
+        const clampedTime = Math.min(maxTime, Math.max(minTime, seg[0].timeMs));
+        svg.append(
+          svgEl("circle", {
+            class: "chart-outdoor-dot",
+            cx: xScale(clampedTime),
+            cy: yScale(seg[0].value),
+            r: 3,
+          })
+        );
+        continue;
+      }
+      const oCoords = seg.map((p) => {
+        const clampedTime = Math.min(maxTime, Math.max(minTime, p.timeMs));
+        return `${xScale(clampedTime).toFixed(2)},${yScale(p.value).toFixed(2)}`;
+      });
+      svg.append(
+        svgEl("polyline", {
+          class: "chart-line chart-line--outdoor",
+          points: oCoords.join(" "),
+        })
+      );
+    }
+  }
+
   // Interactive hover crosshair & active point marker
   const crosshair = svgEl("line", {
     class: "chart-crosshair",
@@ -496,10 +575,22 @@ export function renderTrendChartCard(container, spec) {
     readoutEl.replaceChildren();
     const valSpan = document.createElement("strong");
     valSpan.textContent = `${formatVal(point.value)} ${spec.unit}`;
+    readoutEl.append(valSpan);
+
+    if (overlayPoints.length > 0) {
+      const oIdx = findNearestPointIndex(overlayPoints, point.timeMs);
+      if (oIdx >= 0 && Math.abs(overlayPoints[oIdx].timeMs - point.timeMs) <= 2 * 60 * 60_000) {
+        const outSpan = document.createElement("span");
+        outSpan.className = "chart-card__outdoor-val";
+        outSpan.textContent = `Out ${formatVal(overlayPoints[oIdx].value)} ${spec.unit}`;
+        readoutEl.append(outSpan);
+      }
+    }
+
     const timeSpan = document.createElement("span");
     timeSpan.className = "chart-card__time";
     timeSpan.textContent = formatHoverTime(point.timeMs, spec.hours);
-    readoutEl.append(valSpan, timeSpan);
+    readoutEl.append(timeSpan);
   };
 
   const clearHighlight = () => {
