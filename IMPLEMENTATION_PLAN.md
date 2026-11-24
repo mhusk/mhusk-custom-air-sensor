@@ -310,14 +310,15 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(firmware): add SHA-256 verified pull-based OTA updater`
 
 #### Step 19: Fleet & Firmware Rollout Panel in Web Dashboard
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed (Live-Verified on ESP32-S3 Wall Power)`
 - **Goal**: Add a clean **Fleet & Firmware** tab to the lightweight web dashboard showing every sensor's current vs. target `firmware_version`, online/stale status, last OTA result (`up_to_date`, `updating`, `rolled_back`), and one-click version promotion per device or across all rooms.
 - **Deliverables**:
-  - Dashboard API endpoints to list `firmware_releases` and trigger per-device or fleet-wide `target_firmware_version` rollouts
-  - `web/` Fleet & Firmware UI panel with version badges, rollout status, and rollback warning indicators
-  - `docs/10-cloud-ota-and-rollback.md` (Part 4: Managing staged rollouts from the web dashboard)
+  - Dashboard API endpoints (`GET /api/firmware/releases`, `PUT /api/devices/:deviceId/firmware`, `POST /api/firmware/rollout`) + `ota_status`/`ota_target_version`/`ota_last_error` mapping & `ota_rollout_status` in `functions/src/services/firestore.ts` and `functions/src/api/dashboard.ts`
+  - `web/` accessible **Fleet & Firmware** tab (`focusgroup="tablist nomemory"`, `hidden="until-found"`, `@container`-responsive fleet table, Fleet-Wide Promotion bar, Published Releases cards, and native `<dialog>` rollout confirmation modal)
+  - Updated `functions/src/scripts/verifyApi.ts` (10 test groups) and `scripts/verify_web_dashboard.mjs` (Step 19 semantics checks)
+  - `docs/10-cloud-ota-and-rollback.md` (Part 4: Managing staged rollouts from the web dashboard + `hidden="until-found"` stacking-context gotcha)
 - **Single Focused Validation**:
-  - From the live web dashboard (with the sensor sealed in its 3D-printed enclosure on wall power), trigger a firmware version promotion and watch the dashboard transition from `updating` → `up_to_date` with the new `firmware_version` live.
+  - Passed all 10 checks in `verify:api`, `verify:auth`, `verify_web_dashboard.mjs`, `test_firmware_local.py`, and `./scripts/check-secrets.sh`; deployed Cloud Functions + Firebase Hosting, published `firmware_releases/1.3.3`, and promoted `feather-s3-01` (`Master Bedroom`) from `v1.3.2` → `v1.3.3` directly from the live web dashboard while on wall power (`Up to date`, `v1.3.3` live).
 - **Target Commit**: `feat(web): add fleet firmware status and one-click OTA rollout UI`
 
 ---

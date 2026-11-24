@@ -528,3 +528,10 @@ node scripts/verify_web_dashboard.mjs
 
 > [!TIP]
 > **Canary first, fleet second:** When you add more room sensors in Phase 4, use the per-device **Promote** button in the Fleet table to upgrade one room first and confirm `Up to date` before clicking **Promote All Rooms**.
+
+> [!NOTE]
+> **Live Hardware Verification (Step 19 Passed):** Published `firmware_releases/1.3.3` (4 files, `88,337` bytes, git `5e5e0a5`), then triggered the rollout directly from the deployed Firebase Hosting **Fleet & Firmware** tab while `feather-s3-01` (**Master Bedroom**) ran on wall power. Confirmed the board pulled `v1.3.3`, verified SHA-256 checksums, rebooted cleanly, and reported `RUNNING v1.3.3` / `TARGET v1.3.3` / `Up to date` in the dashboard.
+
+> [!WARNING]
+> **CSS gotcha — `hidden="until-found"` in a shared Grid cell creates a stacking context:**
+> When stacking tab panels in the same CSS Grid cell (`grid-area: 2 / 1`) with `hidden="until-found"`, the hidden panel's `content-visibility: hidden` creates a stacking context and stretches over the active panel—silently swallowing pointer clicks on later tabs. Always pair it with `.tabpanel { position: relative; z-index: 1; }` and `.tabpanel[hidden="until-found"] { pointer-events: none; align-self: start; z-index: 0; }`.

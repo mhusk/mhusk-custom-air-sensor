@@ -1385,9 +1385,21 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
 }
 
 /* Keep tabpanel itself borderless/paddingless so hidden="until-found" leaves
-   no empty strip, and stack panels in the same grid cell. */
+   no empty strip, and stack panels in the same grid cell.
+   hidden="until-found" applies content-visibility: hidden, which creates a
+   stacking context—without pointer-events: none + align-self: start, a hidden
+   earlier panel in the same grid cell stretches over the active panel and
+   blocks clicks! */
 .tabpanel {
   grid-area: 2 / 1;
+  position: relative;
+  z-index: 1;
+}
+
+.tabpanel[hidden="until-found"] {
+  pointer-events: none;
+  align-self: start;
+  z-index: 0;
 }
 
 .tabpanel__inner {

@@ -16,15 +16,15 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 
 ## Where We Are Now & Next Steps
 
-> **Current Snapshot:** **Phase 1 (v1) and Phase 2 (Remote Config + Web Dashboard) are live end-to-end**, streaming indoor air quality to Cloud Firestore, answering natural-language queries in **Gemini** and **Grok** via MCP, and providing a WorkOS-protected Firebase Hosting web dashboard with 6h/24h/7d interactive SVG charts and Layer 1 remote device settings.
+> **Current Snapshot:** **Phases 1, 2, and 3 are live end-to-end**, streaming indoor air quality to Cloud Firestore, answering natural-language queries in **Gemini** and **Grok** via MCP, and providing a WorkOS-protected Firebase Hosting web dashboard with 6h/24h/7d interactive SVG charts, Layer 1 remote device settings, and Layer 2 one-click SHA-256 Cloud OTA rollouts with A/B rollback.
 
 | Phase / Layer | Status | Summary |
 | :--- | :---: | :--- |
-| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.2` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
+| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.3` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
 | **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
 | **Enclosure — 3D-Printed Hub** | `Printing` | Screwless, support-free, thermally baffled bedroom enclosure ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
 | **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Live` | Zero-build Firebase Hosting dashboard (WorkOS AuthKit PKCE login, live °F cards, 6h/24h/7d interactive SVG charts, Device Settings drawer) + Firestore-backed `device_configs` remote tuning ([`docs/09-remote-config-and-dashboard.md`](./docs/09-remote-config-and-dashboard.md)) |
-| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `In Progress` | Steps 16–18 live-verified on wall power (`boot.py` + immutable `code.py` auto-rollback + SHA-256 `firmware_releases` pipeline & publish CLI + on-device `ota_updater.py` in [`docs/10-cloud-ota-and-rollback.md`](./docs/10-cloud-ota-and-rollback.md)); next up: Fleet & Firmware rollout UI (Step 19) |
+| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `Live` | Steps 16–19 live-verified on wall power (`boot.py` + immutable `code.py` auto-rollback + SHA-256 `firmware_releases` pipeline + on-device `ota_updater.py` + Web Dashboard **Fleet & Firmware** one-click rollout UI in [`docs/10-cloud-ota-and-rollback.md`](./docs/10-cloud-ota-and-rollback.md)) |
 | **Phase 4 — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, outdoor AQI context for "should I open the window?" decisions, and optional smart-home actuation |
 
 ### What's Next (The 2-Layer Remote Update Plan)
