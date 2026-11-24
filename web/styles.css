@@ -543,6 +543,7 @@ input:focus-visible {
   border-radius: 999px;
   background-color: var(--surface-subtle);
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .pill--good {
@@ -570,6 +571,7 @@ input:focus-visible {
   height: 7px;
   border-radius: 50%;
   background-color: currentColor;
+  flex-shrink: 0;
 }
 
 .device-grid {
@@ -1565,7 +1567,7 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .fleet-action-group .select-input {
@@ -1666,6 +1668,7 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
 
   .fleet-action-group {
     justify-content: flex-end;
+    flex-wrap: wrap;
   }
 }
 
