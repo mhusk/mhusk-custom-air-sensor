@@ -111,3 +111,73 @@ To keep existing `v1.0.0` firmware running uninterrupted while rolling out Step 
 > [!IMPORTANT]
 > **Backward compatibility during phased rollouts.**
 > Because `devices/{device_id}` uses `hasOnly(...)` in `firestore.rules`, adding any new telemetry field in firmware *before* updating the rules will cause `403 PERMISSION_DENIED` on every publish. Always deploy optional fields in `firestore.rules` first (Step 12), verify live `v1.0.0` devices keep publishing cleanly, and *then* update firmware (Step 13).
+
+---
+
+## 2. Part 2: Firmware Remote Configuration Polling (Step 13)
+
+With `device_configs/{device_id}` locked down in Firestore, firmware `v1.1.0` teaches the ESP32-S3 to check its cloud mailbox once per publishing cycle—**before** sampling the sensors—so updated calibration or room names apply immediately on the very next reading.
+
+### How the On-Device Control Loop Applies Config Safely
+
+1. **Fetch & Decode (`firmware/firestore_client.py`):**
+   - `FirestoreClient.fetch_device_config(device_id)` sends an authenticated `GET` to `device_configs/{device_id}` and decodes Firestore REST typed values (`stringValue`, `integerValue`, `doubleValue`, `booleanValue`, `timestampValue`, `nullValue`) into a plain Python dictionary.
+   - If the document does not exist yet (**HTTP 404**), it returns `None` cleanly instead of raising an error.
+   - If a transient Wi-Fi/TLS hiccup happens during the config fetch, `firmware/code.py` logs `[Config WARN]` and **keeps the last known-good config** so telemetry publishing is never interrupted.
+2. **Validate & Clamp (`normalize_device_config`):**
+   - Every field is type-checked and clamped to the exact same bounds enforced by `firestore.rules` (`reporting_interval_seconds`: `60–3600`, `temperature_offset_c`: `0.0–20.0`, `altitude_m`: `0–5000`, `location`: safe slug regex, `led_enabled`: strict `bool`).
+   - A bad or unexpected value in Firestore can never crash the sensor or cause rejected publishes.
+3. **One-Shot Remote Reboot (`should_trigger_reboot`):**
+   - On the very first NTP sync after startup, the board records `boot_epoch` in RAM using pure-Python UTC calendar math (`parse_utc_timestamp_epoch`).
+   - If `reboot_requested_at` is strictly **newer** than `boot_epoch` (and within 30 minutes of current UTC time), the board turns off its NeoPixel and calls `microcontroller.reset()`. After rebooting, the new `boot_epoch` is newer than `reboot_requested_at`, preventing infinite reboot loops with zero flash writes.
+4. **SCD-40 RAM Calibration Without EEPROM Wear (`apply_scd40_calibration`):**
+   - Per the Sensirion SCD-4x datasheet, `temperature_offset` and `altitude` can only be written while periodic measurement is stopped.
+   - `firmware/code.py` tracks the currently applied offset/altitude in RAM and **only** pauses periodic measurement (`stop_periodic_measurement()` → `500 ms` → set registers → `start_periodic_measurement()`) on startup or when a value actually changes.
+   - It intentionally **never** calls `scd4x.persist_settings()`, avoiding EEPROM write wear (unlimited RAM updates).
+5. **Muteable Bedroom NeoPixel (`StatusLED.set_enabled`):**
+   - When `led_enabled` is `false`, `StatusLED` keeps the onboard NeoPixel completely dark across publish pulses and error blinks—ideal for a pitch-black bedroom nightstand.
+6. **Config Sync Echo (`devices/{device_id}`):**
+   - Every publish reports `config_version`, `temperature_offset_c`, `altitude_m`, and `led_enabled` in `devices/{device_id}` so the dashboard (Steps 14–15) can confirm the physical sensor is in sync.
+
+---
+
+### Updating Your ESP32-S3 (`CIRCUITPY`) to Firmware `v1.1.0`
+
+When you are ready to load `v1.1.0` onto the Feather (you only need to copy the two updated Python files—your `settings.toml` and `lib/` folder stay untouched):
+
+```bash
+cp firmware/firestore_client.py /Volumes/CIRCUITPY/firestore_client.py
+cp firmware/code.py /Volumes/CIRCUITPY/code.py
+sync
+```
+
+Watch the serial console (`screen /dev/cu.usbmodem* 115200`) on boot and confirm:
+- `[Config] Active (cloud v1): location=master-bedroom, interval=300s, temp_offset=4.00C, altitude=0m, led=True`
+- `[SCD-40] Applied RAM calibration: temperature_offset=4.00C, altitude=0m`
+- `[OK ...] cfg=v1 | CO2=...`
+
+---
+
+### Single Focused Validation Checkpoint (Part 2)
+
+1. **Mac Offline + Live Config Fetch Check (no hardware required):**
+   ```bash
+   python3 scripts/test_firmware_local.py --fetch-config
+   ```
+   Verifies EPA AQI math, v1.1 `devices` payload encoding, Firestore value decoding, out-of-range clamping, leap-year UTC epoch parsing, reboot loop prevention, `code.py` syntax compilation, live `GET device_configs/<id>`, and graceful `404` fallback.
+2. **On-Device Live Config Test (once `v1.1.0` is copied to `CIRCUITPY`):**
+   - Temporarily change `reporting_interval_seconds` from `300` → `60` (and bump `config_version` to `2`) in Firestore.
+   - Watch the next reading arrive and verify `devices/feather-s3-01` updates to `firmware_version: "1.1.0"`, `config_version: 2`, and `reporting_interval_seconds: 60` without rebooting or touching USB—then change it back to `300`.
+
+---
+
+### Good to Know & Real-World Troubleshooting (Part 2)
+
+> [!TIP]
+> **Why `parse_utc_timestamp_epoch` uses pure Gregorian math instead of `time.mktime()`.**
+> On macOS CPython, `time.mktime()` interprets a time tuple in your **local timezone** (e.g., EST/EDT, 4–5 hours off UTC), whereas CircuitPython's `time.mktime()` treats the same tuple as **UTC**. Using pure-Python calendar arithmetic (`_days_from_civil`) guarantees identical Unix epoch seconds on both Mac unit tests and the ESP32-S3 with zero `datetime` dependency.
+
+> [!NOTE]
+> **Remember `isinstance(True, int)` is `True` in Python!**
+> In `normalize_device_config()`, numeric checks explicitly guard `not isinstance(val, bool)` so an accidental boolean in an integer field (`config_version`, `reporting_interval_seconds`, `altitude_m`) is cleanly rejected instead of silently turning into `1` or `0`.
+

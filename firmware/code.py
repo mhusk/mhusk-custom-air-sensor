@@ -5,10 +5,11 @@ Reads indoor air quality telemetry from two daisy-chained STEMMA QT I2C sensors:
   - Plantower PMSA003I (0x12): PM1.0, PM2.5, PM10.0, and 6 particle count bins
 
 Computes US EPA AQI on-device (aqi.py), syncs UTC time via NTP, authenticates
-with Firebase Auth, and publishes readings + device status to Cloud Firestore
-every 5 minutes (configurable via SENSOR_INTERVAL_SECONDS in settings.toml).
+with Firebase Auth, polls optional remote settings from `device_configs/{device_id}`,
+and publishes readings + device status to Cloud Firestore on the active interval
+(default 5 minutes, overridable via cloud config or settings.toml).
 
-Onboard NeoPixel status codes:
+Onboard NeoPixel status codes (muted when remote `led_enabled` is false):
   - Solid Blue        : Booting, initializing I2C/Wi-Fi/NTP
   - Green pulse (1s)  : Reading published cleanly, then LED turns OFF
   - Slow Amber blink  : Wi-Fi, NTP, or Firestore error (auto-retrying)
@@ -38,15 +39,19 @@ import firestore_client
 from firestore_client import FirestoreClient, FirestoreError
 
 # Firmware & hardware constants
-FIRMWARE_VERSION = "1.0.0"
+FIRMWARE_VERSION = "1.1.0"
 SENSORS = ["SCD-40", "PMSA003I"]
 SCD40_I2C_ADDR = 0x62
 PMSA003I_I2C_ADDR = 0x12
 
-# Timing & resilience constants (seconds)
+# Timing, calibration & resilience constants
 DEFAULT_INTERVAL_SECONDS = 300
 MIN_INTERVAL_SECONDS = 60
 MAX_INTERVAL_SECONDS = 3600
+DEFAULT_TEMPERATURE_OFFSET_C = 4.0  # Sensirion SCD-40 factory default
+DEFAULT_ALTITUDE_M = 0
+DEFAULT_LED_ENABLED = True
+REBOOT_REQUEST_MAX_AGE_SECONDS = 1800
 NTP_RESYNC_INTERVAL_SECONDS = 21600  # Re-sync UTC clock every 6 hours
 WATCHDOG_TIMEOUT_SECONDS = 60
 NETWORK_RETRY_SECONDS = 30
@@ -121,25 +126,38 @@ class HardwareError(Exception):
 class StatusLED:
     """Thin wrapper around the Feather ESP32-S3 onboard RGB NeoPixel."""
 
-    def __init__(self, brightness=0.2):
+    def __init__(self, brightness=0.2, enabled=True):
         self._pixel = neopixel.NeoPixel(
             board.NEOPIXEL, 1, brightness=brightness, auto_write=True
         )
+        self.enabled = bool(enabled)
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
+        if not self.enabled:
+            self.off()
 
     def set(self, color):
-        self._pixel[0] = color
+        self._pixel[0] = color if self.enabled else COLOR_OFF
 
     def off(self):
         self._pixel[0] = COLOR_OFF
 
     def pulse_success(self, duration=1.0):
         """Show a brief green pulse, then turn the LED off to stay unobtrusive."""
+        if not self.enabled:
+            self.off()
+            return
         self.set(COLOR_GREEN)
         sleep_with_watchdog(duration)
         self.off()
 
     def blink_for(self, color, total_seconds, on_seconds, off_seconds):
         """Blink a status color for `total_seconds` while feeding the watchdog."""
+        if not self.enabled:
+            self.off()
+            sleep_with_watchdog(total_seconds)
+            return
         deadline = time.monotonic() + total_seconds
         while time.monotonic() < deadline:
             self.set(color)
@@ -297,6 +315,30 @@ def init_sensors(i2c):
     return scd4x, pm25
 
 
+def apply_scd40_calibration(scd4x, temperature_offset_c, altitude_m):
+    """Apply temperature offset and altitude compensation in SCD-40 RAM (zero EEPROM wear).
+
+    Per the Sensirion SCD-4x datasheet, `temperature_offset` and `altitude` may only be
+    written while periodic measurement is stopped, so this helper pauses measurement for
+    500 ms, writes both registers in RAM without calling `persist_settings()`, and resumes.
+    """
+    feed_watchdog()
+    try:
+        scd4x.stop_periodic_measurement()
+        sleep_with_watchdog(0.5)
+        scd4x.temperature_offset = float(temperature_offset_c)
+        scd4x.altitude = int(altitude_m)
+        scd4x.start_periodic_measurement()
+    except Exception as err:
+        raise HardwareError("Failed to apply SCD-40 calibration: {}".format(err))
+
+    print(
+        "[SCD-40] Applied RAM calibration: temperature_offset={:.2f}C, altitude={}m".format(
+            float(temperature_offset_c), int(altitude_m)
+        )
+    )
+
+
 def _read_scd40(scd4x, timeout_seconds=15.0):
     """Wait for a fresh SCD-40 sample and return (co2_ppm, temp_c, temp_f, rh)."""
     deadline = time.monotonic() + timeout_seconds
@@ -429,11 +471,19 @@ def main():
             time.sleep(1.0)
 
     device_id = config["SENSOR_DEVICE_ID"]
-    location = config["SENSOR_LOCATION"]
-    interval_seconds = config["SENSOR_INTERVAL_SECONDS"]
+    local_defaults = {
+        "location": config["SENSOR_LOCATION"],
+        "reporting_interval_seconds": config["SENSOR_INTERVAL_SECONDS"],
+        "temperature_offset_c": DEFAULT_TEMPERATURE_OFFSET_C,
+        "altitude_m": DEFAULT_ALTITUDE_M,
+        "led_enabled": DEFAULT_LED_ENABLED,
+    }
+    active_config = firestore_client.normalize_device_config(None, local_defaults)
     print(
-        "[Config] device_id={}, location={}, interval={}s".format(
-            device_id, location, interval_seconds
+        "[Config] Local defaults: device_id={}, location={}, interval={}s".format(
+            device_id,
+            active_config["location"],
+            active_config["reporting_interval_seconds"],
         )
     )
 
@@ -448,6 +498,9 @@ def main():
     pool = None
     client = None
     last_ntp_sync = None
+    boot_epoch = None
+    applied_scd40_offset = None
+    applied_scd40_altitude = None
     consecutive_network_errors = 0
     first_boot = True
 
@@ -461,6 +514,8 @@ def main():
                 # 1. Initialize or recover I2C sensors
                 if scd4x is None or pm25 is None:
                     scd4x, pm25 = init_sensors(i2c)
+                    applied_scd40_offset = None
+                    applied_scd40_altitude = None
 
                 # 2. Ensure Wi-Fi and HTTPS session / Firestore client
                 ensure_wifi(
@@ -486,8 +541,88 @@ def main():
                     or (now_mono - last_ntp_sync) >= NTP_RESYNC_INTERVAL_SECONDS
                 ):
                     last_ntp_sync = sync_ntp_utc(pool)
+                    if boot_epoch is None:
+                        boot_epoch = firestore_client.parse_utc_timestamp_epoch(
+                            firestore_client.format_utc_timestamp(time.localtime())
+                        )
 
-                # 4. Read SCD-40 + PMSA003I and compute EPA AQI
+                # 4. Poll remote config (`device_configs/{device_id}`) non-fatally in RAM
+                try:
+                    feed_watchdog()
+                    raw_remote_cfg = client.fetch_device_config(device_id)
+                    new_config = firestore_client.normalize_device_config(
+                        raw_remote_cfg, local_defaults
+                    )
+                    if (
+                        new_config["config_version"] != active_config["config_version"]
+                        or new_config["location"] != active_config["location"]
+                        or new_config["reporting_interval_seconds"]
+                        != active_config["reporting_interval_seconds"]
+                        or new_config["temperature_offset_c"]
+                        != active_config["temperature_offset_c"]
+                        or new_config["altitude_m"] != active_config["altitude_m"]
+                        or new_config["led_enabled"] != active_config["led_enabled"]
+                    ):
+                        source = (
+                            "cloud v{}".format(new_config["config_version"])
+                            if raw_remote_cfg is not None
+                            else "local defaults"
+                        )
+                        print(
+                            "[Config] Active ({}): location={}, interval={}s, "
+                            "temp_offset={:.2f}C, altitude={}m, led={}".format(
+                                source,
+                                new_config["location"],
+                                new_config["reporting_interval_seconds"],
+                                new_config["temperature_offset_c"],
+                                new_config["altitude_m"],
+                                new_config["led_enabled"],
+                            )
+                        )
+                    active_config = new_config
+                except Exception as cfg_err:
+                    print(
+                        "[Config WARN] Remote config fetch skipped (keeping v{}): {}".format(
+                            active_config["config_version"], cfg_err
+                        )
+                    )
+
+                # 4a. Check one-shot remote reboot command
+                now_epoch = firestore_client.parse_utc_timestamp_epoch(
+                    firestore_client.format_utc_timestamp(time.localtime())
+                )
+                if firestore_client.should_trigger_reboot(
+                    active_config["reboot_requested_at"],
+                    boot_epoch,
+                    now_epoch,
+                    REBOOT_REQUEST_MAX_AGE_SECONDS,
+                ):
+                    print(
+                        "[Config] Remote reboot requested ({}); resetting microcontroller...".format(
+                            active_config["reboot_requested_at"]
+                        )
+                    )
+                    led.off()
+                    time.sleep(0.5)
+                    microcontroller.reset()
+
+                # 4b. Apply LED preference & SCD-40 RAM calibration (only when changed)
+                led.set_enabled(active_config["led_enabled"])
+                desired_offset = active_config["temperature_offset_c"]
+                desired_altitude = active_config["altitude_m"]
+                if (
+                    applied_scd40_offset is None
+                    or abs(desired_offset - applied_scd40_offset) >= 0.01
+                    or desired_altitude != applied_scd40_altitude
+                ):
+                    apply_scd40_calibration(scd4x, desired_offset, desired_altitude)
+                    applied_scd40_offset = desired_offset
+                    applied_scd40_altitude = desired_altitude
+
+                location = active_config["location"]
+                interval_seconds = active_config["reporting_interval_seconds"]
+
+                # 5. Read SCD-40 + PMSA003I and compute EPA AQI
                 sample = read_sensors(scd4x, pm25)
                 now_utc = time.localtime()
                 if now_utc.tm_year < 2024:
@@ -523,9 +658,13 @@ def main():
                     sensors=SENSORS,
                     reporting_interval_seconds=interval_seconds,
                     reading=reading,
+                    config_version=active_config["config_version"],
+                    temperature_offset_c=active_config["temperature_offset_c"],
+                    altitude_m=active_config["altitude_m"],
+                    led_enabled=active_config["led_enabled"],
                 )
 
-                # 5. Publish reading and update device registry in Firestore
+                # 6. Publish reading and update device registry in Firestore
                 doc_id = "{}_{}".format(device_id, int(time.time()))
                 feed_watchdog()
                 client.publish_reading(reading, document_id=doc_id)
@@ -536,9 +675,10 @@ def main():
                 first_boot = False
 
                 print(
-                    "[OK {}] CO2={} ppm | Temp={:.1f}F ({:.1f}C) | RH={:.1f}% | "
+                    "[OK {}] cfg=v{} | CO2={} ppm | Temp={:.1f}F ({:.1f}C) | RH={:.1f}% | "
                     "PM1.0={} PM2.5={} PM10={} ug/m3 | AQI={} ({})".format(
                         ts,
+                        active_config["config_version"],
                         reading["co2_ppm"],
                         reading["temperature_f"],
                         reading["temperature_c"],
@@ -564,6 +704,8 @@ def main():
                 # Force re-scan and re-init on next attempt so unplug/replug self-heals.
                 scd4x = None
                 pm25 = None
+                applied_scd40_offset = None
+                applied_scd40_altitude = None
                 gc.collect()
                 led.blink_for(COLOR_RED, HARDWARE_RETRY_SECONDS, 0.2, 0.2)
 

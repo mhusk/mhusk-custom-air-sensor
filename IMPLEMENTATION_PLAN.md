@@ -39,7 +39,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — In Progress)*
 - [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 pending finished print)*
-- [ ] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`)
+- [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 implemented & verified via offline + live Mac tests; ready to copy `code.py` + `firestore_client.py` to `CIRCUITPY`)*
 - [ ] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [ ] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
 
@@ -227,15 +227,15 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(firestore): add device_configs schema, rules, and enclosure calibration notes`
 
 #### Step 13: Firmware Remote Configuration Polling (`device_configs/{device_id}`)
-- **Status**: `[ ] Pending`
-- **Goal**: Teach the ESP32-S3 firmware to fetch `device_configs/{device_id}` during its publishing loop, apply updated settings (`temperature_offset_c`, `altitude_m`, `reporting_interval_seconds`, `location`, `led_enabled`) live in RAM without touching flash, and report the active `config_version` back in `devices/{device_id}`.
+- **Status**: `[x] Completed (Verified Locally on Mac; Ready to Copy to CIRCUITPY)`
+- **Goal**: Teach the ESP32-S3 firmware (`v1.1.0`) to fetch `device_configs/{device_id}` during its publishing loop, apply updated settings (`temperature_offset_c`, `altitude_m`, `reporting_interval_seconds`, `location`, `led_enabled`, plus one-shot `reboot_requested_at`) live in RAM without touching flash, and report the active `config_version` and calibration back in `devices/{device_id}`.
 - **Deliverables**:
-  - `firmware/firestore_client.py` (`fetch_device_config()` via Firestore REST API)
-  - `firmware/code.py` (apply SCD-40 `temperature_offset` & `altitude`, dynamic interval/location/LED mode, and safe fallback to local `settings.toml` defaults if no cloud config exists)
-  - Updated `scripts/test_firmware_local.py` with offline & live config-parsing tests
+  - `firmware/firestore_client.py` (`fetch_device_config()`, Firestore REST decoder, `normalize_device_config()`, `parse_utc_timestamp_epoch()`, `should_trigger_reboot()`, and optional v1.1 fields on `build_device_status_document()`)
+  - `firmware/code.py` (`v1.1.0` with non-fatal remote config polling, SCD-40 RAM-only calibration on change, muteable `StatusLED`, one-shot reboot gating, and safe fallback to `settings.toml` defaults)
+  - Updated `scripts/test_firmware_local.py` with offline unit tests + `--fetch-config` live Firestore fetch and 404-fallback test
   - `docs/09-remote-config-and-dashboard.md` (Part 2: How the sensor control loop applies live config safely)
 - **Single Focused Validation**:
-  - Change `reporting_interval_seconds` (e.g., `300` → `60`) or `temperature_offset_c` in Firestore, watch the serial console / next Firestore reading reflect the change automatically without rebooting or plugging into USB, then change it back.
+  - Ran `python3 scripts/test_firmware_local.py --fetch-config`: all offline AQI, encoding, decoding, clamping, reboot-gating, and `code.py` syntax tests passed, plus live `GET device_configs/feather-s3-01` (`v1`) and 404-fallback (`v0`) verified against Firestore. Copy `firmware/firestore_client.py` + `firmware/code.py` to `CIRCUITPY` when flashing the Feather.
 - **Target Commit**: `feat(firmware): add remote config polling and SCD-40 calibration support`
 
 #### Step 14: Dashboard Backend API & WorkOS Auth Integration

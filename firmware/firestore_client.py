@@ -69,6 +69,9 @@ class _UrllibSession:
         except self._urllib_error.HTTPError as err:
             return _UrllibResponse(err.code, err.read())
 
+    def get(self, url, headers=None):
+        return self._request("GET", url, json_body=None, headers=headers)
+
     def post(self, url, json=None, headers=None):  # pylint: disable=redefined-builtin
         return self._request("POST", url, json_body=json, headers=headers)
 
@@ -126,6 +129,215 @@ def encode_firestore_fields(data, timestamp_fields=()):
     return fields
 
 
+def decode_firestore_value(raw):
+    """Convert a Firestore REST API Value object into a plain Python value."""
+    if not isinstance(raw, dict):
+        return None
+    if "nullValue" in raw:
+        return None
+    if "booleanValue" in raw:
+        return bool(raw["booleanValue"])
+    if "integerValue" in raw:
+        return int(raw["integerValue"])
+    if "doubleValue" in raw:
+        return float(raw["doubleValue"])
+    if "stringValue" in raw:
+        return str(raw["stringValue"])
+    if "timestampValue" in raw:
+        return str(raw["timestampValue"])
+    if "arrayValue" in raw:
+        items = raw["arrayValue"].get("values", [])
+        return [decode_firestore_value(item) for item in items]
+    if "mapValue" in raw:
+        return decode_firestore_fields(raw["mapValue"].get("fields", {}))
+    return None
+
+
+def decode_firestore_fields(fields):
+    """Convert a Firestore REST API `fields` map into a plain Python dict."""
+    if not isinstance(fields, dict):
+        return {}
+    result = {}
+    for key, raw in fields.items():
+        result[key] = decode_firestore_value(raw)
+    return result
+
+
+def _days_from_civil(year, month, day):
+    """Return days since 1970-01-01 using Howard Hinnant's Gregorian algorithm."""
+    if month <= 2:
+        year -= 1
+    era = year // 400
+    yoe = year - era * 400
+    mp = month + (9 if month <= 2 else -3)
+    doy = (153 * mp + 2) // 5 + day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def parse_utc_timestamp_epoch(ts_str):
+    """Parse an RFC 3339 UTC timestamp string (YYYY-MM-DDTHH:MM:SS[.fff]Z) to Unix epoch.
+
+    Pure-Python arithmetic avoids local-timezone discrepancies between macOS CPython's
+    `time.mktime()` and CircuitPython's UTC `time.mktime()`. Returns `None` if invalid.
+    """
+    if not isinstance(ts_str, str):
+        return None
+    text = ts_str.strip()
+    if len(text) < 20 or not text.endswith("Z"):
+        return None
+    if text[4] != "-" or text[7] != "-" or text[10] not in ("T", "t"):
+        return None
+    if text[13] != ":" or text[16] != ":":
+        return None
+    try:
+        year = int(text[0:4])
+        month = int(text[5:7])
+        day = int(text[8:10])
+        hour = int(text[11:13])
+        minute = int(text[14:16])
+        second = int(text[17:19])
+    except ValueError:
+        return None
+
+    if not (1970 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+        return None
+
+    days = _days_from_civil(year, month, day)
+    return days * 86400 + hour * 3600 + minute * 60 + second
+
+
+def is_valid_slug(value):
+    """Validate device_id / location slug matching `firestore.rules` `isDeviceId`."""
+    if not isinstance(value, str):
+        return False
+    length = len(value)
+    if length < 1 or length > 64:
+        return False
+    first = value[0]
+    if not (
+        ("A" <= first <= "Z")
+        or ("a" <= first <= "z")
+        or ("0" <= first <= "9")
+    ):
+        return False
+    for ch in value:
+        if not (
+            ("A" <= ch <= "Z")
+            or ("a" <= ch <= "z")
+            or ("0" <= ch <= "9")
+            or ch in ("_", "-")
+        ):
+            return False
+    return True
+
+
+def _clamp_number(value, low, high):
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
+
+
+def normalize_device_config(raw_config, defaults):
+    """Validate and clamp a decoded `device_configs/{device_id}` dict against safe defaults.
+
+    If `raw_config` is `None` (e.g., document does not exist yet), returns a clean copy
+    of `defaults` with `config_version=0` and `reboot_requested_at=None`.
+    """
+    default_location = str(defaults.get("location", "home-office"))
+    default_interval = int(
+        _clamp_number(int(defaults.get("reporting_interval_seconds", 300)), 60, 3600)
+    )
+    default_offset = round(
+        float(_clamp_number(float(defaults.get("temperature_offset_c", 4.0)), 0.0, 20.0)),
+        2,
+    )
+    default_altitude = int(
+        _clamp_number(int(defaults.get("altitude_m", 0)), 0, 5000)
+    )
+    default_led = bool(defaults.get("led_enabled", True))
+
+    normalized = {
+        "location": default_location,
+        "reporting_interval_seconds": default_interval,
+        "temperature_offset_c": default_offset,
+        "altitude_m": default_altitude,
+        "led_enabled": default_led,
+        "config_version": 0,
+        "reboot_requested_at": None,
+    }
+
+    if not isinstance(raw_config, dict):
+        return normalized
+
+    raw_loc = raw_config.get("location")
+    if is_valid_slug(raw_loc):
+        normalized["location"] = raw_loc
+
+    raw_interval = raw_config.get("reporting_interval_seconds")
+    if isinstance(raw_interval, (int, float)) and not isinstance(raw_interval, bool):
+        normalized["reporting_interval_seconds"] = int(
+            _clamp_number(round(raw_interval), 60, 3600)
+        )
+
+    raw_offset = raw_config.get("temperature_offset_c")
+    if isinstance(raw_offset, (int, float)) and not isinstance(raw_offset, bool):
+        normalized["temperature_offset_c"] = round(
+            float(_clamp_number(float(raw_offset), 0.0, 20.0)), 2
+        )
+
+    raw_altitude = raw_config.get("altitude_m")
+    if isinstance(raw_altitude, (int, float)) and not isinstance(raw_altitude, bool):
+        normalized["altitude_m"] = int(_clamp_number(round(raw_altitude), 0, 5000))
+
+    raw_led = raw_config.get("led_enabled")
+    if isinstance(raw_led, bool):
+        normalized["led_enabled"] = raw_led
+
+    raw_version = raw_config.get("config_version")
+    if isinstance(raw_version, int) and not isinstance(raw_version, bool):
+        normalized["config_version"] = int(_clamp_number(raw_version, 0, 1000000))
+    else:
+        # Cloud doc existed without an explicit version; mark as version 1 so callers see cloud origin.
+        normalized["config_version"] = 1
+
+    raw_reboot = raw_config.get("reboot_requested_at")
+    if isinstance(raw_reboot, str) and parse_utc_timestamp_epoch(raw_reboot) is not None:
+        normalized["reboot_requested_at"] = raw_reboot
+
+    return normalized
+
+
+def should_trigger_reboot(
+    reboot_requested_at, boot_epoch, now_epoch, max_age_seconds=1800
+):
+    """Return True if a one-shot `reboot_requested_at` timestamp should trigger a reset.
+
+    Compares the requested UTC timestamp against `boot_epoch` (recorded right after NTP
+    sync on startup) so a reboot never loops even though the sensor has read-only access
+    to `device_configs/{device_id}` and cannot clear the field.
+    """
+    if not reboot_requested_at:
+        return False
+    if boot_epoch is None or now_epoch is None:
+        return False
+    if boot_epoch < 1700000000 or now_epoch < 1700000000:
+        return False
+
+    req_epoch = parse_utc_timestamp_epoch(reboot_requested_at)
+    if req_epoch is None:
+        return False
+    if req_epoch <= boot_epoch:
+        return False
+    if (now_epoch - req_epoch) > max_age_seconds:
+        return False
+    return True
+
+
 def build_reading_document(
     device_id,
     location,
@@ -177,9 +389,13 @@ def build_device_status_document(
     sensors,
     reporting_interval_seconds,
     reading,
+    config_version=None,
+    temperature_offset_c=None,
+    altitude_m=None,
+    led_enabled=None,
 ):
     """Build a `devices/{device_id}` document dict matching `firestore.rules`."""
-    return {
+    doc = {
         "device_id": str(device_id),
         "location": str(location),
         "last_seen_at": str(last_seen_at),
@@ -195,6 +411,15 @@ def build_device_status_document(
             "aqi_category": str(reading["aqi_category"]),
         },
     }
+    if config_version is not None:
+        doc["config_version"] = int(config_version)
+    if temperature_offset_c is not None:
+        doc["temperature_offset_c"] = round(float(temperature_offset_c), 2)
+    if altitude_m is not None:
+        doc["altitude_m"] = int(round(altitude_m))
+    if led_enabled is not None:
+        doc["led_enabled"] = bool(led_enabled)
+    return doc
 
 
 class FirestoreClient:
@@ -287,17 +512,20 @@ class FirestoreClient:
             return self.refresh_id_token()
         return self._id_token
 
-    def _authorized_request(self, method, url, payload):
+    def _authorized_request(self, method, url, payload=None, allow_not_found=False):
         """Execute an authenticated Firestore REST call, retrying once on HTTP 401."""
         for attempt in range(2):
             token = self.ensure_authenticated()
             headers = {
                 "Authorization": "Bearer {}".format(token),
-                "Content-Type": "application/json",
             }
-            if method == "POST":
+            if method == "GET":
+                response = self._session.get(url, headers=headers)
+            elif method == "POST":
+                headers["Content-Type"] = "application/json"
                 response = self._session.post(url, json=payload, headers=headers)
             elif method == "PATCH":
+                headers["Content-Type"] = "application/json"
                 response = self._session.patch(url, json=payload, headers=headers)
             else:
                 raise ValueError("Unsupported HTTP method: {}".format(method))
@@ -307,6 +535,8 @@ class FirestoreClient:
                     # Force token refresh and retry once.
                     self._token_expires_at = 0.0
                     continue
+                if allow_not_found and response.status_code == 404:
+                    return None
                 if response.status_code not in (200, 201):
                     raise FirestoreError(
                         "Firestore {} failed (HTTP {})".format(
@@ -320,6 +550,14 @@ class FirestoreClient:
                 response.close()
 
         raise FirestoreError("Firestore request failed after authentication retry")
+
+    def fetch_device_config(self, device_id):
+        """Fetch and decode `device_configs/{device_id}` (returns None on HTTP 404)."""
+        url = "{}/device_configs/{}".format(self.documents_base_url, device_id)
+        doc = self._authorized_request("GET", url, allow_not_found=True)
+        if not doc:
+            return None
+        return decode_firestore_fields(doc.get("fields", {}))
 
     def publish_reading(self, reading, document_id=None):
         """Create a new immutable document in the `readings` collection."""
