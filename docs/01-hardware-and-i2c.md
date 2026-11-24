@@ -58,7 +58,7 @@ With CircuitPython installed, the ESP32-S3 shows up on your Mac like a small USB
 1. Make sure the **USB cable is unplugged** from the ESP32-S3 Feather before connecting STEMMA QT cables.
 2. Plug **STEMMA QT Cable #1** into the **STEMMA QT port** on the ESP32-S3 Feather and into either STEMMA QT port on the **SCD-40**.
 3. Plug **STEMMA QT Cable #2** into the **other** STEMMA QT port on the SCD-40 and into either STEMMA QT port on the **PMSA003I**.
-   - *Order doesn't matter*: Feather → PMSA003I → SCD-40 works identically.
+   - *Order doesn't matter electrically*: `Feather → PMSA003I → SCD-40` works identically on a desk, **but use `Feather → SCD-40 → PMSA003I` inside the 3D-printed enclosure** (see [`docs/08-enclosure-hardware-plan.md`](./08-enclosure-hardware-plan.md#step-by-step-internal-cable-routing--assembly-order)) so the PMSA003I uses only its front-facing STEMMA QT port and its rear port stays empty against the vented rear wall.
    - *Keyed connectors*: JST SH plugs only fit one way. Press gently and evenly until seated; never force a plug upside down.
 4. **Placement Tip**: Keep the **PMSA003I** air intake/exhaust vents unobstructed, and try not to rest the **SCD-40** directly on top of the ESP32-S3 board so the microcontroller's warmth doesn't skew ambient temperature readings.
 
