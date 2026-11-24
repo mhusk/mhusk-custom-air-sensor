@@ -152,6 +152,10 @@ Confirm you see:
 > **Never rely on `supervisor.runtime.usb_connected` inside `boot.py`.**
 > Because `boot.py` executes before CircuitPython initializes TinyUSB, `supervisor.runtime.usb_connected` is always `False` there. Always detect USB enumeration in `code.py` and hand off via a one-shot `microcontroller.nvm` flag to `boot.py`.
 
+> [!TIP]
+> **If `CIRCUITPY` doesn't mount on a cold USB-C plug-in (`Not a directory`), tap `RESET` once.**
+> On a cold plug-in to macOS, USB-C hub negotiation can occasionally take slightly longer than `code.py`'s 1.5-second `USB_DETECT_TIMEOUT_SECONDS` window—leaving the board in OTA mode (USB serial `/dev/tty.usbmodem*` active, `CIRCUITPY` hidden). Tapping `RESET` once while already plugged in lets `code.py` detect `usb_connected` immediately and mount `CIRCUITPY` read-write within ~2 seconds.
+
 > [!WARNING]
 > **CircuitPython FATFS `os.rename(src, dst)` fails with `Errno 17: File exists` if `dst` exists.**
 > Unlike POSIX on macOS/Linux where `os.rename()` silently overwrites the destination, CircuitPython's FAT implementation refuses to overwrite an existing file. Always `os.rename(dst, dst + ".failed")` or `os.remove(dst)` before promoting a `.bak` or `.new` file.
@@ -457,3 +461,7 @@ Confirm you see:
 > [!WARNING]
 > **Do not re-arm `microcontroller.watchdog` if `code.py` already armed it.**
 > During a pending OTA boot (`OTA_STATE_PENDING`), `code.py` enables the 60-second hardware watchdog before importing `app.py`. On ESP32-S3 (CircuitPython 10 / ESP-IDF), reassigning `wdt.timeout` or `wdt.mode = WatchDogMode.RESET` while the watchdog is already active raises `espidf.IDFError: Invalid argument`. Always check `if wdt.mode == WatchDogMode.RESET: wdt.feed(); return` inside `app.py`'s `init_watchdog()`.
+
+> [!WARNING]
+> **Redeploy Cloud Functions whenever `device_configs` schema fields are added.**
+> `updateDeviceConfig()` writes the full `device_configs/{device_id}` document inside a Firestore transaction while preserving `target_firmware_version`. If you publish a release and pin `target_firmware_version`, then save Layer 1 settings (like changing the reporting interval) from the Web Dashboard *before* running `firebase deploy --only functions`, the older Cloud Function will overwrite the document without `target_firmware_version` and silently cancel the pending OTA.
