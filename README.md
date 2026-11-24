@@ -16,15 +16,15 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 
 ## Where We Are Now & Next Steps
 
-> **Current Snapshot:** **Phase 1 (v1) is live end-to-end**, streaming indoor air quality every 5 minutes to Cloud Firestore and answering live natural-language queries in **Gemini** and **Grok** through the WorkOS-protected Remote MCP server. The custom screwless 3D-printed enclosure is **currently printing on a Bambu Lab X1 Carbon**.
+> **Current Snapshot:** **Phase 1 (v1) and Phase 2 (Remote Config + Web Dashboard) are live end-to-end**, streaming indoor air quality to Cloud Firestore, answering natural-language queries in **Gemini** and **Grok** via MCP, and providing a WorkOS-protected Firebase Hosting web dashboard with 6h/24h/7d interactive SVG charts and Layer 1 remote device settings.
 
 | Phase / Layer | Status | Summary |
 | :--- | :---: | :--- |
-| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython (5-min polling, on-device US EPA AQI, NeoPixel status, watchdog) |
+| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.1.0` (on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, muteable NeoPixel, watchdog) |
 | **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
 | **Enclosure — 3D-Printed Hub** | `Printing` | Screwless, support-free, thermally baffled bedroom enclosure ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
-| **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Up Next` | Enclosure calibration + lightweight Firebase Hosting dashboard (live 24h/7d charts + WorkOS login) + Firestore-backed remote config (interval, temp offset, altitude, LED mode, room label—no USB needed) |
-| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `Planned` | Pull-based CircuitPython OTA updates with SHA-256 verification, USB-aware `boot.py`, and a minimal immutable `code.py` bootloader that auto-rolls back `app.py` on boot crash |
+| **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Live` | Zero-build Firebase Hosting dashboard (WorkOS AuthKit PKCE login, live °F cards, 6h/24h/7d interactive SVG charts, Device Settings drawer) + Firestore-backed `device_configs` remote tuning ([`docs/09-remote-config-and-dashboard.md`](./docs/09-remote-config-and-dashboard.md)) |
+| **Phase 3 — Cloud OTA with A/B Rollback** *(Layer 2)* | `Up Next` | Pull-based CircuitPython OTA updates with SHA-256 verification, USB-aware `boot.py`, and a minimal immutable `code.py` bootloader that auto-rolls back `app.py` on boot crash |
 | **Phase 4 — Multi-Room Fleet & Proactive Alerts** | `Backlog` | Additional room nodes (`compare_rooms` MCP tool + per-device UID isolation), proactive CO<sub>2</sub>/PM<sub>2.5</sub> push alerts, outdoor AQI context for "should I open the window?" decisions, and optional smart-home actuation |
 
 ### What's Next (The 2-Layer Remote Update Plan)
@@ -102,6 +102,7 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 6. [**`docs/06-security-and-privacy-checklist.md`**](./docs/06-security-and-privacy-checklist.md) — The 4-layer public-repo security strategy keeping Wi-Fi credentials, emails, project IDs, and API keys out of Git.
 7. [**`docs/07-understanding-your-readings.md`**](./docs/07-understanding-your-readings.md) — Plain-English guide to every sensor metric (CO<sub>2</sub>, PM<sub>1.0</sub>/PM<sub>2.5</sub>/PM<sub>10</sub>, US EPA AQI, humidity, temperature), health thresholds, and how to improve them.
 8. [**`docs/08-enclosure-hardware-plan.md`**](./docs/08-enclosure-hardware-plan.md) — Screwless, support-free 3D-printed enclosure design (Bambu Lab X1 Carbon) with a ready-to-paste SpeakCAD prompt in [`enclosure/speakcad-prompt.txt`](./enclosure/speakcad-prompt.txt).
+9. [**`docs/09-remote-config-and-dashboard.md`**](./docs/09-remote-config-and-dashboard.md) — Device Shadow remote config (`device_configs`), live firmware polling & SCD-40 RAM calibration, WorkOS-protected Dashboard API, and zero-build Firebase Hosting web UI.
 
 ---
 
@@ -123,10 +124,14 @@ Every layer can be validated independently before deploying or flashing hardware
 # 2. Firmware EPA AQI math & Firestore REST encoding (add --publish for a live test write)
 python3 scripts/test_firmware_local.py
 
-# 3. Cloud Functions TypeScript build + Firestore stats, MCP protocol, and WorkOS OAuth checks
+# 3. Cloud Functions TypeScript build + Firestore stats, MCP protocol, WorkOS OAuth, and Dashboard API checks
 npm --prefix functions run verify:firestore
 npm --prefix functions run verify:mcp
 npm --prefix functions run verify:auth
+npm --prefix functions run verify:api
+
+# 4. Lightweight Web Dashboard (PKCE, SVG charts, HTML semantics, Firebase Hosting rewrites)
+node scripts/verify_web_dashboard.mjs
 ```
 
 ---

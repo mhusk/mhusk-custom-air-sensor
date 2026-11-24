@@ -37,11 +37,11 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
 - [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *currently printing on Bambu Lab X1 Carbon*
 
-### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — In Progress)*
+### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — Completed)*
 - [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 pending finished print)*
 - [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 live-verified end-to-end on ESP32-S3 hardware: `v1` → `v2` 60s/LED-off → `v3` 300s/LED-on)*
 - [x] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
-- [ ] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
+- [x] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
 
 ### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2)*
 - [ ] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback)
@@ -252,14 +252,15 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(functions): add WorkOS-protected dashboard and remote config API`
 
 #### Step 15: Lightweight Web Dashboard on Firebase Hosting
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Build and deploy a super-lightweight, responsive web dashboard on Firebase Hosting so you can view live readings, inspect 24h/7d CO₂/PM₂.₅/Temp/Humidity charts at a glance, and tweak any sensor's Layer 1 settings from a clean Device Settings drawer.
 - **Deliverables**:
-  - `web/` (minimal frontend app with WorkOS login, live room cards, interactive 24h/7d trend charts, and Device Settings form)
-  - `firebase.json` (Firebase Hosting configuration + rewrite rules to Cloud Functions API)
-  - `docs/09-remote-config-and-dashboard.md` (Part 4: Deploying the dashboard and managing sensor settings from the browser)
+  - `web/` (zero-build vanilla HTML/CSS/ES Modules app with WorkOS AuthKit PKCE login, live °F room cards, interactive 6h/24h/7d SVG trend charts, and native `<dialog>` Device Settings drawer + reboot confirmation)
+  - `firebase.json` (Firebase Hosting configuration, security headers, and 2nd Gen `us-east1` Cloud Functions API rewrites)
+  - `scripts/verify_web_dashboard.mjs` (offline PKCE, chart geometry, semantic HTML, and Hosting rewrite verification suite)
+  - `docs/09-remote-config-and-dashboard.md` (Part 4: Deploying the dashboard, WorkOS Applications → Redirect URIs gotchas, and managing sensor settings from the browser)
 - **Single Focused Validation**:
-  - Sign in via WorkOS on the deployed Firebase Hosting URL, confirm live charts match Firestore readings, update a setting (e.g., `led_enabled` or `reporting_interval_seconds`) in the Device Settings drawer, and observe the physical sensor pick it up on its next check-in.
+  - Passed all 7 checks in `node scripts/verify_web_dashboard.mjs` and `./scripts/check-secrets.sh`, deployed to Firebase Hosting (`firebase deploy --only hosting`), verified live `/api/auth/config` (`200`) and unauthenticated `/api/dashboard/overview` (`401`), and signed in live via WorkOS AuthKit on the deployed Hosting URL.
 - **Target Commit**: `feat(web): add lightweight Firebase Hosting dashboard with remote device config`
 
 ---

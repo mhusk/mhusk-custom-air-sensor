@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Lightweight indoor air quality dashboard and Layer 1 remote device configuration for your ESP32-S3 sensor.">
+  <title>Air Quality Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__inner">
+      <div class="brand">
+        <img class="brand__icon" src="/favicon.svg" alt="" width="28" height="28">
+        <div>
+          <p class="brand__title">Indoor Air Quality</p>
+          <p class="brand__subtitle">ESP32-S3 · Cloud Firestore</p>
+        </div>
+      </div>
+
+      <div id="topbar-actions" class="topbar__actions" hidden>
+        <span id="user-email-badge" class="user-badge"></span>
+        <button type="button" id="refresh-btn" class="btn btn--secondary">
+          <span class="btn__label">Refresh</span>
+        </button>
+        <button type="button" id="signout-btn" class="btn btn--ghost">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Global status / notification banner -->
+    <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+    <!-- Unauthenticated Sign-In View -->
+    <section id="auth-view" class="auth-shell" hidden>
+      <div class="auth-card">
+        <h1>Sign in to your Air Sensor</h1>
+        <p class="auth-card__lead">
+          View live CO<sub>2</sub>, PM<sub>2.5</sub>, temperature (°F), and humidity trends,
+          and tune enclosed sensor calibration remotely without touching USB.
+        </p>
+
+        <div id="auth-error" class="inline-alert inline-alert--danger" role="alert" hidden></div>
+
+        <button type="button" id="workos-login-btn" class="btn btn--primary btn--full">
+          Sign in with WorkOS
+        </button>
+
+        <p id="auth-status-note" class="auth-card__hint"></p>
+
+        <details class="advanced-auth">
+          <summary>Advanced: Sign in with Bearer fallback token</summary>
+          <form id="bearer-login-form" class="bearer-form" novalidate>
+            <div class="field">
+              <label for="bearer-token-input">Bearer Token</label>
+              <span id="bearer-token-hint" class="field__hint">
+                Optional fallback using <code>MCP_BEARER_FALLBACK_SECRET</code> for local or CLI smoke testing.
+              </span>
+              <input
+                id="bearer-token-input"
+                name="token"
+                type="password"
+                required
+                autocomplete="off"
+                placeholder="Paste fallback Bearer secret"
+                aria-describedby="bearer-token-hint"
+                data-error="bearer-token-error"
+              >
+              <div id="bearer-token-error" class="error-msg">
+                <span role="img" aria-label="Error">!</span> Please enter a Bearer token.
+              </div>
+            </div>
+            <button type="submit" id="bearer-login-btn" class="btn btn--secondary btn--full">
+              Verify &amp; Sign In
+            </button>
+          </form>
+        </details>
+      </div>
+    </section>
+
+    <!-- Initial Loading Skeleton -->
+    <section id="loading-view" class="loading-shell" aria-busy="true">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loading-label">Checking session…</p>
+    </section>
+
+    <!-- Authenticated Dashboard View -->
+    <div id="dashboard-view" class="dashboard" hidden>
+      <section class="section" aria-labelledby="rooms-heading">
+        <div class="section__header">
+          <div>
+            <h1 id="rooms-heading" class="section__title">Live Sensors</h1>
+            <p id="last-refreshed" class="section__meta">Manual refresh · °F</p>
+          </div>
+          <div id="fleet-summary-pills" class="pill-row"></div>
+        </div>
+
+        <div id="device-cards" class="device-grid"></div>
+      </section>
+
+      <section class="section" aria-labelledby="trends-heading">
+        <div class="section__header section__header--wrap">
+          <div>
+            <h2 id="trends-heading" class="section__title">Trends &amp; History</h2>
+            <p id="trends-meta" class="section__meta">Select a time window to inspect readings.</p>
+          </div>
+
+          <div class="controls-bar">
+            <label class="select-wrap" id="device-filter-wrap" hidden>
+              <span class="visually-hidden">Filter by sensor</span>
+              <select id="device-filter-select" class="select-input"></select>
+            </label>
+
+            <div class="segmented" role="group" aria-label="Time range">
+              <button type="button" class="segmented__btn" data-hours="6" data-period="6h" aria-pressed="false">6h</button>
+              <button type="button" class="segmented__btn is-active" data-hours="24" data-period="24h" aria-pressed="true">24h</button>
+              <button type="button" class="segmented__btn" data-hours="168" data-period="7d" aria-pressed="false">7d</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="charts-grid" class="charts-grid"></div>
+
+        <div id="spikes-panel" class="spikes-panel" hidden></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Slide-over Device Settings Drawer (native modal <dialog>) -->
+  <dialog id="settings-dialog" class="drawer-dialog" closedby="any" aria-labelledby="settings-dialog-title">
+    <div class="drawer__header">
+      <div>
+        <h1 id="settings-dialog-title" class="drawer__title">Device Settings</h1>
+        <p id="settings-device-subtitle" class="drawer__subtitle"></p>
+      </div>
+      <button type="button" id="settings-close-btn" class="icon-btn" aria-label="Close device settings">
+        &times;
+      </button>
+    </div>
+
+    <div class="drawer__body">
+      <div id="settings-sync-box" class="sync-box"></div>
+      <div id="settings-error" class="inline-alert inline-alert--danger" role="alert" hidden></div>
+      <div id="settings-success" class="inline-alert inline-alert--success" role="status" hidden></div>
+
+      <form id="settings-form" class="settings-form" novalidate>
+        <div class="field">
+          <label for="cfg-location">Room / Location Label</label>
+          <span id="cfg-location-hint" class="field__hint">
+            1–64 characters: letters, numbers, hyphens, or underscores (e.g. <code>master-bedroom</code>).
+          </span>
+          <input
+            id="cfg-location"
+            name="location"
+            type="text"
+            required
+            maxlength="64"
+            pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+            aria-describedby="cfg-location-hint"
+            data-error="cfg-location-error"
+            autofocus
+          >
+          <div id="cfg-location-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Use 1–64 characters starting with a letter or number (letters, numbers, <code>-</code>, <code>_</code> only).
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cfg-interval">Reporting Interval (seconds)</label>
+          <span id="cfg-interval-hint" class="field__hint">
+            Whole seconds between Firestore publishes (60–3600). Default is 300s (5 minutes).
+          </span>
+          <input
+            id="cfg-interval"
+            name="reporting_interval_seconds"
+            type="number"
+            required
+            min="60"
+            max="3600"
+            step="1"
+            inputmode="numeric"
+            aria-describedby="cfg-interval-hint"
+            data-error="cfg-interval-error"
+          >
+          <div id="cfg-interval-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Enter a whole number between 60 and 3600 seconds.
+          </div>
+          <div class="preset-row" role="group" aria-label="Interval presets">
+            <button type="button" class="chip-btn" data-interval="60">1 min</button>
+            <button type="button" class="chip-btn" data-interval="300">5 min</button>
+            <button type="button" class="chip-btn" data-interval="600">10 min</button>
+            <button type="button" class="chip-btn" data-interval="900">15 min</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cfg-temp-offset">SCD-40 Temperature Offset (°C)</label>
+          <span id="cfg-temp-offset-hint" class="field__hint">
+            Applied in RAM on the SCD-40 (0.0–20.0 °C, zero EEPROM wear). Increase if the enclosure reads warmer than room air.
+            <strong id="cfg-temp-offset-f" class="field__equiv"></strong>
+          </span>
+          <input
+            id="cfg-temp-offset"
+            name="temperature_offset_c"
+            type="number"
+            required
+            min="0"
+            max="20"
+            step="0.1"
+            inputmode="decimal"
+            aria-describedby="cfg-temp-offset-hint"
+            data-error="cfg-temp-offset-error"
+          >
+          <div id="cfg-temp-offset-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Enter a temperature offset between 0 and 20 °C.
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cfg-altitude">Site Altitude (meters)</label>
+          <span id="cfg-altitude-hint" class="field__hint">
+            Elevation above sea level (0–5000 m) for SCD-40 CO<sub>2</sub> pressure compensation.
+            <strong id="cfg-altitude-ft" class="field__equiv"></strong>
+          </span>
+          <input
+            id="cfg-altitude"
+            name="altitude_m"
+            type="number"
+            required
+            min="0"
+            max="5000"
+            step="1"
+            inputmode="numeric"
+            aria-describedby="cfg-altitude-hint"
+            data-error="cfg-altitude-error"
+          >
+          <div id="cfg-altitude-error" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Enter a whole number between 0 and 5000 meters.
+          </div>
+        </div>
+
+        <div class="field field--switch">
+          <div class="switch-row">
+            <div class="switch-row__copy">
+              <label for="cfg-led-enabled" class="switch-row__label">Onboard NeoPixel LED</label>
+              <span id="cfg-led-hint" class="field__hint">
+                Mute the status LED completely for dark bedrooms.
+              </span>
+            </div>
+            <input
+              id="cfg-led-enabled"
+              name="led_enabled"
+              type="checkbox"
+              switch
+              aria-describedby="cfg-led-hint"
+            >
+          </div>
+        </div>
+
+        <div class="drawer__actions">
+          <button type="button" id="settings-cancel-btn" class="btn btn--secondary">Cancel</button>
+          <button type="submit" id="settings-save-btn" class="btn btn--primary">Save Settings</button>
+        </div>
+      </form>
+
+      <section class="danger-zone" aria-labelledby="device-actions-heading">
+        <h2 id="device-actions-heading" class="danger-zone__title">Remote Device Control</h2>
+        <p class="danger-zone__copy">
+          Stamps a one-shot <code>reboot_requested_at</code> timestamp in Firestore. The sensor will
+          cleanly restart once on its next check-in (zero flash writes).
+        </p>
+        <p id="settings-last-reboot" class="danger-zone__meta"></p>
+        <button type="button" id="open-reboot-confirm-btn" class="btn btn--danger-outline">
+          Request Remote Reboot
+        </button>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- Reboot Confirmation Modal (native modal <dialog>) -->
+  <dialog id="reboot-dialog" class="confirm-dialog" aria-labelledby="reboot-dialog-title">
+    <h1 id="reboot-dialog-title" class="confirm-dialog__title">Request remote reboot?</h1>
+    <p id="reboot-dialog-body" class="confirm-dialog__body">
+      The sensor will restart cleanly on its next check-in and resume normal publishing automatically.
+    </p>
+    <form method="dialog" class="confirm-dialog__actions">
+      <button type="submit" value="cancel" class="btn btn--secondary" autofocus>Cancel</button>
+      <button type="submit" value="reboot" class="btn btn--danger">Request Reboot</button>
+    </form>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

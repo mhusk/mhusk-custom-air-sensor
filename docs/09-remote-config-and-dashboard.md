@@ -248,4 +248,71 @@ sequenceDiagram
 > **Don't forget `PUT` in `Access-Control-Allow-Methods`!**
 > Earlier MCP-only CORS headers only allowed `GET, POST, DELETE, OPTIONS`. Adding `PUT` in [`functions/src/index.ts`](../functions/src/index.ts) ensures browser preflights for `PUT /api/devices/:deviceId/config` succeed cleanly.
 
+---
+
+## 4. Part 4: Lightweight Web Dashboard on Firebase Hosting (Step 15)
+
+The browser dashboard lives in [`web/`](../web/) as a **zero-build, dependency-free** static app (vanilla HTML, modern light/dark CSS, ES Modules, and custom interactive SVG charts) deployed to **Firebase Hosting**. Hosting rewrites `/api/**` directly to our existing 2nd Gen Cloud Function (`mcp` in `us-east1`), so every browser request stays same-origin with strict Content Security Policy (CSP) headers and zero secrets embedded in frontend code.
+
+### Frontend File Map (`web/`)
+
+| File | Responsibility |
+| :--- | :--- |
+| [`web/index.html`](../web/index.html) | Semantic page shell, WorkOS sign-in view, live sensor cards, 6h/24h/7d trend section, slide-over `<dialog>` Device Settings drawer, and Reboot confirmation modal. |
+| [`web/styles.css`](../web/styles.css) | Automatic system light/dark mode (`color-scheme: light dark` + `light-dark()`), responsive card/chart grids, post-interaction `:user-invalid` validation styles, native `<input switch>` styling, and top-layer `<dialog>` animations. |
+| [`web/auth.js`](../web/auth.js) | Web Crypto PKCE (`S256`) generator, CSRF `state` verification, `/auth/callback` handler, single-flight refresh token rotation, and optional Bearer fallback sign-in. |
+| [`web/api.js`](../web/api.js) | Authenticated `/api/*` client with automatic single-retry refresh on `401` and typed error parsing. |
+| [`web/charts.js`](../web/charts.js) | Pure SVG time-series charts for **CO₂ (ppm)**, **PM₂.₅ (µg/m³)**, **Temperature (°F)**, and **Humidity (% RH)** with hover crosshairs, EPA/ASHRAE threshold lines, offline-gap splitting, and Min/Avg/P95/Max stats. |
+| [`web/app.js`](../web/app.js) | UI controller wiring manual refresh, live room cards, chart time-window switching, Device Settings drawer saves (`PUT /api/devices/:id/config`), and confirmed one-shot reboots (`POST /api/devices/:id/reboot`). |
+
+### One-Time WorkOS Redirect URI Setup
+
+Before signing in from the deployed Firebase Hosting site, register the callback URL in the **WorkOS Dashboard** (making sure the environment selector at the top matches the environment—e.g. **Staging**—whose `WORKOS_CLIENT_ID` is stored in Google Cloud Secret Manager):
+
+1. In the left sidebar, open **Applications → `<your application>` → Redirects tab** *(or press `⌘K` / Search for `redirect` and click `<your application> > Redirect URIs` at the very top—**not** the `Admin Portal` redirect results underneath)*.
+2. Click the **edit pencil icon** on the first row (**Redirect URIs**) and add your Firebase Hosting callback URL:
+   - `https://<your-firebase-project-id>.web.app/auth/callback`
+   - *(Optional)* `https://<your-firebase-project-id>.firebaseapp.com/auth/callback`
+   - *(Optional for local emulator testing)* `http://localhost:5000/auth/callback`
+3. Click **Save** and leave the remaining rows (`Initiate login URI`, `Sign-out URIs`, `Sign-up URL`, `User invitation URL`, `Password reset URL`) as **Not set**.
+4. No secrets need to be added to `web/`—the dashboard discovers `client_id` and `authorize_endpoint` at runtime from `GET /api/auth/config`.
+
+### Deploying to Firebase Hosting
+
+Deploy only the static Hosting site and its rewrite rules:
+
+```bash
+npx -y firebase-tools@latest deploy --only hosting
+```
+
+Your live dashboard is immediately available at `https://<your-firebase-project-id>.web.app`.
+
+### Single Focused Validation Checkpoint (Part 4)
+
+1. **Offline Module, Hosting Config & Secret Hygiene Check:**
+   ```bash
+   node scripts/verify_web_dashboard.mjs
+   ./scripts/check-secrets.sh
+   ```
+   Verifies RFC 7636 PKCE `S256` challenge math, WorkOS authorize URL parameters, chart geometry/gap-splitting/nearest-point search, semantic HTML checks, `firebase.json` 2nd Gen rewrites, and zero leaked credentials.
+2. **Live Hosting & End-to-End Remote Config Check:**
+   - Open `https://<your-firebase-project-id>.web.app` and verify `GET /api/auth/config` responds `200 OK` via the Hosting rewrite.
+   - Click **Sign in with WorkOS**, complete AuthKit login, and confirm live room cards (°F) and 6h/24h/7d interactive SVG charts match Firestore.
+   - Open **Device Settings**, toggle **Onboard NeoPixel LED** (or adjust **Reporting Interval**), and click **Save Settings**. Confirm the badge transitions to **Pending sync**, then click **Refresh** after the ESP32-S3's next check-in to see it turn **Config vN synced** as the physical sensor applies the setting.
+
+### Good to Know & Real-World Troubleshooting (Part 4)
+
+> [!IMPORTANT]
+> **2nd Gen Cloud Function Hosting rewrites in non-`us-central1` regions MUST specify `region`.**
+> In [`firebase.json`](../firebase.json), writing `"function": "mcp"` defaults Firebase Hosting to `us-central1` and returns `404` when your function lives in `us-east1`. Always use the object form `{ "functionId": "mcp", "region": "us-east1" }` and keep the `/api/**` rewrite **above** the `"source": "**"` SPA catch-all rewrite.
+
+> [!TIP]
+> **Why Manual Refresh + Zero-Build Static Files?**
+> With manual refresh only (no background polling loop while a tab sits open overnight), the dashboard incurs zero idle Cloud Functions invocations or Firestore reads, keeping monthly usage comfortably inside Firebase's free tier. Zero-build ES Modules also eliminate `node_modules` bloat and let `firebase deploy --only hosting` finish in a few seconds.
+
+> [!NOTE]
+> **WorkOS UI Gotcha: "Redirect URIs" Lives Under Applications (Not Top-Level Redirects or Admin Portal).**
+> WorkOS moved AuthKit callback URLs out of the old top-level "Redirects" sidebar item into **Applications → `<your application>` → Redirects tab → Redirect URIs**. If you search for `redirect` in the WorkOS command palette, ignore the `Admin Portal > ...` results (`Success redirects`, `Logo redirect URL`, `Admin Portal redirects`, `Directory Sync success URL`)—those are for Enterprise Admin Portal, not AuthKit sign-in. Pick **`<your application> > Redirect URIs`** at the top, verify the Staging/Production switcher matches your Secret Manager `WORKOS_CLIENT_ID`, and add the exact `https://<project-id>.web.app/auth/callback` URL with no trailing slash (leaving the other 5 redirect fields as `Not set`).
+
+
 
