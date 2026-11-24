@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local macOS/Linux validation test for firmware modules (`aqi.py`, `firestore_client.py`, `code.py`).
+"""Local macOS/Linux validation test for firmware modules (`aqi.py`, `firestore_client.py`, `boot.py`, `code.py`, `app.py`).
 
 Usage:
   # 1. Offline unit checks only (EPA AQI math, Firestore encoding/decoding, remote config logic):
@@ -320,12 +320,335 @@ def run_remote_config_tests():
         "2026-11-24T14:02:00Z", None, now_epoch
     )
 
-    # 7. Verify firmware/code.py compiles cleanly (syntax check on Mac)
+    # 7. Verify firmware/boot.py, firmware/code.py, and firmware/app.py compile cleanly
     import py_compile
 
-    py_compile.compile(os.path.join(FIRMWARE_DIR, "code.py"), doraise=True)
+    for filename in ("boot.py", "code.py", "app.py"):
+        py_compile.compile(os.path.join(FIRMWARE_DIR, filename), doraise=True)
 
     print("[PASS] Remote config decoding, clamping, reboot gating, and syntax tests passed.")
+
+
+def run_bootloader_tests():
+    """Simulate boot.py and code.py (USB handoff, WDT hang, crash rollback, self-heal)."""
+    import importlib.util
+    import tempfile
+    import types
+
+    class _FakeMount:
+        def __init__(self, readonly=True):
+            self.readonly = readonly
+
+    class _FakeDigitalInOut:
+        def __init__(self, pin):
+            self.pin = pin
+            self.value = pin["pressed_high"]
+            self.deinitialized = False
+
+        def switch_to_input(self, pull=None):
+            pass
+
+        def deinit(self):
+            self.deinitialized = True
+
+    class _FakeWatchdog:
+        def __init__(self):
+            self.timeout = None
+            self.mode = None
+            self.feeds = 0
+
+        def feed(self):
+            self.feeds += 1
+
+    def _make_hw_env(nvm_bytes=None, button_pressed=False, usb_connected=False, fs_readonly=False):
+        nvm = bytearray(nvm_bytes if nvm_bytes is not None else [0xFF] * 16)
+        state = {
+            "nvm": nvm,
+            "usb_drive_disabled": False,
+            "remount_calls": [],
+            "resets": 0,
+            "mount": _FakeMount(readonly=fs_readonly),
+            "wdt": _FakeWatchdog(),
+        }
+
+        board_mod = types.ModuleType("board")
+        board_mod.BUTTON = {"pressed_high": not button_pressed}
+
+        digitalio_mod = types.ModuleType("digitalio")
+        digitalio_mod.DigitalInOut = _FakeDigitalInOut
+        digitalio_mod.Pull = types.SimpleNamespace(UP="UP")
+
+        storage_mod = types.ModuleType("storage")
+
+        def _disable_usb():
+            state["usb_drive_disabled"] = True
+
+        def _remount(path, readonly=True):
+            state["remount_calls"].append((path, readonly))
+            state["mount"].readonly = readonly
+
+        storage_mod.disable_usb_drive = _disable_usb
+        storage_mod.remount = _remount
+        storage_mod.getmount = lambda path="/": state["mount"]
+
+        supervisor_mod = types.ModuleType("supervisor")
+        supervisor_mod.runtime = types.SimpleNamespace(usb_connected=usb_connected)
+
+        microcontroller_mod = types.ModuleType("microcontroller")
+        microcontroller_mod.nvm = nvm
+        microcontroller_mod.watchdog = state["wdt"]
+
+        def _reset():
+            state["resets"] += 1
+
+        microcontroller_mod.reset = _reset
+
+        watchdog_mod = types.ModuleType("watchdog")
+        watchdog_mod.WatchDogMode = types.SimpleNamespace(RESET="RESET")
+
+        modules = {
+            "board": board_mod,
+            "digitalio": digitalio_mod,
+            "storage": storage_mod,
+            "supervisor": supervisor_mod,
+            "microcontroller": microcontroller_mod,
+            "watchdog": watchdog_mod,
+        }
+        return state, modules
+
+    def _load_fresh(module_name, path, injected_modules):
+        saved = {}
+        for k, v in injected_modules.items():
+            saved[k] = sys.modules.get(k)
+            sys.modules[k] = v
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        finally:
+            for k, old in saved.items():
+                if old is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = old
+
+    boot_path = os.path.join(FIRMWARE_DIR, "boot.py")
+    code_path = os.path.join(FIRMWARE_DIR, "code.py")
+
+    # 1. boot.py: uninitialized NVM (0xFF) on wall power -> Python R/W OTA mode
+    st, mods = _make_hw_env(nvm_bytes=[0xFF] * 8, button_pressed=False)
+    boot_mod = _load_fresh("_test_boot_1", boot_path, mods)
+    assert boot_mod.configure_filesystem() == "python_rw"
+    assert st["usb_drive_disabled"] is True
+    assert st["remount_calls"] == [("/", False)]
+    assert st["mount"].readonly is False
+
+    # 2. boot.py: one-shot USB handoff flag -> USB host R/W, clears flag & preserves ota_state
+    st, mods = _make_hw_env(nvm_bytes=[0xA5, 1, 2, 0, 0, 0, 0, 0])
+    boot_mod = _load_fresh("_test_boot_2", boot_path, mods)
+    assert boot_mod.configure_filesystem() == "usb_host"
+    assert st["usb_drive_disabled"] is False
+    assert st["remount_calls"] == []
+    assert list(st["nvm"][0:4]) == [0xA5, 0, 2, 0]
+
+    # 3. boot.py: physical BOOT button held -> USB host R/W even on uninitialized NVM
+    st, mods = _make_hw_env(nvm_bytes=[0xFF] * 8, button_pressed=True)
+    boot_mod = _load_fresh("_test_boot_3", boot_path, mods)
+    assert boot_mod.configure_filesystem() == "usb_host"
+    assert st["usb_drive_disabled"] is False
+
+    # 4. boot.py: BOOT_MODE_FORCE_OTA -> Python R/W & leaves flag=2 for code.py to consume
+    st, mods = _make_hw_env(nvm_bytes=[0xA5, 2, 0, 0, 0, 0, 0, 0])
+    boot_mod = _load_fresh("_test_boot_4", boot_path, mods)
+    assert boot_mod.configure_filesystem() == "python_rw"
+    assert list(st["nvm"][0:4]) == [0xA5, 2, 0, 0]
+
+    # 5. code.py: USB host detected while `/` is Python R/W -> sets one-shot USB flag & resets
+    st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 0, 0], usb_connected=True, fs_readonly=False)
+    code_mod = _load_fresh("_test_code_usb", code_path, mods)
+    code_mod.USB_DETECT_TIMEOUT_SECONDS = 0.0
+    code_mod.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+    assert code_mod.boot_main("/") == "switched_to_usb"
+    assert list(st["nvm"][0:4]) == [0xA5, 1, 0, 0]
+    assert st["resets"] == 1
+
+    # 6. code.py: Step 16 wall-power crash -> 2 attempts -> atomic .bak rollback -> healthy recovery
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write('raise RuntimeError("simulated broken OTA app")\n')
+        with open(os.path.join(tmpdir, "app.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "SUPPORTS_HEALTH_CALLBACK = True\n"
+                "def main(on_healthy=None):\n"
+                "    if on_healthy is not None:\n"
+                "        on_healthy()\n"
+                "    raise KeyboardInterrupt()\n"
+            )
+        with open(os.path.join(tmpdir, "aqi.py"), "w", encoding="utf-8") as fh:
+            fh.write("VERSION = 'broken'\n")
+        with open(os.path.join(tmpdir, "aqi.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("VERSION = 'good'\n")
+        with open(os.path.join(tmpdir, "code.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("# protected file backup must never be restored\n")
+
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 0, 0], usb_connected=False, fs_readonly=False)
+
+        def _run_boot():
+            sys.modules.pop("app", None)
+            sys.path.insert(0, tmpdir)
+            try:
+                cm = _load_fresh("_test_code_rb", code_path, mods)
+                cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+                cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+                return cm.boot_main(tmpdir)
+            finally:
+                sys.path.remove(tmpdir)
+                sys.modules.pop("app", None)
+
+        # Attempt 1: crash recorded, attempts incremented to 1, reset to retry
+        assert _run_boot() == "retry_reset"
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 0, 1]
+        assert st["resets"] == 1
+        assert os.path.exists(os.path.join(tmpdir, "boot_error.txt"))
+        with open(os.path.join(tmpdir, "boot_error.txt"), "r", encoding="utf-8") as fh:
+            assert "simulated broken OTA app" in fh.read()
+
+        # Attempt 2: hits MAX_BOOT_ATTEMPTS=2 -> restores app.py & aqi.py, ignores code.py.bak
+        assert _run_boot() == "rolled_back"
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 2, 0]
+        assert st["resets"] == 2
+        assert os.path.exists(os.path.join(tmpdir, "app.py.failed"))
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.bak"))
+        assert os.path.exists(os.path.join(tmpdir, "code.py.bak"))
+        assert not os.path.exists(os.path.join(tmpdir, "code.py"))
+        with open(os.path.join(tmpdir, "aqi.py"), "r", encoding="utf-8") as fh:
+            assert "good" in fh.read()
+
+        # Boot 3: restored app.py runs cleanly (KeyboardInterrupt passes through cleanly)
+        try:
+            _run_boot()
+            raise AssertionError("Expected KeyboardInterrupt from stub healthy app.py")
+        except KeyboardInterrupt:
+            pass
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 2, 0]
+
+    # 7. code.py: pending OTA watchdog hang (attempts already >= MAX_BOOT_ATTEMPTS) -> immediate rollback
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write("while True:\n    pass\n")
+        with open(os.path.join(tmpdir, "app.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("def main(): pass\n")
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 1, 2], usb_connected=False, fs_readonly=False)
+        cm = _load_fresh("_test_code_wdt", code_path, mods)
+        cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+        cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+        assert cm.boot_main(tmpdir) == "rolled_back"
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 2, 0]
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.bak"))
+
+    # 8. code.py: power-loss mid-swap self-heal (app.py missing, app.py.bak present)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("def main(): pass\n")
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 0, 0], usb_connected=False, fs_readonly=False)
+        cm = _load_fresh("_test_code_heal", code_path, mods)
+        cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+        cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+        assert cm.boot_main(tmpdir) == "rolled_back"
+        assert os.path.exists(os.path.join(tmpdir, "app.py"))
+        assert not os.path.exists(os.path.join(tmpdir, "app.py.bak"))
+
+    # 9. code.py: pending OTA healthy confirmation clears OTA_STATE_PENDING -> OTA_STATE_HEALTHY
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "SUPPORTS_HEALTH_CALLBACK = True\n"
+                "def main(on_healthy=None):\n"
+                "    on_healthy()\n"
+                "    raise KeyboardInterrupt()\n"
+            )
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 1, 0], usb_connected=False, fs_readonly=False)
+        sys.modules.pop("app", None)
+        sys.path.insert(0, tmpdir)
+        try:
+            cm = _load_fresh("_test_code_ok", code_path, mods)
+            cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+            cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+            try:
+                cm.boot_main(tmpdir)
+                raise AssertionError("Expected KeyboardInterrupt")
+            except KeyboardInterrupt:
+                pass
+        finally:
+            sys.path.remove(tmpdir)
+            sys.modules.pop("app", None)
+        assert st["wdt"].mode == "RESET"
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 0, 0]
+
+    # 10. code.py: USB read-only mode crash does NOT touch flash or reboot-loop
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write('raise ValueError("syntax or dev bug")\n')
+        with open(os.path.join(tmpdir, "app.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("def main(): pass\n")
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 0, 0], usb_connected=True, fs_readonly=True)
+        sys.modules.pop("app", None)
+        sys.path.insert(0, tmpdir)
+        try:
+            cm = _load_fresh("_test_code_usb_err", code_path, mods)
+            cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+            cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+            assert cm.boot_main(tmpdir) == "usb_error"
+        finally:
+            sys.path.remove(tmpdir)
+            sys.modules.pop("app", None)
+        assert st["resets"] == 0
+        assert os.path.exists(os.path.join(tmpdir, "app.py.bak"))
+
+    # 11. code.py: BOOT_MODE_FORCE_OTA over USB clears flag back to 0 and stays in Python R/W
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write("def main():\n    raise KeyboardInterrupt()\n")
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 2, 0, 0], usb_connected=True, fs_readonly=False)
+        sys.modules.pop("app", None)
+        sys.path.insert(0, tmpdir)
+        try:
+            cm = _load_fresh("_test_code_force", code_path, mods)
+            cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+            cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+            try:
+                cm.boot_main(tmpdir)
+                raise AssertionError("Expected KeyboardInterrupt")
+            except KeyboardInterrupt:
+                pass
+        finally:
+            sys.path.remove(tmpdir)
+            sys.modules.pop("app", None)
+        assert st["resets"] == 0
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 0, 0]
+
+    # 12. code.py: SyntaxError in app.py is caught and rolled back cleanly
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "app.py"), "w", encoding="utf-8") as fh:
+            fh.write("def broken(:\n")
+        with open(os.path.join(tmpdir, "app.py.bak"), "w", encoding="utf-8") as fh:
+            fh.write("def main(): pass\n")
+        st, mods = _make_hw_env(nvm_bytes=[0xA5, 0, 0, 1], usb_connected=False, fs_readonly=False)
+        sys.modules.pop("app", None)
+        sys.path.insert(0, tmpdir)
+        try:
+            cm = _load_fresh("_test_code_syntax", code_path, mods)
+            cm.USB_DETECT_TIMEOUT_SECONDS = 0.0
+            cm.time = types.SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda s: None)
+            assert cm.boot_main(tmpdir) == "rolled_back"
+        finally:
+            sys.path.remove(tmpdir)
+            sys.modules.pop("app", None)
+        assert list(st["nvm"][0:4]) == [0xA5, 0, 2, 0]
+        assert os.path.exists(os.path.join(tmpdir, "app.py.failed"))
+
+    print("[PASS] Bootloader tests passed (boot.py modes, USB handoff, A/B rollback, WDT hang, mid-swap self-heal).")
 
 
 def run_live_fetch_config(settings_path):
@@ -481,6 +804,7 @@ def main():
     run_aqi_tests()
     run_encoding_tests()
     run_remote_config_tests()
+    run_bootloader_tests()
 
     if args.fetch_config:
         run_live_fetch_config(args.settings)

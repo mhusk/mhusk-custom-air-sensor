@@ -43,8 +43,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [x] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
 
-### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2)*
-- [ ] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback)
+### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2 — In Progress)*
+- [x] **Step 16**: Safe Bootloader Split (`boot.py` USB-Aware Mount + Minimal `code.py` → `app.py` with Auto-Rollback) *(live-verified on ESP32-S3 hardware: broken `app.py` on wall power auto-rolled back to `app.py.bak` and resumed publishing `v1.2.0`)*
 - [ ] **Step 17**: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
 - [ ] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check)
 - [ ] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard
@@ -271,15 +271,16 @@ To keep every change easy to understand, debug, and learn from, every step in th
 > Updating CircuitPython `.py` files over the air lets you evolve firmware across every room without unscrewing enclosures or touching USB—while keeping a tiny, immutable `code.py` bootloader guarantees that a bad push with a syntax or runtime error automatically rolls back to the last known-good version instead of bricking the board.
 
 #### Step 16: Safe Bootloader Split (`boot.py` + Immutable `code.py` → `app.py`)
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed (Live-Verified on ESP32-S3 Wall Power)`
 - **Goal**: Refactor the firmware into a USB-aware `boot.py` and a minimal, rock-solid `code.py` bootloader that imports and runs `app.py`, automatically rolling back to `app.py.bak` if a newly deployed `app.py` crashes on boot or fails to record a healthy check-in.
 - **Deliverables**:
-  - `firmware/boot.py` (checks `supervisor.runtime.usb_connected`: mounts flash read-write for Python OTA when on wall power, while preserving normal `CIRCUITPY` USB drive access when plugged into a Mac)
-  - `firmware/code.py` (minimal ~50-line immutable bootloader with boot-attempt counter & automatic `app.py.bak` rollback)
-  - `firmware/app.py` (existing sensor polling + remote config logic moved out of `code.py`)
-  - `docs/10-cloud-ota-and-rollback.md` (Part 1: How CircuitPython flash locking and A/B rollback bootloaders work)
+  - `firmware/boot.py` (1-shot 4-byte `microcontroller.nvm` handoff + `board.BUTTON` failsafe: mounts flash read-write for Python OTA with USB drive disabled on wall power, and auto-hands off to read-write `CIRCUITPY` with zero macOS ejection warnings when plugged into USB)
+  - `firmware/code.py` (minimal immutable bootloader with USB host handoff, mid-swap self-heal, WDT guard for pending OTA, boot-attempt counter, `/boot_error.txt` forensics, and power-loss-safe `*.py.bak` rollback)
+  - `firmware/app.py` (`v1.2.0` sensor polling + remote config logic moved out of `code.py` with `on_healthy` boot-confirmation hook)
+  - `scripts/test_firmware_local.py` (12 offline bootloader & rollback simulation tests)
+  - `docs/10-cloud-ota-and-rollback.md` (Part 1: How CircuitPython flash locking, the `boot.py` USB timing catch-22, and A/B rollback bootloaders work)
 - **Single Focused Validation**:
-  - Intentionally place a broken `app.py` (raising an exception on boot) alongside a valid `app.py.bak` on wall power, confirm `code.py` detects the crash, restores `app.py.bak`, reboots, and resumes publishing to Firestore without USB intervention.
+  - Passed all 12 offline bootloader simulation tests in `python3 scripts/test_firmware_local.py` and `./scripts/check-secrets.sh`, then staged a deliberately broken `app.py` alongside `app.py.bak` on the Feather ESP32-S3 and moved to wall power—confirmed `code.py` caught the crash, restored `app.py.bak` → `app.py`, rebooted, and resumed publishing live `v1.2.0` readings to Firestore without USB intervention.
 - **Target Commit**: `feat(firmware): split USB-aware boot.py and auto-rollback code.py bootloader`
 
 #### Step 17: Release Manifest Schema, SHA-256 Artifact Hosting & Publish CLI
