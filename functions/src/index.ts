@@ -6,6 +6,10 @@ import { defineSecret } from "firebase-functions/params";
 import { onRequest } from "firebase-functions/v2/https";
 
 import {
+  handleDashboardApiRequest,
+  type DashboardDataService,
+} from "./api/dashboard.js";
+import {
   authenticateMcpRequest,
   buildProtectedResourceMetadata,
   buildWwwAuthenticateHeader,
@@ -42,6 +46,8 @@ export interface CreateMcpHttpHandlerOptions {
   db?: Firestore;
   /** Optional injected data service (useful for offline unit/protocol testing). */
   service?: AirQualityDataService;
+  /** Optional injected dashboard service (useful for offline API unit testing). */
+  dashboardService?: DashboardDataService;
   /** Optional custom AuthKit authorization server metadata loader for testing. */
   loadAuthorizationServerMetadata?: (
     authkitDomain: string
@@ -98,7 +104,7 @@ function setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
   if (requestOrigin) {
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type, Accept, Mcp-Session-Id, MCP-Protocol-Version"
@@ -207,7 +213,20 @@ export function createMcpHttpHandler(
       return;
     }
 
-    // 4. Protected MCP Streamable HTTP endpoint (`/mcp`, plus `/` for cloudfunctions.net URLs)
+    // 4. Dashboard JSON API endpoints (`/api/*`)
+    if (pathname === "/api" || pathname.startsWith("/api/")) {
+      await handleDashboardApiRequest(req, res, {
+        pathname,
+        origin,
+        authConfig,
+        authDeps: options.authDeps,
+        db: options.db,
+        dashboardService: options.dashboardService,
+      });
+      return;
+    }
+
+    // 5. Protected MCP Streamable HTTP endpoint (`/mcp`, plus `/` for cloudfunctions.net URLs)
     if (pathname === "/mcp" || pathname === "/") {
       const authResult = await authenticateMcpRequest(
         req,

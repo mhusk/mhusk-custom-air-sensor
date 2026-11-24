@@ -181,3 +181,71 @@ Watch the serial console (`screen /dev/cu.usbmodem* 115200`) on boot and confirm
 > **Remember `isinstance(True, int)` is `True` in Python!**
 > In `normalize_device_config()`, numeric checks explicitly guard `not isinstance(val, bool)` so an accidental boolean in an integer field (`config_version`, `reporting_interval_seconds`, `altitude_m`) is cleanly rejected instead of silently turning into `1` or `0`.
 
+---
+
+## 3. Part 3: Dashboard Backend API & WorkOS Auth Integration (Step 14)
+
+Instead of standing up a separate server, the lightweight Dashboard REST API lives inside the same **2nd Gen Firebase Cloud Function** (`functions/src/index.ts`) that already serves your Remote MCP Server—reusing your existing Google Cloud Secret Manager bindings (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_AUTHKIT_DOMAIN`, `ALLOWED_USER_EMAILS`, `MCP_BEARER_FALLBACK_SECRET`) with zero new secrets required.
+
+### API Endpoint Map (`functions/src/api/dashboard.ts`)
+
+| Method & Route | Auth Required? | Purpose |
+| :--- | :--- | :--- |
+| `GET /api/auth/config` | Public (non-secret) | Returns `{ oauth_configured, authkit_domain, client_id, authorize_endpoint }` so the browser UI can start WorkOS AuthKit PKCE login. |
+| `POST /api/auth/exchange` | Public PKCE + **Owner Allowlist** | Exchanges an AuthKit authorization `code` (+ `code_verifier`) via `workos.userManagement.authenticateWithCode`, rejects non-allowlisted or unverified users with `403`, and returns `{ access_token, refresh_token, user }`. |
+| `POST /api/auth/refresh` | Public Refresh + **Owner Allowlist** | Refreshes an AuthKit browser session via `authenticateWithRefreshToken` and re-verifies `ALLOWED_USER_EMAILS`. |
+| `GET /api/me` | **Yes (`401`/`403`)** | Returns the verified owner identity (`user_id`, `email`, `auth_method`). |
+| `GET /api/dashboard/overview` | **Yes (`401`/`403`)** | Returns every device's live status, latest reading, qualitative `health_context`, desired `device_configs/{device_id}`, and `config_sync_status` (`"synced"`, `"pending"`, or `"local_defaults"`). |
+| `GET /api/readings/history` | **Yes (`401`/`403`)** | Accepts `hours` (`1`–`168`), `limit` (`1`–`500`), `period` (`1h`/`6h`/`24h`/`7d`/`30d`), `device_id`, and `location`; returns chronological readings plus min/max/avg/p95 stats and notable spikes for 24h/7d charts. |
+| `GET /api/devices/:deviceId/config` | **Yes (`401`/`403`)** | Fetches both the desired `device_configs/{deviceId}` doc and the device's reported config state. |
+| `PUT /api/devices/:deviceId/config` | **Yes (`401`/`403`)** | Validates `{ location, reporting_interval_seconds, temperature_offset_c, altitude_m, led_enabled }` with strict **Zod** rules, atomically increments `config_version` in a Firestore transaction, and stamps `updated_at` / `updated_by`. |
+| `POST /api/devices/:deviceId/reboot` | **Yes (`401`/`403`)** | Atomically stamps `reboot_requested_at = now` and increments `config_version` (preserving all other settings) to trigger a safe one-shot remote reboot. |
+
+### How Browser Auth Works Without Exposing Secrets
+
+```mermaid
+sequenceDiagram
+    participant WEB as Web Dashboard (Firebase Hosting)
+    participant API as Cloud Function (/api/*)
+    participant WOS as WorkOS AuthKit
+    participant FS as Cloud Firestore (Admin SDK)
+
+    WEB->>API: GET /api/auth/config
+    API-->>WEB: { client_id, authkit_domain, authorize_endpoint }
+    WEB->>WOS: Redirect with PKCE code_challenge (S256)
+    WOS-->>WEB: Redirect back with ?code=...
+    WEB->>API: POST /api/auth/exchange { code, code_verifier }
+    API->>WOS: authenticateWithCode (using server-side WORKOS_API_KEY)
+    API->>API: Verify emailVerified + ALLOWED_USER_EMAILS (403 if stranger)
+    API-->>WEB: { access_token, refresh_token, user }
+    WEB->>API: PUT /api/devices/feather-s3-01/config (Authorization: Bearer <access_token>)
+    API->>WOS: Verify JWT signature & claims + owner allowlist
+    API->>FS: Transactionally update device_configs (config_version++)
+    API-->>WEB: 200 OK { updated: true, config: { config_version: 4, ... } }
+```
+
+### Single Focused Validation Checkpoint (Part 3)
+
+1. **Automated Offline API & Auth Verification Suite:**
+   ```bash
+   npm --prefix functions run verify:api
+   npm --prefix functions run verify:auth
+   ```
+   Confirms `200`/`400`/`401`/`403` enforcement across WorkOS AuthKit code exchange, refresh, Connect JWTs, UserManagement session tokens, Bearer fallback, strict Zod payload validation, transactional `config_version` increments, sync-status transitions (`synced` → `pending`), and one-shot reboot stamping.
+2. **Deploy & Live Smoke Check:**
+   ```bash
+   npx -y firebase-tools@latest deploy --only functions
+   ```
+   Verify `GET <function-url>/api/auth/config` returns `200 OK` (with zero secrets) and unauthenticated `GET <function-url>/api/dashboard/overview` returns `401 Unauthorized`.
+
+### Good to Know & Real-World Troubleshooting (Part 3)
+
+> [!IMPORTANT]
+> **WorkOS Connect MCP tokens vs. WorkOS UserManagement browser tokens have different issuers/JWKS.**
+> MCP clients receive WorkOS Connect OAuth 2.1 tokens (`iss: https://<subdomain>.authkit.app`, verified against `${authkitDomain}/oauth2/jwks`). Browser dashboards using `authenticateWithCode()` receive WorkOS UserManagement session access tokens (carrying `sid` + `auth_time`, verified via `workos.userManagement.verifyAccessToken()`). Supporting both paths inside [`functions/src/auth/workos.ts`](../functions/src/auth/workos.ts) while enforcing the exact same fail-closed `ALLOWED_USER_EMAILS` check keeps AI assistants and the web dashboard seamlessly protected under one WorkOS setup.
+
+> [!TIP]
+> **Don't forget `PUT` in `Access-Control-Allow-Methods`!**
+> Earlier MCP-only CORS headers only allowed `GET, POST, DELETE, OPTIONS`. Adding `PUT` in [`functions/src/index.ts`](../functions/src/index.ts) ensures browser preflights for `PUT /api/devices/:deviceId/config` succeed cleanly.
+
+

@@ -39,8 +39,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
 
 ### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — In Progress)*
 - [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 pending finished print)*
-- [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 implemented & verified via offline + live Mac tests; ready to copy `code.py` + `firestore_client.py` to `CIRCUITPY`)*
-- [ ] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
+- [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 live-verified end-to-end on ESP32-S3 hardware: `v1` → `v2` 60s/LED-off → `v3` 300s/LED-on)*
+- [x] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [ ] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
 
 ### Phase 3: Cloud Pull-Based OTA Firmware Updates with A/B Rollback *(Layer 2)*
@@ -239,15 +239,16 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Target Commit**: `feat(firmware): add remote config polling and SCD-40 calibration support`
 
 #### Step 14: Dashboard Backend API & WorkOS Auth Integration
-- **Status**: `[ ] Pending`
+- **Status**: `[x] Completed`
 - **Goal**: Add lightweight authenticated JSON API routes to Firebase Cloud Functions—reusing the existing WorkOS AuthKit OAuth + strict owner allowlist—for fetching live room snapshots, 24h/7d time-series data, device health, and updating `device_configs/{device_id}`.
 - **Deliverables**:
-  - `functions/src/api/dashboard.ts` (typed REST endpoints backed by `functions/src/services/firestore.ts` plus `updateDeviceConfig` with strict Zod validation)
-  - `functions/src/index.ts` (route wiring + WorkOS session/token verification)
-  - Verification script (`npm --prefix functions run verify:api`) testing auth rejection (`401`/`403`) and valid config updates
+  - `functions/src/services/firestore.ts` (extended `DeviceStatus` with optional v1.1 config fields + transactional `getDeviceConfig`, `listDeviceConfigs`, `updateDeviceConfig`, `requestDeviceReboot`)
+  - `functions/src/auth/workos.ts` (WorkOS UserManagement session token verification + allowlisted `exchangeAuthKitCode` & `refreshAuthKitSession`)
+  - `functions/src/api/dashboard.ts` (typed `/api/*` REST endpoints with strict Zod validation) & `functions/src/index.ts` (route wiring + `PUT` CORS support)
+  - Verification script (`npm --prefix functions run verify:api` in `functions/src/scripts/verifyApi.ts`) testing `401`/`403` auth rejections, Zod `400` rejections, overview/history queries, config updates, and one-shot reboot requests
   - `docs/09-remote-config-and-dashboard.md` (Part 3: Securing a personal IoT dashboard API with WorkOS AuthKit)
 - **Single Focused Validation**:
-  - Run `npm --prefix functions run verify:api` and confirm unauthenticated requests fail with `401`, non-allowlisted users get `403`, and an authorized request reads telemetry and updates `device_configs/{device_id}` cleanly.
+  - Passed all 7 test groups in `npm --prefix functions run verify:api` and full regression check in `npm --prefix functions run verify:auth`, deployed to Cloud Functions 2nd Gen, and confirmed live `GET /api/auth/config` (`200`) and unauthenticated `GET /api/dashboard/overview` (`401`).
 - **Target Commit**: `feat(functions): add WorkOS-protected dashboard and remote config API`
 
 #### Step 15: Lightweight Web Dashboard on Firebase Hosting

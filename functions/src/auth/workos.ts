@@ -45,7 +45,50 @@ export interface WorkosAuthDependencies {
   getKey?: JWTVerifyGetKey;
   /** Custom WorkOS user lookup (injectable for offline unit tests). */
   getUserById?: (userId: string) => Promise<ResolvedWorkosUser | null>;
+  /** Custom WorkOS UserManagement access token verifier (injectable for offline tests). */
+  verifyUserAccessToken?: (token: string) => Promise<{
+    sub: string;
+    exp?: number;
+    org_id?: string;
+  } | null>;
+  /** Custom WorkOS AuthKit code exchange (injectable for offline unit tests). */
+  authenticateWithCode?: (params: {
+    code: string;
+    codeVerifier?: string;
+    clientId: string;
+  }) => Promise<AuthKitSessionResult>;
+  /** Custom WorkOS AuthKit refresh token exchange (injectable for offline unit tests). */
+  authenticateWithRefreshToken?: (params: {
+    refreshToken: string;
+    clientId: string;
+  }) => Promise<AuthKitSessionResult>;
 }
+
+export interface AuthKitSessionUser {
+  id: string;
+  email: string;
+  emailVerified: boolean;
+  firstName?: string | null;
+  lastName?: string | null;
+}
+
+export interface AuthKitSessionResult {
+  accessToken: string;
+  refreshToken: string;
+  user: AuthKitSessionUser;
+}
+
+export type AuthKitExchangeOutcome =
+  | {
+      ok: true;
+      session: AuthKitSessionResult;
+    }
+  | {
+      ok: false;
+      status: 400 | 401 | 403 | 503;
+      error: string;
+      message: string;
+    };
 
 export type AuthVerificationResult =
   | {
@@ -367,7 +410,7 @@ export async function authenticateMcpRequest(
     };
   }
 
-  // Path 2: WorkOS AuthKit OAuth 2.1 JWT verification
+  // Path 2: WorkOS AuthKit JWT verification (Connect OAuth 2.1 or UserManagement session token)
   const authkitDomain = normalizeAuthKitDomain(config.workosAuthKitDomain);
   if (!authkitDomain) {
     return {
@@ -381,22 +424,46 @@ export async function authenticateMcpRequest(
   const getKey = deps.getKey ?? getRemoteJwksForAuthKit(authkitDomain);
   const expectedAudiences = buildExpectedAudiences(origin, config.workosClientId);
 
-  let payload: JWTPayload;
+  let payload: JWTPayload | null = null;
   try {
     const verified = await jwtVerify(token, getKey, {
       issuer: authkitDomain,
       audience: expectedAudiences.length > 0 ? expectedAudiences : undefined,
     });
     payload = verified.payload;
-  } catch (error) {
-    const reason = error instanceof Error ? error.name : "JWTVerificationError";
-    console.warn(`[auth] WorkOS JWT verification failed (${reason}).`);
-    return {
-      ok: false,
-      status: 401,
-      error: "invalid_token",
-      message: "Unauthorized: invalid or expired WorkOS access token.",
-    };
+  } catch (connectErr) {
+    // Fallback for WorkOS AuthKit UserManagement browser session access tokens
+    // (issued by authenticateWithCode / authenticateWithRefreshToken).
+    const apiKey = config.workosApiKey?.trim();
+    const clientIdVal = config.workosClientId?.trim();
+    try {
+      if (deps.verifyUserAccessToken) {
+        const claims = await deps.verifyUserAccessToken(token);
+        if (claims) {
+          payload = claims as JWTPayload;
+        }
+      } else if (apiKey && clientIdVal) {
+        const workos = getWorkosClient(apiKey, clientIdVal);
+        const claims = await workos.userManagement.verifyAccessToken(token);
+        if (claims) {
+          payload = claims as unknown as JWTPayload;
+        }
+      }
+    } catch (umErr) {
+      const reason = umErr instanceof Error ? umErr.name : "UserManagementVerifyError";
+      console.warn(`[auth] WorkOS UserManagement token verification failed (${reason}).`);
+    }
+
+    if (!payload) {
+      const reason = connectErr instanceof Error ? connectErr.name : "JWTVerificationError";
+      console.warn(`[auth] WorkOS JWT verification failed (${reason}).`);
+      return {
+        ok: false,
+        status: 401,
+        error: "invalid_token",
+        message: "Unauthorized: invalid or expired WorkOS access token.",
+      };
+    }
   }
 
   const userId = typeof payload.sub === "string" ? payload.sub.trim() : "";
@@ -494,4 +561,179 @@ export async function authenticateMcpRequest(
       },
     },
   };
+}
+
+/**
+ * Checks a resolved WorkOS AuthKit user against `ALLOWED_USER_EMAILS` (fail-closed).
+ */
+export function isAuthKitUserAllowlisted(
+  user: AuthKitSessionUser,
+  config: WorkosAuthConfig
+): { allowed: true } | { allowed: false; message: string } {
+  const allowlist = parseAllowlist(config.allowedUserEmails);
+  if (allowlist.emails.size === 0 && allowlist.userIds.size === 0) {
+    return {
+      allowed: false,
+      message: "Forbidden: server owner allowlist is not configured.",
+    };
+  }
+
+  if (allowlist.userIds.has(user.id)) {
+    return { allowed: true };
+  }
+
+  const normalizedEmail = user.email.trim().toLowerCase();
+  if (user.emailVerified && allowlist.emails.has(normalizedEmail)) {
+    return { allowed: true };
+  }
+
+  return {
+    allowed: false,
+    message: "Forbidden: authenticated user is not authorized to access this dashboard.",
+  };
+}
+
+/**
+ * Exchanges a WorkOS AuthKit authorization code (+ optional PKCE code_verifier)
+ * for an access/refresh token pair and enforces the owner allowlist.
+ */
+export async function exchangeAuthKitCode(
+  params: { code: string; codeVerifier?: string },
+  config: WorkosAuthConfig,
+  deps: WorkosAuthDependencies = {}
+): Promise<AuthKitExchangeOutcome> {
+  const clientId = config.workosClientId?.trim();
+  const apiKey = config.workosApiKey?.trim();
+  if (!clientId || (!apiKey && !deps.authenticateWithCode)) {
+    return {
+      ok: false,
+      status: 503,
+      error: "oauth_not_configured",
+      message: "WorkOS AuthKit is not configured on this server.",
+    };
+  }
+
+  let session: AuthKitSessionResult;
+  try {
+    if (deps.authenticateWithCode) {
+      session = await deps.authenticateWithCode({
+        code: params.code,
+        codeVerifier: params.codeVerifier,
+        clientId,
+      });
+    } else {
+      const workos = getWorkosClient(apiKey!, clientId);
+      const response = await workos.userManagement.authenticateWithCode({
+        code: params.code,
+        clientId,
+        ...(params.codeVerifier ? { codeVerifier: params.codeVerifier } : {}),
+      });
+      session = {
+        accessToken: response.accessToken,
+        refreshToken: response.refreshToken,
+        user: {
+          id: response.user.id,
+          email: response.user.email,
+          emailVerified: response.user.emailVerified,
+          firstName: response.user.firstName,
+          lastName: response.user.lastName,
+        },
+      };
+    }
+  } catch (error) {
+    console.warn(
+      "[auth] WorkOS AuthKit code exchange failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return {
+      ok: false,
+      status: 401,
+      error: "invalid_grant",
+      message: "Unauthorized: invalid or expired authorization code.",
+    };
+  }
+
+  const check = isAuthKitUserAllowlisted(session.user, config);
+  if (!check.allowed) {
+    console.warn(`[auth] Dashboard login denied by owner allowlist for sub=${session.user.id}.`);
+    return {
+      ok: false,
+      status: 403,
+      error: "access_denied",
+      message: check.message,
+    };
+  }
+
+  return { ok: true, session };
+}
+
+/**
+ * Refreshes a WorkOS AuthKit browser session and re-verifies the owner allowlist.
+ */
+export async function refreshAuthKitSession(
+  params: { refreshToken: string },
+  config: WorkosAuthConfig,
+  deps: WorkosAuthDependencies = {}
+): Promise<AuthKitExchangeOutcome> {
+  const clientId = config.workosClientId?.trim();
+  const apiKey = config.workosApiKey?.trim();
+  if (!clientId || (!apiKey && !deps.authenticateWithRefreshToken)) {
+    return {
+      ok: false,
+      status: 503,
+      error: "oauth_not_configured",
+      message: "WorkOS AuthKit is not configured on this server.",
+    };
+  }
+
+  let session: AuthKitSessionResult;
+  try {
+    if (deps.authenticateWithRefreshToken) {
+      session = await deps.authenticateWithRefreshToken({
+        refreshToken: params.refreshToken,
+        clientId,
+      });
+    } else {
+      const workos = getWorkosClient(apiKey!, clientId);
+      const response = await workos.userManagement.authenticateWithRefreshToken({
+        refreshToken: params.refreshToken,
+        clientId,
+      });
+      session = {
+        accessToken: response.accessToken,
+        refreshToken: response.refreshToken,
+        user: {
+          id: response.user.id,
+          email: response.user.email,
+          emailVerified: response.user.emailVerified,
+          firstName: response.user.firstName,
+          lastName: response.user.lastName,
+        },
+      };
+    }
+  } catch (error) {
+    console.warn(
+      "[auth] WorkOS AuthKit session refresh failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return {
+      ok: false,
+      status: 401,
+      error: "invalid_grant",
+      message: "Unauthorized: invalid or expired refresh token.",
+    };
+  }
+
+  const check = isAuthKitUserAllowlisted(session.user, config);
+  if (!check.allowed) {
+    console.warn(`[auth] Dashboard refresh denied by owner allowlist for sub=${session.user.id}.`);
+    return {
+      ok: false,
+      status: 403,
+      error: "access_denied",
+      message: check.message,
+    };
+  }
+
+  return { ok: true, session };
 }

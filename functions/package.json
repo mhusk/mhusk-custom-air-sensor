@@ -15,6 +15,7 @@
     "verify:firestore": "npm run build && node lib/scripts/verifyFirestore.js",
     "verify:mcp": "npm run build && node lib/scripts/verifyMcp.js",
     "verify:auth": "npm run build && node lib/scripts/verifyAuth.js",
+    "verify:api": "npm run build && node lib/scripts/verifyApi.js",
     "mcp:local": "npm run build && node lib/scripts/localMcpServer.js"
   },
   "dependencies": {

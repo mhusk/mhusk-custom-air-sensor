@@ -10,6 +10,7 @@ import {
 
 export const READINGS_COLLECTION = "readings";
 export const DEVICES_COLLECTION = "devices";
+export const DEVICE_CONFIGS_COLLECTION = "device_configs";
 
 export const DEFAULT_HISTORY_HOURS = 24;
 export const MAX_HISTORY_HOURS = 168; // 7 days
@@ -89,6 +90,31 @@ export interface DeviceStatus {
   sensors: string[];
   reporting_interval_seconds: number;
   latest_reading: DeviceLatestReadingSnapshot | null;
+  config_version?: number | null;
+  temperature_offset_c?: number | null;
+  altitude_m?: number | null;
+  led_enabled?: boolean | null;
+}
+
+export interface DeviceConfig {
+  device_id: string;
+  location: string;
+  reporting_interval_seconds: number;
+  temperature_offset_c: number;
+  altitude_m: number;
+  led_enabled: boolean;
+  config_version: number;
+  reboot_requested_at: string | null;
+  updated_at: string;
+  updated_by: string;
+}
+
+export interface UpdateDeviceConfigInput {
+  location: string;
+  reporting_interval_seconds: number;
+  temperature_offset_c: number;
+  altitude_m: number;
+  led_enabled: boolean;
 }
 
 export interface ReadingHealthContext {
@@ -362,6 +388,41 @@ function mapDeviceData(docId: string, data: DocumentData, now: Date): DeviceStat
     sensors,
     reporting_interval_seconds: asNumber(data.reporting_interval_seconds, 300),
     latest_reading: latestReading,
+    config_version:
+      typeof data.config_version === "number" && Number.isFinite(data.config_version)
+        ? Math.trunc(data.config_version)
+        : null,
+    temperature_offset_c:
+      typeof data.temperature_offset_c === "number" &&
+      Number.isFinite(data.temperature_offset_c)
+        ? roundTo(data.temperature_offset_c, 2)
+        : null,
+    altitude_m:
+      typeof data.altitude_m === "number" && Number.isFinite(data.altitude_m)
+        ? Math.round(data.altitude_m)
+        : null,
+    led_enabled: typeof data.led_enabled === "boolean" ? data.led_enabled : null,
+  };
+}
+
+function mapDeviceConfigData(docId: string, data: DocumentData): DeviceConfig {
+  const updatedAtDate = normalizeTimestampToDate(data.updated_at);
+  const rebootRequestedAt =
+    data.reboot_requested_at !== undefined && data.reboot_requested_at !== null
+      ? normalizeTimestampToDate(data.reboot_requested_at).toISOString()
+      : null;
+
+  return {
+    device_id: asString(data.device_id, docId),
+    location: asString(data.location, "home-office"),
+    reporting_interval_seconds: Math.round(asNumber(data.reporting_interval_seconds, 300)),
+    temperature_offset_c: roundTo(asNumber(data.temperature_offset_c, 4.0), 2),
+    altitude_m: Math.round(asNumber(data.altitude_m, 0)),
+    led_enabled: typeof data.led_enabled === "boolean" ? data.led_enabled : true,
+    config_version: Math.max(1, Math.trunc(asNumber(data.config_version, 1))),
+    reboot_requested_at: rebootRequestedAt,
+    updated_at: updatedAtDate.toISOString(),
+    updated_by: asString(data.updated_by, "unknown"),
   };
 }
 
@@ -870,4 +931,131 @@ export async function getSensorStatus(
     stale_or_offline_count: devices.length - onlineCount,
     devices,
   };
+}
+
+/**
+ * Fetches a single device's desired remote configuration from `device_configs/{deviceId}`.
+ */
+export async function getDeviceConfig(
+  deviceId: string,
+  db: Firestore = getDb()
+): Promise<DeviceConfig | null> {
+  const doc = await db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId).get();
+  if (!doc.exists || !doc.data()) {
+    return null;
+  }
+  return mapDeviceConfigData(doc.id, doc.data()!);
+}
+
+/**
+ * Lists all desired remote configurations keyed by `device_id`.
+ */
+export async function listDeviceConfigs(
+  db: Firestore = getDb()
+): Promise<Record<string, DeviceConfig>> {
+  const snapshot = await db.collection(DEVICE_CONFIGS_COLLECTION).get();
+  const configs: Record<string, DeviceConfig> = {};
+  for (const doc of snapshot.docs) {
+    const mapped = mapDeviceConfigData(doc.id, doc.data());
+    configs[mapped.device_id] = mapped;
+  }
+  return configs;
+}
+
+/**
+ * Atomically updates `device_configs/{deviceId}` and increments `config_version`.
+ * Preserves any existing `reboot_requested_at` timestamp so a pending reboot is not lost.
+ */
+export async function updateDeviceConfig(
+  deviceId: string,
+  input: UpdateDeviceConfigInput,
+  updatedBy: string,
+  db: Firestore = getDb()
+): Promise<DeviceConfig> {
+  const ref = db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId);
+  const nowTs = Timestamp.now();
+
+  return db.runTransaction(async (tx) => {
+    const existing = await tx.get(ref);
+    const existingData = existing.exists ? existing.data() : undefined;
+    const prevVersion =
+      existingData && typeof existingData.config_version === "number"
+        ? Math.trunc(existingData.config_version)
+        : 0;
+    const nextVersion = Math.min(1_000_000, Math.max(1, prevVersion + 1));
+
+    const payload = {
+      device_id: deviceId,
+      location: input.location,
+      reporting_interval_seconds: Math.round(input.reporting_interval_seconds),
+      temperature_offset_c: roundTo(input.temperature_offset_c, 2),
+      altitude_m: Math.round(input.altitude_m),
+      led_enabled: Boolean(input.led_enabled),
+      config_version: nextVersion,
+      reboot_requested_at: existingData?.reboot_requested_at ?? null,
+      updated_at: nowTs,
+      updated_by: updatedBy,
+    };
+
+    tx.set(ref, payload);
+    return mapDeviceConfigData(deviceId, payload);
+  });
+}
+
+/**
+ * Atomically stamps `reboot_requested_at = now` and increments `config_version`
+ * on `device_configs/{deviceId}` to trigger a safe one-shot remote reboot.
+ */
+export async function requestDeviceReboot(
+  deviceId: string,
+  updatedBy: string,
+  db: Firestore = getDb()
+): Promise<DeviceConfig> {
+  const configRef = db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId);
+  const deviceRef = db.collection(DEVICES_COLLECTION).doc(deviceId);
+  const nowTs = Timestamp.now();
+
+  return db.runTransaction(async (tx) => {
+    const [existingCfg, existingDevice] = await Promise.all([
+      tx.get(configRef),
+      tx.get(deviceRef),
+    ]);
+    const cfgData = existingCfg.exists ? existingCfg.data() : undefined;
+    const devData = existingDevice.exists ? existingDevice.data() : undefined;
+
+    const prevVersion =
+      cfgData && typeof cfgData.config_version === "number"
+        ? Math.trunc(cfgData.config_version)
+        : 0;
+    const nextVersion = Math.min(1_000_000, Math.max(1, prevVersion + 1));
+
+    const payload = {
+      device_id: deviceId,
+      location: asString(cfgData?.location ?? devData?.location, "home-office"),
+      reporting_interval_seconds: Math.round(
+        asNumber(
+          cfgData?.reporting_interval_seconds ?? devData?.reporting_interval_seconds,
+          300
+        )
+      ),
+      temperature_offset_c: roundTo(
+        asNumber(cfgData?.temperature_offset_c ?? devData?.temperature_offset_c, 4.0),
+        2
+      ),
+      altitude_m: Math.round(asNumber(cfgData?.altitude_m ?? devData?.altitude_m, 0)),
+      led_enabled:
+        typeof cfgData?.led_enabled === "boolean"
+          ? cfgData.led_enabled
+          : typeof devData?.led_enabled === "boolean"
+            ? devData.led_enabled
+            : true,
+      config_version: nextVersion,
+      reboot_requested_at: nowTs,
+      updated_at: nowTs,
+      updated_by: updatedBy,
+    };
+
+    tx.set(configRef, payload);
+    return mapDeviceConfigData(deviceId, payload);
+  });
 }
