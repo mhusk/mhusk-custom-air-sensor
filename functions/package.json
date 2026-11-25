@@ -22,6 +22,7 @@
     "verify:release": "npm run build && node lib/scripts/verifyRelease.js",
     "verify:rollups": "npm run build && node lib/scripts/verifyRollups.js",
     "publish:release": "npm run build && node lib/scripts/publishRelease.js",
+    "backfill:rollups": "npm run build && node lib/scripts/backfillRollups.js",
     "mcp:local": "npm run build && node lib/scripts/localMcpServer.js"
   },
   "dependencies": {

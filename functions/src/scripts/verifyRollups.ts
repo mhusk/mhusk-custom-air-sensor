@@ -25,6 +25,8 @@ import {
   getAirQualitySummary,
   getReadingsHistoryWithSummary,
   groupContiguousDateRanges,
+  groupIndoorReadingsIntoRollupDocs,
+  groupOutdoorReadingsIntoRollupDocs,
   listUtcDateStrings,
   readIndoorReadingsFromRollups,
   readOutdoorReadingsFromRollups,
@@ -35,6 +37,7 @@ import {
   getOutdoorReadingsHistory,
   type OutdoorReading,
 } from "../services/outdoor.js";
+import { parseBackfillCliArgs } from "./backfillRollups.js";
 
 function deepMergeMaps(
   target: Record<string, unknown>,
@@ -458,6 +461,31 @@ async function runTests(): Promise<void> {
   assert.equal(outHistory.length, 4);
   assert.ok(outMixedHarness.counts.reads <= 12);
   console.log("   [PASS] 7d/30d rollup parity, O(days) read reduction, and mixed raw fallback");
+
+  // 6. Backfill CLI arg parsing and batch grouping helpers
+  const defaultArgs = parseBackfillCliArgs([]);
+  assert.equal(defaultArgs.days, 30);
+  assert.equal(defaultArgs.dryRun, false);
+  const customArgs = parseBackfillCliArgs(["--days", "14", "--dry-run", "--project", "demo-id"]);
+  assert.equal(customArgs.days, 14);
+  assert.equal(customArgs.dryRun, true);
+  assert.equal(customArgs.projectId, "demo-id");
+
+  const groupedIndoor = groupIndoorReadingsIntoRollupDocs([
+    makeSampleReading({ id: "a", timestamp: "2026-11-23T23:55:00.000Z" }),
+    makeSampleReading({ id: "b", timestamp: "2026-11-24T00:05:00.000Z" }),
+    makeSampleReading({ id: "c", timestamp: "2026-11-24T00:10:00.000Z" }),
+  ]);
+  assert.equal(groupedIndoor.length, 2);
+  assert.equal(Object.keys(groupedIndoor[1].samples).length, 2);
+
+  const groupedOutdoor = groupOutdoorReadingsIntoRollupDocs([
+    makeSampleOutdoor({ id: "o1", timestamp: "2026-11-24T01:00:00.000Z" }),
+    makeSampleOutdoor({ id: "o2", timestamp: "2026-11-24T01:15:00.000Z" }),
+  ]);
+  assert.equal(groupedOutdoor.length, 1);
+  assert.equal(Object.keys(groupedOutdoor[0].samples).length, 2);
+  console.log("   [PASS] Backfill CLI flags & UTC-day grouping helpers");
 }
 
 runTests()
