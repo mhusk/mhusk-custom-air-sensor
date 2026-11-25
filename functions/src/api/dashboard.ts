@@ -21,6 +21,7 @@ import {
   getFirmwareRelease,
   getLatestReading,
   getReadingsHistory,
+  getReadingsHistoryWithSummary,
   getSensorStatus,
   isValidFirmwareVersion,
   listDeviceConfigs,
@@ -75,6 +76,9 @@ export interface DashboardDataService {
   getLatestReading: (options?: LatestReadingOptions) => Promise<LatestReadingResult | null>;
   getReadingsHistory: (options?: ReadingsHistoryOptions) => Promise<ReadingsHistoryResult>;
   getAirQualitySummary: (options: AirQualitySummaryOptions) => Promise<AirQualitySummaryResult>;
+  getReadingsHistoryWithSummary?: (
+    options?: ReadingsHistoryOptions & { period?: SummaryPeriod }
+  ) => Promise<{ history: ReadingsHistoryResult; summary: AirQualitySummaryResult }>;
   getDeviceConfig: (deviceId: string) => Promise<DeviceConfig | null>;
   listDeviceConfigs: () => Promise<Record<string, DeviceConfig>>;
   updateDeviceConfig: (
@@ -251,6 +255,7 @@ export function createFirestoreDashboardService(
     getLatestReading: (options) => getLatestReading(options, db),
     getReadingsHistory: (options) => getReadingsHistory(options, db),
     getAirQualitySummary: (options) => getAirQualitySummary(options, db),
+    getReadingsHistoryWithSummary: (options) => getReadingsHistoryWithSummary(options, db),
     getDeviceConfig: (deviceId) => getDeviceConfig(deviceId, db),
     listDeviceConfigs: () => listDeviceConfigs(db),
     updateDeviceConfig: (deviceId, input, updatedBy) =>
@@ -745,17 +750,42 @@ export async function handleDashboardApiRequest(
         summaryPeriod = rawPeriod as SummaryPeriod;
       }
 
-      const [history, summary, outdoorHistory] = await Promise.all([
-        service.getReadingsHistory({ hours, limit, device_id: deviceId, location }),
-        service.getAirQualitySummary({
-          period: summaryPeriod,
-          device_id: deviceId,
-          location,
-        }),
-        service.getOutdoorReadingsHistory
-          ? service.getOutdoorReadingsHistory(hours, limit)
-          : Promise.resolve([]),
-      ]);
+      const outdoorPromise = service.getOutdoorReadingsHistory
+        ? service.getOutdoorReadingsHistory(hours, limit)
+        : Promise.resolve([]);
+
+      let history: ReadingsHistoryResult;
+      let summary: AirQualitySummaryResult;
+      let outdoorHistory: OutdoorReading[];
+
+      if (service.getReadingsHistoryWithSummary) {
+        const [combined, outdoor] = await Promise.all([
+          service.getReadingsHistoryWithSummary({
+            hours,
+            limit,
+            period: summaryPeriod,
+            device_id: deviceId,
+            location,
+          }),
+          outdoorPromise,
+        ]);
+        history = combined.history;
+        summary = combined.summary;
+        outdoorHistory = outdoor;
+      } else {
+        const [hist, sum, outdoor] = await Promise.all([
+          service.getReadingsHistory({ hours, limit, device_id: deviceId, location }),
+          service.getAirQualitySummary({
+            period: summaryPeriod,
+            device_id: deviceId,
+            location,
+          }),
+          outdoorPromise,
+        ]);
+        history = hist;
+        summary = sum;
+        outdoorHistory = outdoor;
+      }
 
       sendJson(res, 200, {
         history,

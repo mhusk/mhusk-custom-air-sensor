@@ -55,6 +55,14 @@ export const SUMMARY_PERIOD_MS: Record<SummaryPeriod, number> = {
   "30d": 30 * 24 * 60 * 60 * 1000,
 };
 
+export const SUMMARY_PERIOD_HOURS: Record<SummaryPeriod, number> = {
+  "1h": 1,
+  "6h": 6,
+  "24h": 24,
+  "7d": 168,
+  "30d": 720,
+};
+
 export interface AirQualityReading {
   id: string;
   device_id: string;
@@ -974,6 +982,181 @@ export async function getReadingsHistory(
 
 /**
  * Computes statistical aggregations (min, max, average, p95), threshold
+ * exceedance counts, and notable spike episodes from pre-loaded ascending readings.
+ */
+export function computeAirQualitySummaryFromReadings(
+  readingsAsc: AirQualityReading[],
+  options: {
+    period: SummaryPeriod;
+    windowStart: Date;
+    windowEnd: Date;
+    device_id?: string;
+    location?: string;
+    scanCapped: boolean;
+  }
+): AirQualitySummaryResult {
+  const sampleCount = readingsAsc.length;
+  if (sampleCount === 0) {
+    return {
+      period: options.period,
+      window_start: options.windowStart.toISOString(),
+      window_end: options.windowEnd.toISOString(),
+      filters: {
+        device_id: options.device_id ?? null,
+        location: options.location ?? null,
+      },
+      sample_count: 0,
+      scan_capped: options.scanCapped,
+      metrics: null,
+      threshold_exceedances: {
+        co2_above_1000_ppm_count: 0,
+        co2_above_1000_ppm_percent: 0,
+        co2_above_1400_ppm_count: 0,
+        pm2_5_above_9_ug_m3_count: 0,
+        pm2_5_above_9_ug_m3_percent: 0,
+        pm2_5_above_35_4_ug_m3_count: 0,
+      },
+      notable_spikes: [],
+    };
+  }
+
+  const co2Above1000 = readingsAsc.filter((r) => r.co2_ppm > CO2_ELEVATED_PPM).length;
+  const co2Above1400 = readingsAsc.filter((r) => r.co2_ppm > CO2_HIGH_PPM).length;
+  const pm25Above9 = readingsAsc.filter((r) => r.pm2_5_ug_m3 > PM2_5_ELEVATED_UG_M3).length;
+  const pm25Above35_4 = readingsAsc.filter((r) => r.pm2_5_ug_m3 > PM2_5_HIGH_UG_M3).length;
+
+  return {
+    period: options.period,
+    window_start: options.windowStart.toISOString(),
+    window_end: options.windowEnd.toISOString(),
+    filters: {
+      device_id: options.device_id ?? null,
+      location: options.location ?? null,
+    },
+    sample_count: sampleCount,
+    scan_capped: options.scanCapped,
+    metrics: {
+      co2_ppm: computeMetricStats(readingsAsc.map((r) => r.co2_ppm), 0),
+      pm2_5_ug_m3: computeMetricStats(readingsAsc.map((r) => r.pm2_5_ug_m3), 1),
+      pm10_0_ug_m3: computeMetricStats(readingsAsc.map((r) => r.pm10_0_ug_m3), 1),
+      temperature_f: computeMetricStats(readingsAsc.map((r) => r.temperature_f), 1),
+      temperature_c: computeMetricStats(readingsAsc.map((r) => r.temperature_c), 1),
+      humidity_percent: computeMetricStats(readingsAsc.map((r) => r.humidity_percent), 1),
+      aqi_us: computeMetricStats(readingsAsc.map((r) => r.aqi_us), 0),
+    },
+    threshold_exceedances: {
+      co2_above_1000_ppm_count: co2Above1000,
+      co2_above_1000_ppm_percent: roundTo((co2Above1000 / sampleCount) * 100, 1),
+      co2_above_1400_ppm_count: co2Above1400,
+      pm2_5_above_9_ug_m3_count: pm25Above9,
+      pm2_5_above_9_ug_m3_percent: roundTo((pm25Above9 / sampleCount) * 100, 1),
+      pm2_5_above_35_4_ug_m3_count: pm25Above35_4,
+    },
+    notable_spikes: detectNotableSpikes(readingsAsc),
+  };
+}
+
+/**
+ * Fetches readings history and matching statistical summary in a single Firestore
+ * query when `period` matches `hours` (avoiding duplicate full-window scans on
+ * dashboard chart loads). Falls back to separate queries for mismatched windows.
+ */
+export async function getReadingsHistoryWithSummary(
+  options: ReadingsHistoryOptions & { period?: SummaryPeriod } = {},
+  db: Firestore = getDb()
+): Promise<{ history: ReadingsHistoryResult; summary: AirQualitySummaryResult }> {
+  const requestedHours = options.hours ?? DEFAULT_HISTORY_HOURS;
+  const clampedHours = Math.min(
+    Math.max(requestedHours, 1),
+    MAX_HISTORY_HOURS
+  );
+  const inferredPeriod: SummaryPeriod =
+    clampedHours <= 1
+      ? "1h"
+      : clampedHours <= 6
+        ? "6h"
+        : clampedHours <= 24
+          ? "24h"
+          : "7d";
+  const period = options.period ?? inferredPeriod;
+
+  if (
+    options.start_time ||
+    options.end_time ||
+    SUMMARY_PERIOD_HOURS[period] !== clampedHours
+  ) {
+    const [history, summary] = await Promise.all([
+      getReadingsHistory(options, db),
+      getAirQualitySummary(
+        {
+          period,
+          device_id: options.device_id,
+          location: options.location,
+          now: options.now,
+        },
+        db
+      ),
+    ]);
+    return { history, summary };
+  }
+
+  const now = options.now ?? new Date();
+  const startDate = new Date(now.getTime() - clampedHours * 60 * 60 * 1000);
+  const limit = Math.min(
+    Math.max(Math.floor(options.limit ?? DEFAULT_HISTORY_LIMIT), 1),
+    MAX_HISTORY_LIMIT
+  );
+
+  const { query, postFilterLocation } = buildReadingsQuery(db, {
+    device_id: options.device_id,
+    location: options.location,
+    startDate,
+    endDate: now,
+    limit: MAX_HISTORY_SCAN_DOCS,
+  });
+
+  const snapshot = await query.get();
+  const scanCapped = snapshot.size >= MAX_HISTORY_SCAN_DOCS;
+
+  let readings = snapshot.docs.map(mapReadingSnapshot);
+  if (postFilterLocation) {
+    readings = readings.filter((r) => r.location === postFilterLocation);
+  }
+  readings.reverse();
+
+  const totalMatching = readings.length;
+  const downsampled = totalMatching > limit;
+  const returnedReadings = downsampled
+    ? downsampleReadings(readings, limit)
+    : readings;
+
+  return {
+    history: {
+      window_start: startDate.toISOString(),
+      window_end: now.toISOString(),
+      filters: {
+        device_id: options.device_id ?? null,
+        location: options.location ?? null,
+      },
+      total_matching: totalMatching,
+      returned_count: returnedReadings.length,
+      downsampled,
+      scan_capped: scanCapped,
+      readings: returnedReadings,
+    },
+    summary: computeAirQualitySummaryFromReadings(readings, {
+      period,
+      windowStart: startDate,
+      windowEnd: now,
+      device_id: options.device_id,
+      location: options.location,
+      scanCapped,
+    }),
+  };
+}
+
+/**
+ * Computes statistical aggregations (min, max, average, p95), threshold
  * exceedance counts, and notable spike episodes for a standard period.
  */
 export async function getAirQualitySummary(
@@ -1005,65 +1188,14 @@ export async function getAirQualitySummary(
   }
   readings.reverse();
 
-  const sampleCount = readings.length;
-  if (sampleCount === 0) {
-    return {
-      period: options.period,
-      window_start: startDate.toISOString(),
-      window_end: now.toISOString(),
-      filters: {
-        device_id: options.device_id ?? null,
-        location: options.location ?? null,
-      },
-      sample_count: 0,
-      scan_capped: scanCapped,
-      metrics: null,
-      threshold_exceedances: {
-        co2_above_1000_ppm_count: 0,
-        co2_above_1000_ppm_percent: 0,
-        co2_above_1400_ppm_count: 0,
-        pm2_5_above_9_ug_m3_count: 0,
-        pm2_5_above_9_ug_m3_percent: 0,
-        pm2_5_above_35_4_ug_m3_count: 0,
-      },
-      notable_spikes: [],
-    };
-  }
-
-  const co2Above1000 = readings.filter((r) => r.co2_ppm > CO2_ELEVATED_PPM).length;
-  const co2Above1400 = readings.filter((r) => r.co2_ppm > CO2_HIGH_PPM).length;
-  const pm25Above9 = readings.filter((r) => r.pm2_5_ug_m3 > PM2_5_ELEVATED_UG_M3).length;
-  const pm25Above35_4 = readings.filter((r) => r.pm2_5_ug_m3 > PM2_5_HIGH_UG_M3).length;
-
-  return {
+  return computeAirQualitySummaryFromReadings(readings, {
     period: options.period,
-    window_start: startDate.toISOString(),
-    window_end: now.toISOString(),
-    filters: {
-      device_id: options.device_id ?? null,
-      location: options.location ?? null,
-    },
-    sample_count: sampleCount,
-    scan_capped: scanCapped,
-    metrics: {
-      co2_ppm: computeMetricStats(readings.map((r) => r.co2_ppm), 0),
-      pm2_5_ug_m3: computeMetricStats(readings.map((r) => r.pm2_5_ug_m3), 1),
-      pm10_0_ug_m3: computeMetricStats(readings.map((r) => r.pm10_0_ug_m3), 1),
-      temperature_f: computeMetricStats(readings.map((r) => r.temperature_f), 1),
-      temperature_c: computeMetricStats(readings.map((r) => r.temperature_c), 1),
-      humidity_percent: computeMetricStats(readings.map((r) => r.humidity_percent), 1),
-      aqi_us: computeMetricStats(readings.map((r) => r.aqi_us), 0),
-    },
-    threshold_exceedances: {
-      co2_above_1000_ppm_count: co2Above1000,
-      co2_above_1000_ppm_percent: roundTo((co2Above1000 / sampleCount) * 100, 1),
-      co2_above_1400_ppm_count: co2Above1400,
-      pm2_5_above_9_ug_m3_count: pm25Above9,
-      pm2_5_above_9_ug_m3_percent: roundTo((pm25Above9 / sampleCount) * 100, 1),
-      pm2_5_above_35_4_ug_m3_count: pm25Above35_4,
-    },
-    notable_spikes: detectNotableSpikes(readings),
-  };
+    windowStart: startDate,
+    windowEnd: now,
+    device_id: options.device_id,
+    location: options.location,
+    scanCapped,
+  });
 }
 
 /**

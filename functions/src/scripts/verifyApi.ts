@@ -18,8 +18,20 @@ import type {
 } from "../services/firestore.js";
 import { createMockAirQualityService } from "./localMcpServer.js";
 
-function createMockDashboardService(): DashboardDataService {
+function createMockDashboardService(): {
+  service: DashboardDataService;
+  counts: {
+    getReadingsHistory: number;
+    getAirQualitySummary: number;
+    getReadingsHistoryWithSummary: number;
+  };
+} {
   const baseService = createMockAirQualityService();
+  const counts = {
+    getReadingsHistory: 0,
+    getAirQualitySummary: 0,
+    getReadingsHistoryWithSummary: 0,
+  };
 
   const configs = new Map<string, DeviceConfig>([
     [
@@ -77,7 +89,7 @@ function createMockDashboardService(): DashboardDataService {
     ],
   ]);
 
-  return {
+  const service: DashboardDataService = {
     getSensorStatus: async (options) => {
       const result = await baseService.getSensorStatus(options);
       const devices: DeviceStatus[] = result.devices.map((device) => ({
@@ -94,8 +106,41 @@ function createMockDashboardService(): DashboardDataService {
       return { ...result, devices };
     },
     getLatestReading: (options) => baseService.getLatestReading(options),
-    getReadingsHistory: (options) => baseService.getReadingsHistory(options),
-    getAirQualitySummary: (options) => baseService.getAirQualitySummary(options),
+    getReadingsHistory: async (options) => {
+      counts.getReadingsHistory += 1;
+      return baseService.getReadingsHistory(options);
+    },
+    getAirQualitySummary: async (options) => {
+      counts.getAirQualitySummary += 1;
+      return baseService.getAirQualitySummary(options);
+    },
+    getReadingsHistoryWithSummary: async (options = {}) => {
+      const hours = options.hours ?? 24;
+      const inferredPeriod = hours <= 1 ? "1h" : hours <= 6 ? "6h" : hours <= 24 ? "24h" : "7d";
+      const period = options.period ?? inferredPeriod;
+      const periodHoursMap = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 } as const;
+      if (periodHoursMap[period] === hours) {
+        counts.getReadingsHistoryWithSummary += 1;
+        const [history, summary] = await Promise.all([
+          baseService.getReadingsHistory(options),
+          baseService.getAirQualitySummary({
+            period,
+            device_id: options.device_id,
+            location: options.location,
+          }),
+        ]);
+        return { history, summary };
+      }
+      const [history, summary] = await Promise.all([
+        service.getReadingsHistory(options),
+        service.getAirQualitySummary({
+          period,
+          device_id: options.device_id,
+          location: options.location,
+        }),
+      ]);
+      return { history, summary };
+    },
     getDeviceConfig: async (deviceId) => configs.get(deviceId) ?? null,
     listDeviceConfigs: async () => Object.fromEntries(configs.entries()),
     updateDeviceConfig: async (deviceId, input, updatedBy) => {
@@ -158,6 +203,8 @@ function createMockDashboardService(): DashboardDataService {
       return next;
     },
   };
+
+  return { service, counts };
 }
 
 async function apiRequest(
@@ -224,6 +271,8 @@ async function main(): Promise<void> {
     allowedUserEmails: "owner@example.com",
     bearerFallbackSecret: testFallbackToken,
   };
+
+  const mockDashboard = createMockDashboardService();
 
   const handler = createMcpHttpHandler({
     getAuthConfig: () => authConfig,
@@ -301,7 +350,7 @@ async function main(): Promise<void> {
       },
     },
     service: createMockAirQualityService(),
-    dashboardService: createMockDashboardService(),
+    dashboardService: mockDashboard.service,
   });
 
   const server = http.createServer((req, res) => {
@@ -441,6 +490,21 @@ async function main(): Promise<void> {
     assert.equal(history.status, 200);
     assert.ok(history.body.history);
     assert.ok(history.body.summary);
+    assert.equal(mockDashboard.counts.getReadingsHistoryWithSummary, 1);
+    assert.equal(mockDashboard.counts.getAirQualitySummary, 0);
+
+    const historyMismatchedPeriod = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/readings/history?hours=24&period=7d&device_id=feather-s3-01",
+      { token: fakeUserManagementSessionToken }
+    );
+    assert.equal(historyMismatchedPeriod.status, 200);
+    assert.equal(mockDashboard.counts.getAirQualitySummary, 1);
+    assert.equal(
+      (historyMismatchedPeriod.body.summary as Record<string, unknown>).period,
+      "7d"
+    );
 
     const badHistory = await apiRequest(baseUrl, "GET", "/api/readings/history?hours=999", {
       token: fakeUserManagementSessionToken,

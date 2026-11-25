@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   assessReadingHealth,
+  computeAirQualitySummaryFromReadings,
   computeMetricStats,
   detectNotableSpikes,
   downsampleReadings,
@@ -106,6 +107,30 @@ function runOfflineUnitChecks(): void {
   assert.equal(pmSpike.reading_count, 2);
   assert.equal(pmSpike.severity, "elevated");
   console.log("   [PASS] detectNotableSpikes() contiguous episode grouping & peaks");
+
+  // Pure summary computation (empty + populated)
+  const emptySummary = computeAirQualitySummaryFromReadings([], {
+    period: "24h",
+    windowStart: new Date("2026-11-22T00:00:00Z"),
+    windowEnd: new Date("2026-11-23T00:00:00Z"),
+    scanCapped: false,
+  });
+  assert.equal(emptySummary.sample_count, 0);
+  assert.equal(emptySummary.metrics, null);
+
+  const filledSummary = computeAirQualitySummaryFromReadings(spikeSeries, {
+    period: "24h",
+    windowStart: new Date("2026-11-22T00:00:00Z"),
+    windowEnd: new Date("2026-11-23T00:00:00Z"),
+    device_id: "feather-s3-01",
+    scanCapped: false,
+  });
+  assert.equal(filledSummary.sample_count, 5);
+  assert.equal(filledSummary.metrics?.co2_ppm.max, 1450);
+  assert.equal(filledSummary.threshold_exceedances.co2_above_1000_ppm_count, 3);
+  assert.equal(filledSummary.threshold_exceedances.co2_above_1400_ppm_count, 1);
+  assert.equal(filledSummary.notable_spikes.length, 2);
+  console.log("   [PASS] computeAirQualitySummaryFromReadings() empty & spike aggregation");
 }
 
 async function runLiveFirestoreChecks(): Promise<void> {
