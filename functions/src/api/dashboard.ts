@@ -477,6 +477,9 @@ function matchDeviceConfigRoute(
  *   - GET  /api/me
  *   - GET  /api/dashboard/overview
  *   - GET  /api/readings/history
+ *   - GET  /api/site/config
+ *   - PUT  /api/site/config
+ *   - POST /api/outdoor/refresh
  *   - GET  /api/firmware/releases
  *   - POST /api/firmware/rollout
  *   - GET  /api/devices/:deviceId/config

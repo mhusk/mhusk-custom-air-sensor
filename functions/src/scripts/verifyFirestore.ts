@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   assessReadingHealth,
@@ -15,6 +12,7 @@ import {
   getSensorStatus,
   type AirQualityReading,
 } from "../services/firestore.js";
+import { resolveProjectId } from "./projectId.js";
 
 function makeReading(
   overrides: Partial<AirQualityReading> & { timestamp: string }
@@ -110,29 +108,9 @@ function runOfflineUnitChecks(): void {
   console.log("   [PASS] detectNotableSpikes() contiguous episode grouping & peaks");
 }
 
-function resolveProjectIdFromFirebaserc(): string | undefined {
-  const envProject =
-    process.env.GCLOUD_PROJECT ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.FIREBASE_PROJECT_ID;
-  if (envProject) {
-    return envProject;
-  }
-
-  const currentDir = path.dirname(fileURLToPath(import.meta.url));
-  const firebasercPath = path.resolve(currentDir, "../../..", ".firebaserc");
-  if (!fs.existsSync(firebasercPath)) {
-    return undefined;
-  }
-  const raw = JSON.parse(fs.readFileSync(firebasercPath, "utf8")) as {
-    projects?: { default?: string };
-  };
-  return raw.projects?.default;
-}
-
 async function runLiveFirestoreChecks(): Promise<void> {
   console.log("\n2. Running live Cloud Firestore query checks...");
-  const projectId = resolveProjectIdFromFirebaserc();
+  const projectId = resolveProjectId();
   if (!projectId) {
     throw new Error(
       "Could not determine Firebase project ID. Ensure .firebaserc exists or set FIREBASE_PROJECT_ID."

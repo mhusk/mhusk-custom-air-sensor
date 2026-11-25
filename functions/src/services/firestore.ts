@@ -311,7 +311,7 @@ export function getDb(options?: AppOptions): Firestore {
   return getFirestore();
 }
 
-function roundTo(value: number, decimals: number): number {
+export function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
 }
@@ -333,11 +333,11 @@ function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
-function normalizeTimestampToDate(value: unknown): Date {
+export function parseTimestampToDateOrNull(value: unknown): Date | null {
   if (value instanceof Timestamp) {
     return value.toDate();
   }
-  if (value instanceof Date) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value;
   }
   if (
@@ -346,15 +346,22 @@ function normalizeTimestampToDate(value: unknown): Date {
     "toDate" in value &&
     typeof (value as { toDate: unknown }).toDate === "function"
   ) {
-    return (value as { toDate: () => Date }).toDate();
+    const converted = (value as { toDate: () => Date }).toDate();
+    if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+      return converted;
+    }
   }
-  if (typeof value === "string") {
+  if (typeof value === "string" || typeof value === "number") {
     const parsed = new Date(value);
     if (!Number.isNaN(parsed.getTime())) {
       return parsed;
     }
   }
-  return new Date(0);
+  return null;
+}
+
+function normalizeTimestampToDate(value: unknown): Date {
+  return parseTimestampToDateOrNull(value) ?? new Date(0);
 }
 
 function parseIsoDate(value: string, fieldName: string): Date {
@@ -1165,13 +1172,16 @@ export async function updateDeviceConfig(
   });
 }
 
-/**
- * Atomically stamps `reboot_requested_at = now` and increments `config_version`
- * on `device_configs/{deviceId}` to trigger a safe one-shot remote reboot.
- */
-export async function requestDeviceReboot(
+async function mutateDeviceConfigWithDefaults(
   deviceId: string,
   updatedBy: string,
+  buildOverrides: (params: {
+    cfgData: DocumentData | undefined;
+    nowTs: Timestamp;
+  }) => {
+    reboot_requested_at: unknown;
+    target_firmware_version: string | null;
+  },
   db: Firestore = getDb()
 ): Promise<DeviceConfig> {
   const configRef = db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId);
@@ -1191,6 +1201,7 @@ export async function requestDeviceReboot(
         ? Math.trunc(cfgData.config_version)
         : 0;
     const nextVersion = Math.min(1_000_000, Math.max(1, prevVersion + 1));
+    const overrides = buildOverrides({ cfgData, nowTs });
 
     const payload = {
       device_id: deviceId,
@@ -1213,8 +1224,8 @@ export async function requestDeviceReboot(
             ? devData.led_enabled
             : true,
       config_version: nextVersion,
-      reboot_requested_at: nowTs,
-      target_firmware_version: cfgData?.target_firmware_version ?? null,
+      reboot_requested_at: overrides.reboot_requested_at,
+      target_firmware_version: overrides.target_firmware_version,
       updated_at: nowTs,
       updated_by: updatedBy,
     };
@@ -1222,6 +1233,29 @@ export async function requestDeviceReboot(
     tx.set(configRef, payload);
     return mapDeviceConfigData(deviceId, payload);
   });
+}
+
+/**
+ * Atomically stamps `reboot_requested_at = now` and increments `config_version`
+ * on `device_configs/{deviceId}` to trigger a safe one-shot remote reboot.
+ */
+export async function requestDeviceReboot(
+  deviceId: string,
+  updatedBy: string,
+  db: Firestore = getDb()
+): Promise<DeviceConfig> {
+  return mutateDeviceConfigWithDefaults(
+    deviceId,
+    updatedBy,
+    ({ cfgData, nowTs }) => ({
+      reboot_requested_at: nowTs,
+      target_firmware_version:
+        typeof cfgData?.target_firmware_version === "string"
+          ? cfgData.target_firmware_version
+          : null,
+    }),
+    db
+  );
 }
 
 /**
@@ -1238,54 +1272,15 @@ export async function setDeviceTargetFirmwareVersion(
     throw new Error(`Invalid target_firmware_version '${targetVersion}'.`);
   }
 
-  const configRef = db.collection(DEVICE_CONFIGS_COLLECTION).doc(deviceId);
-  const deviceRef = db.collection(DEVICES_COLLECTION).doc(deviceId);
-  const nowTs = Timestamp.now();
-
-  return db.runTransaction(async (tx) => {
-    const [existingCfg, existingDevice] = await Promise.all([
-      tx.get(configRef),
-      tx.get(deviceRef),
-    ]);
-    const cfgData = existingCfg.exists ? existingCfg.data() : undefined;
-    const devData = existingDevice.exists ? existingDevice.data() : undefined;
-
-    const prevVersion =
-      cfgData && typeof cfgData.config_version === "number"
-        ? Math.trunc(cfgData.config_version)
-        : 0;
-    const nextVersion = Math.min(1_000_000, Math.max(1, prevVersion + 1));
-
-    const payload = {
-      device_id: deviceId,
-      location: asString(cfgData?.location ?? devData?.location, "home-office"),
-      reporting_interval_seconds: Math.round(
-        asNumber(
-          cfgData?.reporting_interval_seconds ?? devData?.reporting_interval_seconds,
-          300
-        )
-      ),
-      temperature_offset_c: roundTo(
-        asNumber(cfgData?.temperature_offset_c ?? devData?.temperature_offset_c, 4.0),
-        2
-      ),
-      altitude_m: Math.round(asNumber(cfgData?.altitude_m ?? devData?.altitude_m, 0)),
-      led_enabled:
-        typeof cfgData?.led_enabled === "boolean"
-          ? cfgData.led_enabled
-          : typeof devData?.led_enabled === "boolean"
-            ? devData.led_enabled
-            : true,
-      config_version: nextVersion,
+  return mutateDeviceConfigWithDefaults(
+    deviceId,
+    updatedBy,
+    ({ cfgData }) => ({
       reboot_requested_at: cfgData?.reboot_requested_at ?? null,
       target_firmware_version: targetVersion,
-      updated_at: nowTs,
-      updated_by: updatedBy,
-    };
-
-    tx.set(configRef, payload);
-    return mapDeviceConfigData(deviceId, payload);
-  });
+    }),
+    db
+  );
 }
 
 /**

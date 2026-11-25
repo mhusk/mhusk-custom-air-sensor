@@ -6,7 +6,10 @@ import {
 } from "firebase-admin/firestore";
 
 import {
+  downsampleReadings,
   getDb,
+  parseTimestampToDateOrNull,
+  roundTo,
   type AirQualityReading,
   type AqiCategory,
   type DeviceLatestReadingSnapshot,
@@ -84,11 +87,6 @@ export interface OpenMeteoFetchDependencies {
   now?: () => Date;
 }
 
-function roundTo(value: number, decimals: number): number {
-  const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
-}
-
 function toNumberOrNull(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -96,22 +94,6 @@ function toNumberOrNull(value: unknown): number | null {
   if (typeof value === "string" && value.trim() !== "") {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function toDate(value: unknown): Date | null {
-  if (value instanceof Timestamp) {
-    return value.toDate();
-  }
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value;
-  }
-  if (typeof value === "string" || typeof value === "number") {
-    const parsed = new Date(value);
-    if (!Number.isNaN(parsed.getTime())) {
       return parsed;
     }
   }
@@ -277,7 +259,7 @@ function mapSiteLocationConfigDoc(
         )
       : DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES;
 
-  const updatedAt = toDate(data.updated_at) ?? new Date(0);
+  const updatedAt = parseTimestampToDateOrNull(data.updated_at) ?? new Date(0);
   const updatedBy =
     typeof data.updated_by === "string" && data.updated_by.trim().length > 0
       ? data.updated_by.trim()
@@ -296,7 +278,7 @@ function mapSiteLocationConfigDoc(
 
 function mapOutdoorReadingDoc(doc: QueryDocumentSnapshot<DocumentData>): OutdoorReading | null {
   const data = doc.data();
-  const timestamp = toDate(data.timestamp);
+  const timestamp = parseTimestampToDateOrNull(data.timestamp);
   const temperatureC = toNumberOrNull(data.temperature_c);
   const temperatureF = toNumberOrNull(data.temperature_f);
   const humidityPercent = toNumberOrNull(data.humidity_percent);
@@ -575,17 +557,7 @@ export async function getOutdoorReadingsHistory(
     }
   }
 
-  if (readings.length <= clampedLimit) {
-    return readings;
-  }
-
-  // Evenly downsample preserving first & last samples
-  const step = (readings.length - 1) / (clampedLimit - 1);
-  const sampled: OutdoorReading[] = [];
-  for (let i = 0; i < clampedLimit; i += 1) {
-    sampled.push(readings[Math.round(i * step)]);
-  }
-  return sampled;
+  return downsampleReadings(readings, clampedLimit);
 }
 
 /**

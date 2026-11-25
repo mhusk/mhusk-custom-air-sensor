@@ -106,7 +106,7 @@ function errorToolResult(toolName: string, error: unknown): CallToolResult {
 }
 
 /**
- * Registers all four indoor air quality MCP tools on the provided McpServer.
+ * Registers all five indoor/outdoor air quality MCP tools on the provided McpServer.
  */
 export function registerAirQualityTools(
   server: McpServer,

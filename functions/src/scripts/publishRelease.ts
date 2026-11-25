@@ -17,6 +17,9 @@ import {
   setDeviceTargetFirmwareVersion,
   type FirmwareReleaseFileEntry,
 } from "../services/firestore.js";
+import { getDefaultRepoRoot, resolveProjectId } from "./projectId.js";
+
+export { getDefaultRepoRoot, resolveProjectId };
 
 export const DEFAULT_CORE_OTA_FILES = [
   "app.py",
@@ -76,35 +79,6 @@ export interface BuildReleaseBundleOptions {
   publishedBy?: string;
   gitSha?: string | null;
   allowVersionMismatch?: boolean;
-}
-
-export function getDefaultRepoRoot(): string {
-  const currentDir = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(currentDir, "../../..");
-}
-
-export function resolveProjectId(explicitProjectId?: string): string | undefined {
-  if (explicitProjectId && explicitProjectId.trim().length > 0) {
-    return explicitProjectId.trim();
-  }
-
-  const envProject =
-    process.env.FIREBASE_PROJECT_ID ??
-    process.env.GCLOUD_PROJECT ??
-    process.env.GOOGLE_CLOUD_PROJECT;
-  if (envProject && envProject.trim().length > 0) {
-    return envProject.trim();
-  }
-
-  const firebasercPath = path.join(getDefaultRepoRoot(), ".firebaserc");
-  if (!fs.existsSync(firebasercPath)) {
-    return undefined;
-  }
-
-  const raw = JSON.parse(fs.readFileSync(firebasercPath, "utf8")) as {
-    projects?: { default?: string };
-  };
-  return raw.projects?.default;
 }
 
 export function extractAppFirmwareVersion(appPySource: string): string | null {

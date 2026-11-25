@@ -1,9 +1,8 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { extractBearerToken, timingSafeSecretEqual } from "../auth/workos.js";
 import {
   assessReadingHealth,
   computeMetricStats,
@@ -15,29 +14,14 @@ import {
 } from "../services/firestore.js";
 import { handleStatelessMcpHttpRequest } from "../mcp/server.js";
 import type { AirQualityDataService } from "../mcp/tools.js";
+import { resolveProjectId } from "./projectId.js";
 
 /**
  * Resolves the Firebase project ID from environment variables or the local
- * gitignored `.firebaserc` file (matching `verifyFirestore.ts`).
+ * gitignored `.firebaserc` file.
  */
 export function resolveProjectIdFromFirebaserc(): string | undefined {
-  const envProject =
-    process.env.GCLOUD_PROJECT ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.FIREBASE_PROJECT_ID;
-  if (envProject) {
-    return envProject;
-  }
-
-  const currentDir = path.dirname(fileURLToPath(import.meta.url));
-  const firebasercPath = path.resolve(currentDir, "../../..", ".firebaserc");
-  if (!fs.existsSync(firebasercPath)) {
-    return undefined;
-  }
-  const raw = JSON.parse(fs.readFileSync(firebasercPath, "utf8")) as {
-    projects?: { default?: string };
-  };
-  return raw.projects?.default;
+  return resolveProjectId();
 }
 
 /**
@@ -234,17 +218,11 @@ export function createMockAirQualityService(): AirQualityDataService {
 }
 
 function isBearerAuthorized(req: IncomingMessage, expectedSecret: string): boolean {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  const provided = extractBearerToken(req);
+  if (!provided) {
     return false;
   }
-  const provided = authHeader.slice("Bearer ".length).trim();
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expectedSecret, "utf8");
-  if (a.length !== b.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(a, b);
+  return timingSafeSecretEqual(provided, expectedSecret);
 }
 
 export interface LocalMcpHttpServerOptions {
