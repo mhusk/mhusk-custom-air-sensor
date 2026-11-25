@@ -23,6 +23,7 @@ export const DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES = 15;
 export const MIN_OUTDOOR_POLL_INTERVAL_MINUTES = 5;
 export const MAX_OUTDOOR_POLL_INTERVAL_MINUTES = 60;
 export const OUTDOOR_STALE_THRESHOLD_MINUTES = 45;
+export const OUTDOOR_SYNC_LEASE_MS = 60_000;
 export const OPEN_METEO_TIMEOUT_MS = 8000;
 
 export interface SiteLocationConfig {
@@ -561,12 +562,31 @@ export async function getOutdoorReadingsHistory(
 }
 
 /**
+ * Builds a deterministic interval-bucketed document ID for scheduled/trigger syncs
+ * so concurrent invocations converge on one document, or an exact timestamp ID
+ * when `force` is requested by the user.
+ */
+export function buildOutdoorReadingDocId(
+  now: Date,
+  pollIntervalMinutes: number,
+  force: boolean
+): string {
+  if (force) {
+    return `outdoor_${now.toISOString().replace(/[:.]/g, "-")}`;
+  }
+  const intervalMs = Math.max(1, pollIntervalMinutes) * 60_000;
+  const bucketMs = Math.floor(now.getTime() / intervalMs) * intervalMs;
+  return `outdoor_${new Date(bucketMs).toISOString().replace(/[:.]/g, "-")}`;
+}
+
+/**
  * Checks whether a fresh outdoor weather + AQI reading should be fetched from
  * Open-Meteo and written to `outdoor_readings`.
  *
  * Called automatically by the `syncOutdoorOnReading` Firestore trigger (throttled
- * by `outdoor_poll_interval_minutes`, default 15 min) and on-demand when the user
- * updates their Home Location or clicks Refresh.
+ * by `outdoor_poll_interval_minutes`, default 15 min, and coalesced via a
+ * Firestore transaction lease) and on-demand when the user updates their Home
+ * Location or clicks Refresh.
  */
 export async function syncOutdoorReadingIfStale(
   options: { force?: boolean; db?: Firestore; deps?: OpenMeteoFetchDependencies } = {}
@@ -577,41 +597,117 @@ export async function syncOutdoorReadingIfStale(
 }> {
   const db = options.db ?? getDb();
   const now = options.deps?.now ? options.deps.now() : new Date();
+  const force = Boolean(options.force);
+  const siteRef = db.collection(SITE_CONFIGS_COLLECTION).doc(HOME_SITE_CONFIG_ID);
 
-  const siteConfig = await getSiteLocationConfig(db);
-  if (!siteConfig) {
-    return {
-      synced: false,
-      reason: "site_location_not_configured",
-      reading: null,
-    };
-  }
+  let siteConfig: SiteLocationConfig | null = null;
 
-  const latest = await getLatestOutdoorReading(db, now);
-  if (
-    !options.force &&
-    latest &&
-    latest.minutes_ago < siteConfig.outdoor_poll_interval_minutes
-  ) {
-    return {
-      synced: false,
-      reason: `cached_fresh (${latest.minutes_ago}m < ${siteConfig.outdoor_poll_interval_minutes}m)`,
-      reading: latest.reading,
-    };
+  if (!force) {
+    type LeaseOutcome =
+      | { status: "unconfigured" }
+      | { status: "cached_fresh"; siteConfig: SiteLocationConfig; minutesAgo: number }
+      | { status: "sync_in_progress"; siteConfig: SiteLocationConfig }
+      | { status: "acquired"; siteConfig: SiteLocationConfig };
+
+    const lease: LeaseOutcome = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(siteRef);
+      if (!snap.exists) {
+        return { status: "unconfigured" };
+      }
+      const data = snap.data();
+      const cfg = data ? mapSiteLocationConfigDoc(snap.id, data) : null;
+      if (!cfg) {
+        return { status: "unconfigured" };
+      }
+
+      const lastSynced = parseTimestampToDateOrNull(data?.outdoor_last_synced_at);
+      if (lastSynced) {
+        const elapsedMs = Math.max(0, now.getTime() - lastSynced.getTime());
+        const pollMs = cfg.outdoor_poll_interval_minutes * 60_000;
+        if (elapsedMs < pollMs) {
+          return {
+            status: "cached_fresh",
+            siteConfig: cfg,
+            minutesAgo: roundTo(elapsedMs / 60_000, 1),
+          };
+        }
+      }
+
+      const lastAttempt = parseTimestampToDateOrNull(data?.outdoor_last_sync_attempt_at);
+      if (lastAttempt) {
+        const attemptAgeMs = Math.max(0, now.getTime() - lastAttempt.getTime());
+        if (attemptAgeMs < OUTDOOR_SYNC_LEASE_MS) {
+          return { status: "sync_in_progress", siteConfig: cfg };
+        }
+      }
+
+      tx.set(
+        siteRef,
+        { outdoor_last_sync_attempt_at: Timestamp.fromDate(now) },
+        { merge: true }
+      );
+      return { status: "acquired", siteConfig: cfg };
+    });
+
+    if (lease.status === "unconfigured") {
+      return {
+        synced: false,
+        reason: "site_location_not_configured",
+        reading: null,
+      };
+    }
+
+    if (lease.status === "cached_fresh" || lease.status === "sync_in_progress") {
+      const latest = await getLatestOutdoorReading(db, now);
+      return {
+        synced: false,
+        reason:
+          lease.status === "cached_fresh"
+            ? `cached_fresh (${lease.minutesAgo}m < ${lease.siteConfig.outdoor_poll_interval_minutes}m)`
+            : "sync_in_progress",
+        reading: latest?.reading ?? null,
+      };
+    }
+
+    siteConfig = lease.siteConfig;
+    const latest = await getLatestOutdoorReading(db, now);
+    if (latest && latest.minutes_ago < siteConfig.outdoor_poll_interval_minutes) {
+      return {
+        synced: false,
+        reason: `cached_fresh (${latest.minutes_ago}m < ${siteConfig.outdoor_poll_interval_minutes}m)`,
+        reading: latest.reading,
+      };
+    }
+  } else {
+    siteConfig = await getSiteLocationConfig(db);
+    if (!siteConfig) {
+      return {
+        synced: false,
+        reason: "site_location_not_configured",
+        reading: null,
+      };
+    }
   }
 
   const snapshot = await fetchOpenMeteoSnapshot(siteConfig, options.deps);
-  const docId = `outdoor_${now.toISOString().replace(/[:.]/g, "-")}`;
+  const docId = buildOutdoorReadingDocId(
+    now,
+    siteConfig.outdoor_poll_interval_minutes,
+    force
+  );
   const writeData = {
     ...snapshot,
     timestamp: Timestamp.fromDate(new Date(snapshot.timestamp)),
   };
 
-  await db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData);
+  await Promise.all([
+    db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData),
+    siteRef.set({ outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true }),
+  ]);
 
   return {
     synced: true,
-    reason: options.force ? "forced_refresh" : "cache_expired",
+    reason: force ? "forced_refresh" : "cache_expired",
     reading: {
       id: docId,
       ...snapshot,

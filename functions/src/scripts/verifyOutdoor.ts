@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
+import type { Firestore } from "firebase-admin/firestore";
+
 import type { DashboardDataService } from "../api/dashboard.js";
 import { createMcpHttpHandler } from "../index.js";
 import type { AirQualityDataService } from "../mcp/tools.js";
@@ -18,10 +20,15 @@ import {
   type DeviceStatus,
 } from "../services/firestore.js";
 import {
+  HOME_SITE_CONFIG_ID,
+  OUTDOOR_READINGS_COLLECTION,
+  SITE_CONFIGS_COLLECTION,
+  buildOutdoorReadingDocId,
   computeIndoorOutdoorDelta,
   describeWmoWeatherCode,
   fetchOpenMeteoSnapshot,
   mapUsAqiCategory,
+  syncOutdoorReadingIfStale,
   type LatestOutdoorReadingResult,
   type OutdoorReading,
   type SiteLocationConfig,
@@ -433,10 +440,177 @@ async function testApiAndMcpIntegration(): Promise<void> {
   }
 }
 
+async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
+  const fixedNow = new Date("2026-11-24T17:07:30.000Z");
+  assert.equal(
+    buildOutdoorReadingDocId(fixedNow, 15, false),
+    "outdoor_2026-11-24T17-00-00-000Z"
+  );
+  assert.equal(
+    buildOutdoorReadingDocId(fixedNow, 15, true),
+    "outdoor_2026-11-24T17-07-30-000Z"
+  );
+
+  const store = new Map<string, Map<string, Record<string, unknown>>>([
+    [
+      SITE_CONFIGS_COLLECTION,
+      new Map([
+        [
+          HOME_SITE_CONFIG_ID,
+          {
+            label: "Home Outdoor",
+            latitude: 37.7749,
+            longitude: -122.4194,
+            outdoor_poll_interval_minutes: 15,
+            updated_at: "2026-11-24T16:00:00.000Z",
+            updated_by: "owner@example.com",
+          },
+        ],
+      ]),
+    ],
+    [OUTDOOR_READINGS_COLLECTION, new Map()],
+  ]);
+
+  let txLock: Promise<void> = Promise.resolve();
+  const makeDocRef = (colName: string, docId: string) => ({
+    colName,
+    docId,
+    async get() {
+      const data = store.get(colName)?.get(docId);
+      return {
+        id: docId,
+        exists: data !== undefined,
+        data: () => (data ? { ...data } : undefined),
+      };
+    },
+    async set(data: Record<string, unknown>, opts?: { merge?: boolean }) {
+      const col = store.get(colName) ?? new Map<string, Record<string, unknown>>();
+      store.set(colName, col);
+      const existing = opts?.merge ? (col.get(docId) ?? {}) : {};
+      col.set(docId, { ...existing, ...data });
+    },
+  });
+
+  const mockDb = {
+    collection(colName: string) {
+      return {
+        doc: (docId: string) => makeDocRef(colName, docId),
+        orderBy: (_field: string, dir: string) => ({
+          limit: (n: number) => ({
+            async get() {
+              const col = store.get(colName) ?? new Map<string, Record<string, unknown>>();
+              const docs = Array.from(col.entries()).map(([id, data]) => ({
+                id,
+                data: () => ({ ...data }),
+              }));
+              docs.sort((a, b) => {
+                const ta = String(a.data().timestamp ?? "");
+                const tb = String(b.data().timestamp ?? "");
+                return dir === "desc" ? tb.localeCompare(ta) : ta.localeCompare(tb);
+              });
+              const sliced = docs.slice(0, n);
+              return { empty: sliced.length === 0, docs: sliced };
+            },
+          }),
+        }),
+      };
+    },
+    async runTransaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
+      const prev = txLock;
+      let release!: () => void;
+      txLock = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await prev;
+      try {
+        const tx = {
+          get: (ref: ReturnType<typeof makeDocRef>) => ref.get(),
+          set: (
+            ref: ReturnType<typeof makeDocRef>,
+            data: Record<string, unknown>,
+            opts?: { merge?: boolean }
+          ) => {
+            const col = store.get(ref.colName) ?? new Map<string, Record<string, unknown>>();
+            store.set(ref.colName, col);
+            const existing = opts?.merge ? (col.get(ref.docId) ?? {}) : {};
+            col.set(ref.docId, { ...existing, ...data });
+          },
+        };
+        return await fn(tx);
+      } finally {
+        release();
+      }
+    },
+  } as unknown as Firestore;
+
+  let fetchCalls = 0;
+  const mockFetch: typeof fetch = async (input) => {
+    fetchCalls += 1;
+    const url = String(input);
+    if (url.includes("api.open-meteo.com/v1/forecast")) {
+      return new Response(
+        JSON.stringify({
+          current: {
+            temperature_2m: 14.5,
+            relative_humidity_2m: 62,
+            apparent_temperature: 13.4,
+            weather_code: 2,
+            wind_speed_10m: 7.4,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        current: { pm2_5: 7.2, pm10: 14.0, us_aqi: 34, ozone: 48.0, nitrogen_dioxide: 9.5 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const [first, second] = await Promise.all([
+    syncOutdoorReadingIfStale({
+      db: mockDb,
+      deps: { fetchImpl: mockFetch, now: () => fixedNow },
+    }),
+    syncOutdoorReadingIfStale({
+      db: mockDb,
+      deps: { fetchImpl: mockFetch, now: () => fixedNow },
+    }),
+  ]);
+
+  assert.equal(fetchCalls, 2, "Expected exactly 1 Open-Meteo sync cycle (weather + AQ)");
+  assert.equal(
+    [first.synced, second.synced].filter(Boolean).length,
+    1,
+    "Expected only one concurrent trigger to acquire the sync lease"
+  );
+  assert.equal(
+    store.get(OUTDOOR_READINGS_COLLECTION)?.size,
+    1,
+    "Expected only 1 outdoor_readings doc written"
+  );
+
+  // Explicit force=true bypasses the lease and writes a new snapshot
+  const forcedNow = new Date("2026-11-24T17:08:00.000Z");
+  const forced = await syncOutdoorReadingIfStale({
+    force: true,
+    db: mockDb,
+    deps: { fetchImpl: mockFetch, now: () => forcedNow },
+  });
+  assert.equal(forced.synced, true);
+  assert.equal(forced.reason, "forced_refresh");
+  assert.equal(fetchCalls, 4);
+  assert.equal(store.get(OUTDOOR_READINGS_COLLECTION)?.size, 2);
+  console.log("[PASS] 5. Concurrent outdoor sync coalesces via lease while force=true refreshes");
+}
+
 async function main(): Promise<void> {
   await testOpenMeteoParsing();
   testIndoorOutdoorDelta();
   await testApiAndMcpIntegration();
+  await testConcurrentOutdoorSyncCoalescing();
   console.log("\nAll Outdoor Weather & AQI verification checks passed!");
 }
 
