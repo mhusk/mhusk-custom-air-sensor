@@ -22,6 +22,7 @@ export interface WorkosAuthConfig {
   workosAuthKitDomain?: string;
   allowedUserEmails?: string;
   bearerFallbackSecret?: string;
+  allowedDashboardOrigins?: string;
 }
 
 export interface ParsedAllowlist {

@@ -270,6 +270,7 @@ async function main(): Promise<void> {
     workosAuthKitDomain: fakeAuthKitDomain,
     allowedUserEmails: "owner@example.com",
     bearerFallbackSecret: testFallbackToken,
+    allowedDashboardOrigins: "https://dashboard.example.web.app",
   };
 
   const mockDashboard = createMockDashboardService();
@@ -660,6 +661,31 @@ async function main(): Promise<void> {
     assert.equal(fleetRes.body.updated_count, 1);
     assert.equal(fleetRes.body.target_firmware_version, "1.3.2");
     console.log("[PASS] 10. POST /api/firmware/rollout promotes active release across fleet and rejects yanked builds");
+
+    // 11. /api/* CORS restricts cross-origins to explicit allowlist + localhost + same-origin
+    const localCorsRes = await fetch(`${baseUrl}/api/auth/config`, {
+      headers: { Origin: "http://localhost:5000" },
+    });
+    assert.equal(localCorsRes.status, 200);
+    assert.equal(localCorsRes.headers.get("access-control-allow-origin"), "http://localhost:5000");
+
+    const allowedCorsRes = await fetch(`${baseUrl}/api/dashboard/overview`, {
+      method: "OPTIONS",
+      headers: { Origin: "https://dashboard.example.web.app" },
+    });
+    assert.equal(allowedCorsRes.status, 204);
+    assert.equal(
+      allowedCorsRes.headers.get("access-control-allow-origin"),
+      "https://dashboard.example.web.app"
+    );
+
+    const untrustedCorsRes = await fetch(`${baseUrl}/api/auth/config`, {
+      headers: { Origin: "https://evil.example.com" },
+    });
+    assert.equal(untrustedCorsRes.status, 200);
+    assert.equal(untrustedCorsRes.headers.get("access-control-allow-origin"), null);
+    assert.equal(untrustedCorsRes.headers.get("vary"), "Origin");
+    console.log("[PASS] 11. /api/* CORS allows localhost & allowlisted origins and omits untrusted origins");
 
     console.log("\nAll Dashboard API & WorkOS Auth verification checks passed!");
   } finally {

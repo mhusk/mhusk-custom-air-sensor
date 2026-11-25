@@ -133,12 +133,82 @@ function getNormalizedPathname(req: IncomingMcpRequest): string | null {
   }
 }
 
-function setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
-  const requestOrigin = getHeaderString(req.headers.origin);
-  res.setHeader("Access-Control-Allow-Origin", requestOrigin ?? "*");
-  if (requestOrigin) {
-    res.setHeader("Vary", "Origin");
+const LOCAL_DEV_ORIGIN_REGEX = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+
+function parseAllowedDashboardOrigins(raw?: string): Set<string> {
+  const origins = new Set<string>();
+  if (!raw) {
+    return origins;
   }
+  for (const part of raw.split(/[\s,;]+/)) {
+    const trimmed = part.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        origins.add(parsed.origin);
+      }
+    } catch {
+      // Ignore malformed origin entries
+    }
+  }
+  return origins;
+}
+
+function isAllowedDashboardOrigin(
+  requestOrigin: string,
+  publicOrigin: string,
+  allowedOriginsRaw?: string
+): boolean {
+  let normalizedOrigin: string;
+  try {
+    normalizedOrigin = new URL(requestOrigin).origin;
+  } catch {
+    return false;
+  }
+
+  if (normalizedOrigin === publicOrigin || LOCAL_DEV_ORIGIN_REGEX.test(normalizedOrigin)) {
+    return true;
+  }
+
+  return parseAllowedDashboardOrigins(allowedOriginsRaw).has(normalizedOrigin);
+}
+
+function setCorsHeaders(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: {
+    pathname: string;
+    publicOrigin: string;
+    allowedDashboardOrigins?: string;
+  }
+): void {
+  const requestOrigin = getHeaderString(req.headers.origin)?.trim();
+  const isApiRoute =
+    options.pathname === "/api" || options.pathname.startsWith("/api/");
+
+  if (isApiRoute) {
+    if (requestOrigin) {
+      res.setHeader("Vary", "Origin");
+      if (
+        isAllowedDashboardOrigin(
+          requestOrigin,
+          options.publicOrigin,
+          options.allowedDashboardOrigins
+        )
+      ) {
+        res.setHeader("Access-Control-Allow-Origin", requestOrigin);
+      }
+    }
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", requestOrigin ?? "*");
+    if (requestOrigin) {
+      res.setHeader("Vary", "Origin");
+    }
+  }
+
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
@@ -174,7 +244,15 @@ export function createMcpHttpHandler(
     options.loadAuthorizationServerMetadata ?? fetchAuthorizationServerMetadata;
 
   return async (req: IncomingMcpRequest, res: ServerResponse): Promise<void> => {
-    setCorsHeaders(req, res);
+    const pathname = getNormalizedPathname(req);
+    const origin = getPublicOrigin(req);
+    const authConfig = options.getAuthConfig();
+
+    setCorsHeaders(req, res, {
+      pathname: pathname ?? "/",
+      publicOrigin: origin,
+      allowedDashboardOrigins: authConfig.allowedDashboardOrigins,
+    });
 
     if (req.method === "OPTIONS") {
       res.statusCode = 204;
@@ -182,7 +260,6 @@ export function createMcpHttpHandler(
       return;
     }
 
-    const pathname = getNormalizedPathname(req);
     if (pathname === null) {
       sendJson(res, 400, {
         error: "invalid_request",
@@ -190,8 +267,6 @@ export function createMcpHttpHandler(
       });
       return;
     }
-    const origin = getPublicOrigin(req);
-    const authConfig = options.getAuthConfig();
     const authkitDomain = normalizeAuthKitDomain(authConfig.workosAuthKitDomain);
 
     // 1. Public liveness/health check (reveals zero secrets or user info)
@@ -332,6 +407,7 @@ const cloudFunctionHandler = createMcpHttpHandler({
     workosAuthKitDomain: workosAuthKitDomain.value(),
     allowedUserEmails: allowedUserEmails.value(),
     bearerFallbackSecret: mcpBearerFallbackSecret.value(),
+    allowedDashboardOrigins: process.env.ALLOWED_DASHBOARD_ORIGINS,
   }),
 });
 

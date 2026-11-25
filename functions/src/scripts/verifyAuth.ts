@@ -335,6 +335,18 @@ async function main(): Promise<void> {
     assert.equal(failClosed.status, 403);
     console.log("[PASS] Empty ALLOWED_USER_EMAILS fails closed with 403 Forbidden");
 
+    // 15. /mcp preserves open CORS for remote AI assistants and MCP Inspector
+    const mcpCorsRes = await fetch(mcpUrl, {
+      method: "OPTIONS",
+      headers: { Origin: "https://inspector.modelcontextprotocol.io" },
+    });
+    assert.equal(mcpCorsRes.status, 204);
+    assert.equal(
+      mcpCorsRes.headers.get("access-control-allow-origin"),
+      "https://inspector.modelcontextprotocol.io"
+    );
+    console.log("[PASS] /mcp retains open CORS for remote MCP clients");
+
     console.log("\nAll WorkOS OAuth 2.1, allowlist, and discovery checks passed!");
   } finally {
     await new Promise<void>((resolve, reject) => {
