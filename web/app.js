@@ -36,16 +36,22 @@ import { renderTrendChartCard } from "./charts.js";
 // Application State
 // ============================================================================
 
+const CLIENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CLIENT_CHART_CACHE_ENTRIES = 24;
+
 const state = {
   authConfig: null,
   session: null,
   overview: null,
   releases: [],
+  releasesLoadedAt: 0,
+  releasesLoading: false,
   activeTab: "overview",
   selectedDeviceId: null,
   hours: 24,
   period: "24h",
   historyPayload: null,
+  chartsCache: new Map(),
   editingDeviceId: null,
   pendingRollout: null,
   isRefreshing: false,
@@ -433,6 +439,10 @@ function installTabsController() {
         panel.hidden = "until-found";
       }
     });
+
+    if (state.activeTab === "fleet" && state.session) {
+      loadFirmwareReleases();
+    }
   };
 
   tabs.forEach((tab, i) => {
@@ -1556,7 +1566,7 @@ async function executePendingRollout() {
       showBanner(msg, plan.targetVersion === null ? "warn" : "success");
     }
 
-    await refreshDashboard({ silentBanner: true });
+    await refreshOverviewOnly({ forceRefresh: true, silentBanner: true });
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
       handleSessionExpired();
@@ -1679,7 +1689,7 @@ async function handleSettingsSubmit(event) {
     els.settingsSuccess.textContent = `Saved config v${ver}. The sensor will apply these settings on its next check-in.`;
     els.settingsSuccess.hidden = false;
 
-    await refreshDashboard({ silentBanner: true });
+    await refreshOverviewOnly({ forceRefresh: true, silentBanner: true });
     const updatedItem = state.overview?.devices?.find(
       (d) => d.device.device_id === state.editingDeviceId
     );
@@ -1714,7 +1724,7 @@ async function executeRemoteReboot() {
     els.settingsSuccess.textContent = `Reboot requested (config v${ver}). The sensor will reboot once on its next check-in.`;
     els.settingsSuccess.hidden = false;
 
-    await refreshDashboard({ silentBanner: true });
+    await refreshOverviewOnly({ forceRefresh: true, silentBanner: true });
     const updatedItem = state.overview?.devices?.find(
       (d) => d.device.device_id === state.editingDeviceId
     );
@@ -1785,7 +1795,9 @@ async function handleSiteLocationSubmit(event) {
         ? `Saved ${payload.label} and fetched live outdoor reading (${Number(syncedTemp).toFixed(1)}°F).`
         : `Saved ${payload.label} to Firestore.`;
     els.siteSuccess.hidden = false;
-    await refreshDashboard({ silentBanner: true });
+    state.chartsCache.clear();
+    await refreshOverviewOnly({ forceRefresh: true, silentBanner: true });
+    await loadCharts({ forceRefresh: true });
     showBanner(`Outdoor location "${payload.label}" saved and synced from Open-Meteo.`, "success");
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
@@ -1807,7 +1819,9 @@ async function handleOutdoorRefresh(button) {
   button.textContent = "Fetching…";
   try {
     await triggerOutdoorRefresh();
-    await refreshDashboard({ silentBanner: true });
+    state.chartsCache.clear();
+    await refreshOverviewOnly({ forceRefresh: true, silentBanner: true });
+    await loadCharts({ forceRefresh: true });
     showBanner("Fetched fresh outdoor weather & AQI snapshot from Open-Meteo.", "success");
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
@@ -1839,15 +1853,74 @@ function handleSessionExpired() {
   showAuthError("Your session expired. Please sign in again.");
 }
 
-async function loadCharts() {
+function makeChartsCacheKey(deviceId, hours, period) {
+  return `${deviceId || "*"}|${hours}|${period}`;
+}
+
+function setCachedChartPayload(key, payload) {
+  if (state.chartsCache.has(key)) {
+    state.chartsCache.delete(key);
+  } else {
+    while (state.chartsCache.size >= MAX_CLIENT_CHART_CACHE_ENTRIES) {
+      const oldestKey = state.chartsCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      state.chartsCache.delete(oldestKey);
+    }
+  }
+  state.chartsCache.set(key, {
+    payload,
+    fetchedAt: Date.now(),
+  });
+}
+
+async function loadFirmwareReleases({ forceRefresh = false } = {}) {
+  if (state.releasesLoading) return;
+  if (
+    !forceRefresh &&
+    state.releasesLoadedAt > 0 &&
+    Date.now() - state.releasesLoadedAt < CLIENT_CACHE_TTL_MS
+  ) {
+    return;
+  }
+  state.releasesLoading = true;
+  try {
+    const payload = await fetchFirmwareReleases({ refresh: forceRefresh });
+    state.releases = Array.isArray(payload?.releases) ? payload.releases : [];
+    state.releasesLoadedAt = Date.now();
+    renderFleetPanel();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+    }
+  } finally {
+    state.releasesLoading = false;
+  }
+}
+
+async function loadCharts({ forceRefresh = false } = {}) {
+  const key = makeChartsCacheKey(state.selectedDeviceId, state.hours, state.period);
+  const cached = state.chartsCache.get(key);
+  if (
+    !forceRefresh &&
+    cached &&
+    Date.now() - cached.fetchedAt < CLIENT_CACHE_TTL_MS
+  ) {
+    state.historyPayload = cached.payload;
+    renderCharts();
+    return;
+  }
+
   try {
     const limit = state.hours >= 168 ? 240 : 200;
-    state.historyPayload = await fetchReadingsHistory({
+    const payload = await fetchReadingsHistory({
       hours: state.hours,
       limit,
       period: state.period,
       deviceId: state.selectedDeviceId || undefined,
+      refresh: forceRefresh,
     });
+    setCachedChartPayload(key, payload);
+    state.historyPayload = payload;
     renderCharts();
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
@@ -1861,7 +1934,33 @@ async function loadCharts() {
   }
 }
 
-async function refreshDashboard({ silentBanner = false } = {}) {
+async function refreshOverviewOnly({ forceRefresh = true, silentBanner = true } = {}) {
+  try {
+    const overview = await fetchDashboardOverview({ refresh: forceRefresh });
+    state.overview = overview;
+    if (
+      !state.selectedDeviceId ||
+      !overview.devices.some((d) => d.device.device_id === state.selectedDeviceId)
+    ) {
+      state.selectedDeviceId = overview.devices[0]?.device.device_id ?? null;
+    }
+    renderDeviceCards();
+    renderFleetPanel();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    if (!silentBanner) {
+      showBanner(
+        err instanceof Error ? err.message : "Unable to refresh device overview.",
+        "danger"
+      );
+    }
+  }
+}
+
+async function refreshDashboard({ silentBanner = false, forceRefresh = false } = {}) {
   if (state.isRefreshing) return;
   state.isRefreshing = true;
   els.refreshBtn.disabled = true;
@@ -1869,14 +1968,24 @@ async function refreshDashboard({ silentBanner = false } = {}) {
   if (!silentBanner) {
     hideBanner();
   }
+  if (forceRefresh) {
+    state.chartsCache.clear();
+  }
 
   try {
+    const shouldRefreshReleases =
+      state.activeTab === "fleet" || (forceRefresh && state.releasesLoadedAt > 0);
     const [overview, releasesPayload] = await Promise.all([
-      fetchDashboardOverview(),
-      fetchFirmwareReleases().catch(() => ({ count: 0, releases: [] })),
+      fetchDashboardOverview({ refresh: forceRefresh }),
+      shouldRefreshReleases
+        ? fetchFirmwareReleases({ refresh: forceRefresh }).catch(() => null)
+        : Promise.resolve(null),
     ]);
     state.overview = overview;
-    state.releases = Array.isArray(releasesPayload?.releases) ? releasesPayload.releases : [];
+    if (releasesPayload) {
+      state.releases = Array.isArray(releasesPayload?.releases) ? releasesPayload.releases : [];
+      state.releasesLoadedAt = Date.now();
+    }
 
     if (
       !state.selectedDeviceId ||
@@ -1887,7 +1996,7 @@ async function refreshDashboard({ silentBanner = false } = {}) {
 
     renderDeviceCards();
     renderFleetPanel();
-    await loadCharts();
+    await loadCharts({ forceRefresh });
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
       handleSessionExpired();
@@ -2005,14 +2114,16 @@ els.bearerLoginForm.addEventListener("submit", async (event) => {
   }
 });
 
-els.refreshBtn.addEventListener("click", () => refreshDashboard());
+els.refreshBtn.addEventListener("click", () => refreshDashboard({ forceRefresh: true }));
 
 els.signoutBtn.addEventListener("click", async () => {
   clearSession();
   state.session = null;
   state.overview = null;
   state.releases = [];
+  state.releasesLoadedAt = 0;
   state.historyPayload = null;
+  state.chartsCache.clear();
   hideBanner();
   await loadAuthScreen();
 });

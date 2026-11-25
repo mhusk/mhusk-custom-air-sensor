@@ -98,8 +98,34 @@ export function fetchMe() {
 }
 
 /** Fetches live room cards, health context, desired config, and sync status. */
-export function fetchDashboardOverview() {
-  return authenticatedJsonFetch("/api/dashboard/overview");
+export function fetchDashboardOverview({ refresh = false } = {}) {
+  return authenticatedJsonFetch(`/api/dashboard/overview${refresh ? "?refresh=1" : ""}`);
+}
+
+/**
+ * Builds the `/api/readings/history` request URL with optional `refresh=1` cache bypass.
+ *
+ * @param {{
+ *   hours?: number,
+ *   limit?: number,
+ *   period?: "1h" | "6h" | "24h" | "7d" | "30d",
+ *   deviceId?: string,
+ *   location?: string,
+ *   refresh?: boolean,
+ * }} params
+ * @returns {string}
+ */
+export function buildReadingsHistoryPath(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.hours !== undefined) qs.set("hours", String(params.hours));
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.period) qs.set("period", params.period);
+  if (params.deviceId) qs.set("device_id", params.deviceId);
+  if (params.location) qs.set("location", params.location);
+  if (params.refresh) qs.set("refresh", "1");
+
+  const query = qs.toString();
+  return `/api/readings/history${query ? `?${query}` : ""}`;
 }
 
 /**
@@ -111,18 +137,11 @@ export function fetchDashboardOverview() {
  *   period?: "1h" | "6h" | "24h" | "7d" | "30d",
  *   deviceId?: string,
  *   location?: string,
+ *   refresh?: boolean,
  * }} params
  */
 export function fetchReadingsHistory(params = {}) {
-  const qs = new URLSearchParams();
-  if (params.hours !== undefined) qs.set("hours", String(params.hours));
-  if (params.limit !== undefined) qs.set("limit", String(params.limit));
-  if (params.period) qs.set("period", params.period);
-  if (params.deviceId) qs.set("device_id", params.deviceId);
-  if (params.location) qs.set("location", params.location);
-
-  const query = qs.toString();
-  return authenticatedJsonFetch(`/api/readings/history${query ? `?${query}` : ""}`);
+  return authenticatedJsonFetch(buildReadingsHistoryPath(params));
 }
 
 /**
@@ -167,8 +186,8 @@ export function triggerDeviceReboot(deviceId) {
 /**
  * Lists all published OTA firmware release manifests (newest-first).
  */
-export function fetchFirmwareReleases() {
-  return authenticatedJsonFetch("/api/firmware/releases");
+export function fetchFirmwareReleases({ refresh = false } = {}) {
+  return authenticatedJsonFetch(`/api/firmware/releases${refresh ? "?refresh=1" : ""}`);
 }
 
 /**

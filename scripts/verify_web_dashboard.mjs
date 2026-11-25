@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildReadingsHistoryPath } from "../web/api.js";
 import { buildAuthorizeUrl, computeCodeChallenge, toBase64Url } from "../web/auth.js";
 import {
   buildSeriesSegments,
@@ -137,6 +138,38 @@ await runCheck("firebase.json configures Hosting public=web and 2nd Gen API rewr
   );
   assert.ok(apiIndex >= 0, "Expected /api/** rewrite to 2nd Gen mcp function in us-east1");
   assert.ok(spaIndex > apiIndex, "SPA catch-all rewrite must come after /api/**");
+});
+
+await runCheck("api.js builds /api/readings/history paths with optional refresh=1 bypass", () => {
+  const normal = buildReadingsHistoryPath({
+    hours: 24,
+    limit: 200,
+    period: "24h",
+    deviceId: "feather-s3-01",
+  });
+  assert.equal(
+    normal,
+    "/api/readings/history?hours=24&limit=200&period=24h&device_id=feather-s3-01"
+  );
+  const bypassed = buildReadingsHistoryPath({
+    hours: 168,
+    limit: 240,
+    period: "7d",
+    refresh: true,
+  });
+  assert.equal(
+    bypassed,
+    "/api/readings/history?hours=168&limit=240&period=7d&refresh=1"
+  );
+});
+
+await runCheck("app.js implements 5m chartsCache, lazy Fleet loading, and targeted refreshes", () => {
+  const appJs = fs.readFileSync(path.join(repoRoot, "web/app.js"), "utf8");
+  assert.match(appJs, /CLIENT_CACHE_TTL_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000/);
+  assert.match(appJs, /chartsCache:\s*new Map\(\)/);
+  assert.match(appJs, /async function loadFirmwareReleases\(/);
+  assert.match(appJs, /async function refreshOverviewOnly\(/);
+  assert.match(appJs, /state\.activeTab === "fleet"[\s\S]*loadFirmwareReleases\(\)/);
 });
 
 console.log(`\nAll ${passed} Step 15 offline checks passed!`);
