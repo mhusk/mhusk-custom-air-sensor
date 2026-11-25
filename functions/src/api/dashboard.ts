@@ -434,20 +434,33 @@ function resolvePeriodFromHours(hours: number): SummaryPeriod {
   return "7d";
 }
 
+function decodeRouteSegment(
+  segment: string
+): { value: string; invalidEncoding: false } | { value: ""; invalidEncoding: true } {
+  try {
+    return { value: decodeURIComponent(segment), invalidEncoding: false };
+  } catch {
+    return { value: "", invalidEncoding: true };
+  }
+}
+
 function matchDeviceConfigRoute(
   pathname: string
-): { deviceId: string; action: "config" | "reboot" | "firmware" } | null {
+): { deviceId: string; action: "config" | "reboot" | "firmware"; invalidEncoding: boolean } | null {
   const configMatch = /^\/api\/devices\/([^/]+)\/config$/.exec(pathname);
   if (configMatch) {
-    return { deviceId: decodeURIComponent(configMatch[1]), action: "config" };
+    const decoded = decodeRouteSegment(configMatch[1]);
+    return { deviceId: decoded.value, action: "config", invalidEncoding: decoded.invalidEncoding };
   }
   const rebootMatch = /^\/api\/devices\/([^/]+)\/reboot$/.exec(pathname);
   if (rebootMatch) {
-    return { deviceId: decodeURIComponent(rebootMatch[1]), action: "reboot" };
+    const decoded = decodeRouteSegment(rebootMatch[1]);
+    return { deviceId: decoded.value, action: "reboot", invalidEncoding: decoded.invalidEncoding };
   }
   const firmwareMatch = /^\/api\/devices\/([^/]+)\/firmware$/.exec(pathname);
   if (firmwareMatch) {
-    return { deviceId: decodeURIComponent(firmwareMatch[1]), action: "firmware" };
+    const decoded = decodeRouteSegment(firmwareMatch[1]);
+    return { deviceId: decoded.value, action: "firmware", invalidEncoding: decoded.invalidEncoding };
   }
   return null;
 }
@@ -946,6 +959,13 @@ export async function handleDashboardApiRequest(
     // 10. /api/devices/:deviceId/config, /firmware & /reboot
     const deviceRoute = matchDeviceConfigRoute(pathname);
     if (deviceRoute) {
+      if (deviceRoute.invalidEncoding) {
+        sendJson(res, 400, {
+          error: "validation_error",
+          message: "Invalid URL encoding in device_id path parameter.",
+        });
+        return;
+      }
       const { deviceId, action } = deviceRoute;
       if (!DEVICE_ID_REGEX.test(deviceId)) {
         sendJson(res, 400, {

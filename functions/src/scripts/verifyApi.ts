@@ -503,6 +503,16 @@ async function main(): Promise<void> {
     assert.equal(devicesAfter[0].config_sync_status, "pending");
     console.log("[PASS] 6. PUT /api/devices/:deviceId/config validates via Zod, increments config_version, and flips sync to pending");
 
+    // 6b. Malformed percent-encoded deviceId returns 400 validation_error (not 500)
+    const malformedDeviceRes = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/devices/%E0%A4%A/config",
+      { token: ownerJwt }
+    );
+    assert.equal(malformedDeviceRes.status, 400);
+    assert.equal(malformedDeviceRes.body.error, "validation_error");
+
     // 7. One-shot remote reboot endpoint
     const rebootRes = await apiRequest(baseUrl, "POST", "/api/devices/feather-s3-01/reboot", {
       token: ownerJwt,

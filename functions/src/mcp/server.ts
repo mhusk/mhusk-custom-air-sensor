@@ -105,8 +105,11 @@ export async function handleStatelessMcpHttpRequest(
     await server.connect(transport);
     await transport.handleRequest(req, res, options.parsedBody);
   } catch (error) {
+    console.error(
+      "[mcp] Unhandled MCP request error:",
+      error instanceof Error ? error.message : String(error)
+    );
     if (!res.headersSent) {
-      const message = error instanceof Error ? error.message : "Internal server error";
       res.statusCode = 500;
       res.setHeader("Content-Type", "application/json");
       res.end(
@@ -114,7 +117,7 @@ export async function handleStatelessMcpHttpRequest(
           jsonrpc: "2.0",
           error: {
             code: -32603,
-            message,
+            message: "Internal server error",
           },
           id: null,
         })

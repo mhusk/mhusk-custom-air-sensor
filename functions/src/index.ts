@@ -66,15 +66,25 @@ function getHeaderString(value: string | string[] | undefined): string | undefin
   return undefined;
 }
 
+const SAFE_HOST_REGEX = /^[A-Za-z0-9.\-:\[\]]+$/;
+
 /**
  * Reconstructs the public HTTPS origin behind Cloud Run / Cloud Functions
- * reverse proxies (respecting `X-Forwarded-Proto` and `X-Forwarded-Host`).
+ * reverse proxies (respecting `X-Forwarded-Proto` and `X-Forwarded-Host`),
+ * falling back safely on malformed header values.
  */
 export function getPublicOrigin(req: IncomingMessage): string {
-  const forwardedHost = getHeaderString(req.headers["x-forwarded-host"]);
-  const host = (forwardedHost ?? getHeaderString(req.headers.host) ?? "localhost")
-    .split(",")[0]
+  const rawForwardedHost = getHeaderString(req.headers["x-forwarded-host"])
+    ?.split(",")[0]
     .trim();
+  const rawHostHeader = getHeaderString(req.headers.host)?.split(",")[0].trim();
+
+  const host =
+    rawForwardedHost && SAFE_HOST_REGEX.test(rawForwardedHost)
+      ? rawForwardedHost
+      : rawHostHeader && SAFE_HOST_REGEX.test(rawHostHeader)
+        ? rawHostHeader
+        : "localhost";
 
   const forwardedProto = getHeaderString(req.headers["x-forwarded-proto"])
     ?.split(",")[0]
@@ -86,18 +96,41 @@ export function getPublicOrigin(req: IncomingMessage): string {
     host.startsWith("127.0.0.1") ||
     host.startsWith("[::1]");
 
-  const proto = forwardedProto || (isLocalHost ? "http" : "https");
-  return `${proto}://${host}`;
+  const proto =
+    forwardedProto === "http" || forwardedProto === "https"
+      ? forwardedProto
+      : isLocalHost
+        ? "http"
+        : "https";
+
+  const candidate = `${proto}://${host}`;
+  try {
+    return new URL(candidate).origin;
+  } catch {
+    return isLocalHost ? "http://localhost" : "https://localhost";
+  }
 }
 
-function getNormalizedPathname(req: IncomingMcpRequest): string {
-  const rawPath = req.path ?? req.url ?? "/";
-  const parsed = new URL(rawPath, "http://localhost");
-  const pathname = parsed.pathname;
-  if (pathname.length > 1 && pathname.endsWith("/")) {
-    return pathname.slice(0, -1);
+function isCloudFunctionsOrigin(origin: string): boolean {
+  try {
+    return new URL(origin).hostname.endsWith(".cloudfunctions.net");
+  } catch {
+    return false;
   }
-  return pathname;
+}
+
+function getNormalizedPathname(req: IncomingMcpRequest): string | null {
+  const rawPath = req.path ?? req.url ?? "/";
+  try {
+    const parsed = new URL(rawPath, "http://localhost");
+    const pathname = parsed.pathname;
+    if (pathname.length > 1 && pathname.endsWith("/")) {
+      return pathname.slice(0, -1);
+    }
+    return pathname;
+  } catch {
+    return null;
+  }
 }
 
 function setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
@@ -150,6 +183,13 @@ export function createMcpHttpHandler(
     }
 
     const pathname = getNormalizedPathname(req);
+    if (pathname === null) {
+      sendJson(res, 400, {
+        error: "invalid_request",
+        message: "Malformed request URL.",
+      });
+      return;
+    }
     const origin = getPublicOrigin(req);
     const authConfig = options.getAuthConfig();
     const authkitDomain = normalizeAuthKitDomain(authConfig.workosAuthKitDomain);
@@ -239,9 +279,7 @@ export function createMcpHttpHandler(
 
       if (!authResult.ok) {
         if (authResult.status === 401) {
-          const isCloudFunctionsHost = new URL(origin).hostname.endsWith(
-            ".cloudfunctions.net"
-          );
+          const isCloudFunctionsHost = isCloudFunctionsOrigin(origin);
           const metadataBaseUrl = isCloudFunctionsHost ? `${origin}/mcp` : origin;
           res.setHeader(
             "WWW-Authenticate",

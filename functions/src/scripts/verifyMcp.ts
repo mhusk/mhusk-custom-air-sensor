@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { THRESHOLDS_RESOURCE_URI } from "../mcp/prompts.js";
+import { handleStatelessMcpHttpRequest } from "../mcp/server.js";
 import {
   createLocalMcpHttpServer,
+  createMockAirQualityService,
   resolveProjectIdFromFirebaserc,
 } from "./localMcpServer.js";
 
@@ -300,9 +304,58 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
   }
 }
 
+async function runSanitizedErrorCheck(): Promise<void> {
+  const fakeReq = new EventEmitter() as IncomingMessage & { auth?: unknown };
+  fakeReq.method = "POST";
+  fakeReq.url = "/mcp";
+  fakeReq.headers = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  Object.defineProperty(fakeReq, "auth", {
+    get() {
+      throw new Error("SECRET_INTERNAL_STACK_LEAK");
+    },
+  });
+
+  let sentHeaders = false;
+  let capturedBody = "";
+  const fakeRes = new EventEmitter() as unknown as ServerResponse;
+  fakeRes.statusCode = 200;
+  Object.defineProperty(fakeRes, "headersSent", {
+    get: () => sentHeaders,
+  });
+  fakeRes.setHeader = (() => fakeRes) as ServerResponse["setHeader"];
+  fakeRes.end = ((chunk?: unknown) => {
+    capturedBody =
+      typeof chunk === "string"
+        ? chunk
+        : Buffer.isBuffer(chunk)
+          ? chunk.toString("utf8")
+          : "";
+    sentHeaders = true;
+    fakeRes.emit("close");
+    return fakeRes;
+  }) as ServerResponse["end"];
+
+  await handleStatelessMcpHttpRequest(fakeReq as IncomingMessage, fakeRes, {
+    service: createMockAirQualityService(),
+  });
+
+  assert.equal(fakeRes.statusCode, 500);
+  const body = JSON.parse(capturedBody || "{}") as {
+    error?: { code?: number; message?: string };
+  };
+  assert.equal(body.error?.code, -32603);
+  assert.equal(body.error?.message, "Internal server error");
+  assert.equal(capturedBody.includes("SECRET_INTERNAL_STACK_LEAK"), false);
+  console.log("   [PASS] Unhandled MCP error returns sanitized -32603 without leaking internal details");
+}
+
 async function main(): Promise<void> {
   const runLive = process.argv.includes("--live");
   await runSuite("mock");
+  await runSanitizedErrorCheck();
 
   if (runLive) {
     try {

@@ -208,6 +208,24 @@ async function main(): Promise<void> {
     );
     console.log("[PASS] cloudfunctions.net host includes /mcp prefix in WWW-Authenticate resource_metadata");
 
+    // 6c. Malformed X-Forwarded-Host header falls back safely without throwing 500
+    const badHostUnauth = await fetch(mcpUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "X-Forwarded-Proto": "javascript",
+        "X-Forwarded-Host": "bad host!!/evil",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "tools/list", params: {} }),
+    });
+    assert.equal(badHostUnauth.status, 401);
+    assert.match(
+      badHostUnauth.headers.get("www-authenticate") ?? "",
+      /resource_metadata="https?:\/\/[^"]+\/\.well-known\/oauth-protected-resource"/
+    );
+    console.log("[PASS] Malformed X-Forwarded-Host/Proto returns 401 safely without crashing");
+
     // 7. Invalid Bearer token returns 401
     const badBearer = await postMcp(
       mcpUrl,
