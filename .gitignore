@@ -65,3 +65,14 @@ venv/
 .Trashes
 .vscode/
 .idea/
+
+# ============================================================================
+# 6. Local Media Staging & Raw Video Renders (EXIF / Large Binaries)
+# ============================================================================
+local_media_raw/
+*.heic
+*.HEIC
+*.mov
+*.MOV
+*.mp4
+*.MP4

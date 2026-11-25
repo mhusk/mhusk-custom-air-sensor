@@ -109,3 +109,7 @@ rm .test-leak.tmp
 > [!NOTE]
 > **What if I accidentally staged a forbidden file with `git add -f`?**
 > Even if `.gitignore` is bypassed with `git add -f firmware/settings.toml`, **Check 1** in `./scripts/check-secrets.sh` inspects `git ls-files` against the forbidden file list and immediately fails before you commit.
+
+> [!TIP]
+> **Hardware Photos & UI Screenshots (`docs/images/`):**
+> Phone photos (`.HEIC`/`.JPG`) embed GPS coordinates and camera metadata in EXIF/XMP headers, and dashboard screenshots can accidentally capture private URLs or account emails. Always stage raw photos in the gitignored `local_media_raw/` folder, crop out browser URL bars / emails / home coordinates, and run `./scripts/prepare_media.sh` (plus `./scripts/prepare_media.sh --verify`) to strip 100% of EXIF/GPS/XMP/PNG text metadata before committing into `docs/images/`.

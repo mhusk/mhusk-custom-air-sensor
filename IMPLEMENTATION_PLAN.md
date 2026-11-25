@@ -35,10 +35,10 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 9**: Physical Hardware Assembly & CircuitPython Flashing
 - [x] **Step 10**: Complete CircuitPython Sensor Loop (`firmware/code.py`)
 - [x] **Step 11**: Live End-to-End AI Query & Final Docs Polish
-- [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *printed on Bambu Lab X1 Carbon; commissioning & thermal calibration in progress*
+- [x] **Enclosure Plan**: Screwless 3D-Printed Enclosure Design & SpeakCAD Spec (`docs/08-enclosure-hardware-plan.md`) — *printed on Bambu Lab X1 Carbon; commissioned, thermally calibrated, and inaudible*
 
 ### Phase 2: Enclosure Commissioning, Lightweight Web Dashboard & Remote Config *(Layer 1 — Completed)*
-- [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc & 5-point rules validation complete; physical enclosure thermal/acoustic measurements in `docs/08-enclosure-hardware-plan.md` Section 8 in progress)*
+- [x] **Step 12**: `device_configs` Firestore Schema, Rules & Calibration Docs *(cloud schema, `firestore.rules`, seed doc, 5-point rules validation, and physical enclosure commissioning in `docs/08-enclosure-hardware-plan.md` Section 8 complete)*
 - [x] **Step 13**: Firmware Remote Configuration Polling (`device_configs/{device_id}`) *(v1.1.0 live-verified end-to-end on ESP32-S3 hardware: `v1` → `v2` 60s/LED-off → `v3` 300s/LED-on)*
 - [x] **Step 14**: Dashboard Backend API & WorkOS Auth Integration
 - [x] **Step 15**: Lightweight Web Dashboard on Firebase Hosting (Live Charts + Device Settings Drawer)
@@ -216,7 +216,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 > 90% of day-to-day device changes—calibrating enclosed temperature offset, changing polling intervals, muting bedroom LEDs, or renaming a room—don't require modifying Python code on flash. Solving Remote Config first gives immediate dashboard control with zero flash wear and zero risk of bricking a mounted sensor.
 
 #### Step 12: Enclosure Calibration & `device_configs` Firestore Schema + Rules
-- **Status**: `[x] Cloud Schema, Rules & Docs Complete (Physical Enclosure Measurements Pending Print)`
+- **Status**: `[x] Completed (Cloud Schema, Rules, Docs & Physical Enclosure Commissioning Complete)`
 - **Goal**: Commission the 3D-printed enclosure (verify thermal offset, acoustic isolation, and LED shielding) and introduce a hardened `device_configs/{device_id}` Firestore collection so each sensor can pull tunable settings (`location`, `reporting_interval_seconds`, `temperature_offset_c`, `altitude_m`, `led_enabled`, `config_version`, and one-shot `reboot_requested_at`).
 - **Deliverables**:
   - Updated `firestore.rules` allowing authenticated sensor devices `get`-only access to `device_configs/{device_id}` (no `list`, no `write`) plus optional reported-config fields on `devices/{device_id}`
