@@ -92,7 +92,8 @@ export function createFirestoreDashboardService(
     updateSiteLocationConfig: (input, updatedBy) =>
       updateSiteLocationConfig(input, updatedBy, db),
     getLatestOutdoorReading: () => getLatestOutdoorReading(db),
-    getOutdoorReadingsHistory: (hours, limit) => getOutdoorReadingsHistory(hours, limit, db),
+    getOutdoorReadingsHistory: (hours, limit, opts) =>
+      getOutdoorReadingsHistory(hours, limit, db, new Date(), opts),
     syncOutdoorReadingIfStale: (opts) => syncOutdoorReadingIfStale({ ...opts, db }),
   };
 }

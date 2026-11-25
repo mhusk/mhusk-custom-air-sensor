@@ -228,8 +228,9 @@ export async function handleReadingsHistoryRoute(
     }
   }
 
+  const forceTailCheck = Boolean(cacheOpts.bypassCache);
   const outdoorPromise = service.getOutdoorReadingsHistory
-    ? service.getOutdoorReadingsHistory(hours, limit)
+    ? service.getOutdoorReadingsHistory(hours, limit, { forceTailCheck })
     : Promise.resolve([]);
 
   let history: ReadingsHistoryResult;
@@ -244,6 +245,7 @@ export async function handleReadingsHistoryRoute(
         period: summaryPeriod,
         device_id: deviceId,
         location,
+        forceTailCheck,
       }),
       outdoorPromise,
     ]);
@@ -252,11 +254,18 @@ export async function handleReadingsHistoryRoute(
     outdoorHistory = outdoor;
   } else {
     const [hist, sum, outdoor] = await Promise.all([
-      service.getReadingsHistory({ hours, limit, device_id: deviceId, location }),
+      service.getReadingsHistory({
+        hours,
+        limit,
+        device_id: deviceId,
+        location,
+        forceTailCheck,
+      }),
       service.getAirQualitySummary({
         period: summaryPeriod,
         device_id: deviceId,
         location,
+        forceTailCheck,
       }),
       outdoorPromise,
     ]);

@@ -486,6 +486,116 @@ async function runTests(): Promise<void> {
   assert.equal(groupedOutdoor.length, 1);
   assert.equal(Object.keys(groupedOutdoor[0].samples).length, 2);
   console.log("   [PASS] Backfill CLI flags & UTC-day grouping helpers");
+
+  // 7. Tail-gap raw fallback on today's rollup (indoor & outdoor)
+  // 7a. Lagging today rollup (>15m behind endNow) merges only newer raw readings
+  const tailNow = new Date("2026-11-25T13:00:00.000Z");
+  const lagHarness = createMockRollupFirestore();
+  const seedRawIndoor = (
+    harness: ReturnType<typeof createMockRollupFirestore>,
+    reading: AirQualityReading
+  ) => {
+    let rawCol = harness.store.get(READINGS_COLLECTION);
+    if (!rawCol) {
+      rawCol = new Map();
+      harness.store.set(READINGS_COLLECTION, rawCol);
+    }
+    rawCol.set(reading.id, {
+      ...reading,
+      timestamp: Timestamp.fromDate(new Date(reading.timestamp)),
+    });
+  };
+
+  const r10 = makeSampleReading({ id: "r10", timestamp: "2026-11-25T10:00:00.000Z", co2_ppm: 610 });
+  const r11 = makeSampleReading({ id: "r11", timestamp: "2026-11-25T11:00:00.000Z", co2_ppm: 640 });
+  const r1230 = makeSampleReading({ id: "r1230", timestamp: "2026-11-25T12:30:00.000Z", co2_ppm: 710 });
+  const r1255 = makeSampleReading({ id: "r1255", timestamp: "2026-11-25T12:55:00.000Z", co2_ppm: 750 });
+  await appendIndoorRollupSample(r10, lagHarness.db);
+  await appendIndoorRollupSample(r11, lagHarness.db);
+  for (const r of [r10, r11, r1230, r1255]) {
+    seedRawIndoor(lagHarness, r);
+  }
+  lagHarness.counts.reads = 0;
+  const lagRes = await getReadingsHistoryWithSummary(
+    { hours: 6, period: "6h", device_id: "feather-s3-01", now: tailNow },
+    lagHarness.db
+  );
+  assert.deepEqual(
+    lagRes.history.readings.map((r) => r.id),
+    ["r10", "r11", "r1230", "r1255"]
+  );
+  assert.equal(lagHarness.counts.reads, 3, "Expected 1 rollup read + 2 newer raw tail reads");
+
+  // 7b. 6h window completely after a frozen earlier-in-day rollup (the 8:52 PM bug)
+  const frozenHarness = createMockRollupFirestore();
+  await appendIndoorRollupSample(
+    makeSampleReading({ id: "r0100", timestamp: "2026-11-25T01:00:00.000Z" }),
+    frozenHarness.db
+  );
+  await appendIndoorRollupSample(
+    makeSampleReading({ id: "r0150", timestamp: "2026-11-25T01:50:00.000Z" }),
+    frozenHarness.db
+  );
+  for (const ts of [
+    "2026-11-25T08:00:00.000Z",
+    "2026-11-25T10:00:00.000Z",
+    "2026-11-25T12:55:00.000Z",
+  ]) {
+    seedRawIndoor(
+      frozenHarness,
+      makeSampleReading({ id: `raw_${ts}`, timestamp: ts, co2_ppm: 820 })
+    );
+  }
+  const frozenRes = await getReadingsHistoryWithSummary(
+    { hours: 6, period: "6h", device_id: "feather-s3-01", now: tailNow },
+    frozenHarness.db
+  );
+  assert.deepEqual(
+    frozenRes.history.readings.map((r) => r.timestamp),
+    ["2026-11-25T08:00:00.000Z", "2026-11-25T10:00:00.000Z", "2026-11-25T12:55:00.000Z"]
+  );
+
+  // 7c. forceTailCheck (?refresh=1) fetches raw tail even when rollup lag < 15m
+  const freshHarness = createMockRollupFirestore();
+  const r1254 = makeSampleReading({ id: "r1254", timestamp: "2026-11-25T12:54:00.000Z", co2_ppm: 680 });
+  const r1259 = makeSampleReading({ id: "r1259", timestamp: "2026-11-25T12:59:00.000Z", co2_ppm: 790 });
+  await appendIndoorRollupSample(r1254, freshHarness.db);
+  seedRawIndoor(freshHarness, r1254);
+  seedRawIndoor(freshHarness, r1259);
+  freshHarness.counts.reads = 0;
+
+  const noForceRes = await getReadingsHistoryWithSummary(
+    { hours: 6, period: "6h", device_id: "feather-s3-01", now: tailNow },
+    freshHarness.db
+  );
+  assert.equal(freshHarness.counts.reads, 1, "Expected 0 raw reads when lag < 15m and forceTailCheck is false");
+  assert.deepEqual(noForceRes.history.readings.map((r) => r.id), ["r1254"]);
+
+  const forcedRes = await getReadingsHistoryWithSummary(
+    { hours: 6, period: "6h", device_id: "feather-s3-01", now: tailNow, forceTailCheck: true },
+    freshHarness.db
+  );
+  assert.deepEqual(forcedRes.history.readings.map((r) => r.id), ["r1254", "r1259"]);
+
+  // 7d. Outdoor tail-gap fallback (>45m behind endNow)
+  const outTailHarness = createMockRollupFirestore();
+  const o11 = makeSampleOutdoor({ id: "o11", timestamp: "2026-11-25T11:00:00.000Z", temperature_f: 52.0 });
+  const o1255 = makeSampleOutdoor({ id: "o1255", timestamp: "2026-11-25T12:55:00.000Z", temperature_f: 56.5 });
+  await appendOutdoorRollupSample(o11, outTailHarness.db);
+  let outTailRaw = outTailHarness.store.get(OUTDOOR_READINGS_COLLECTION);
+  if (!outTailRaw) {
+    outTailRaw = new Map();
+    outTailHarness.store.set(OUTDOOR_READINGS_COLLECTION, outTailRaw);
+  }
+  for (const o of [o11, o1255]) {
+    outTailRaw.set(o.id, { ...o, timestamp: Timestamp.fromDate(new Date(o.timestamp)) });
+  }
+  const outTailHistory = await getOutdoorReadingsHistory(6, 200, outTailHarness.db, tailNow);
+  assert.deepEqual(
+    outTailHistory.map((r) => r.id),
+    ["o11", "o1255"]
+  );
+  console.log("   [PASS] Tail-gap raw fallback on today's rollup (indoor, frozen window, forceTailCheck, outdoor)");
 }
 
 runTests()

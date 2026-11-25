@@ -8,11 +8,13 @@ import {
 import {
   appendOutdoorRollupSample,
   downsampleReadings,
+  formatUtcDateString,
   getDb,
   groupContiguousDateRanges,
   parseTimestampToDateOrNull,
   readOutdoorReadingsFromRollups,
   roundTo,
+  utcDayRange,
   type AirQualityReading,
   type AqiCategory,
   type DeviceLatestReadingSnapshot,
@@ -540,7 +542,8 @@ export async function getOutdoorReadingsHistory(
   hours: number = 24,
   limit: number = 200,
   db: Firestore = getDb(),
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: { forceTailCheck?: boolean } = {}
 ): Promise<OutdoorReading[]> {
   const clampedHours = Math.max(1, Math.min(168, Math.round(hours)));
   const clampedLimit = Math.max(1, Math.min(500, Math.round(limit)));
@@ -551,26 +554,58 @@ export async function getOutdoorReadingsHistory(
     db
   );
 
-  if (rollupResult.missingDates.length === 0) {
+  const startMs = startDate.getTime();
+  const endMs = now.getTime();
+  const fallbackRanges: Array<{ startDate: Date; endDate: Date }> = [];
+
+  for (const range of groupContiguousDateRanges(rollupResult.missingDates)) {
+    const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
+    const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
+    if (clampedStart.getTime() <= clampedEnd.getTime()) {
+      fallbackRanges.push({ startDate: clampedStart, endDate: clampedEnd });
+    }
+  }
+
+  const endUtcDate = formatUtcDateString(now);
+  if (!rollupResult.missingDates.includes(endUtcDate)) {
+    let latestRollupMs: number | null = null;
+    for (const r of rollupResult.readings) {
+      const tsMs = Date.parse(r.timestamp);
+      if (Number.isFinite(tsMs) && (latestRollupMs === null || tsMs > latestRollupMs)) {
+        latestRollupMs = tsMs;
+      }
+    }
+
+    const needsTailCheck =
+      Boolean(options.forceTailCheck) ||
+      latestRollupMs === null ||
+      endMs - latestRollupMs > OUTDOOR_STALE_THRESHOLD_MINUTES * 60_000;
+
+    if (needsTailCheck) {
+      const todayStartMs = utcDayRange(endUtcDate).start.getTime();
+      const tailStartMs =
+        latestRollupMs !== null
+          ? Math.max(startMs, latestRollupMs + 1000)
+          : Math.max(startMs, todayStartMs);
+      if (tailStartMs <= endMs) {
+        fallbackRanges.push({
+          startDate: new Date(tailStartMs),
+          endDate: now,
+        });
+      }
+    }
+  }
+
+  if (fallbackRanges.length === 0) {
     return downsampleReadings(rollupResult.readings, clampedLimit);
   }
 
-  const missingRanges = groupContiguousDateRanges(rollupResult.missingDates);
-  const startMs = startDate.getTime();
-  const endMs = now.getTime();
-
   const fallbackBatches = await Promise.all(
-    missingRanges.map(async (range) => {
-      const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
-      const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
-      if (clampedStart.getTime() > clampedEnd.getTime()) {
-        return [];
-      }
-
+    fallbackRanges.map(async (range) => {
       const snap = await db
         .collection(OUTDOOR_READINGS_COLLECTION)
-        .where("timestamp", ">=", Timestamp.fromDate(clampedStart))
-        .where("timestamp", "<=", Timestamp.fromDate(clampedEnd))
+        .where("timestamp", ">=", Timestamp.fromDate(range.startDate))
+        .where("timestamp", "<=", Timestamp.fromDate(range.endDate))
         .orderBy("timestamp", "asc")
         .limit(1000)
         .get();

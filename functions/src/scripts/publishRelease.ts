@@ -341,21 +341,23 @@ function createStaticTokenCredential(accessToken: string): Credential {
 }
 
 function getPublishFirestore(projectId: string): Firestore {
-  if (getApps().length === 0) {
-    const explicitToken =
-      process.env.FIRESTORE_ACCESS_TOKEN?.trim() ||
-      process.env.GOOGLE_OAUTH_ACCESS_TOKEN?.trim();
+  const existingDefault = getApps().find((app) => app.name === "[DEFAULT]");
+  if (existingDefault) {
+    return getFirestore(existingDefault);
+  }
 
-    if (explicitToken) {
-      initializeApp({
+  const explicitToken =
+    process.env.FIRESTORE_ACCESS_TOKEN?.trim() ||
+    process.env.GOOGLE_OAUTH_ACCESS_TOKEN?.trim();
+
+  const app = explicitToken
+    ? initializeApp({
         projectId,
         credential: createStaticTokenCredential(explicitToken),
-      });
-    } else {
-      initializeApp({ projectId });
-    }
-  }
-  return getFirestore();
+      })
+    : initializeApp({ projectId });
+
+  return getFirestore(app);
 }
 
 export async function publishReleaseToFirestore(

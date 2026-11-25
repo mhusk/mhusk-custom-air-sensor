@@ -9,25 +9,30 @@ export const FIRMWARE_RELEASE_FILES_SUBCOLLECTION = "files";
 export const DAILY_ROLLUPS_COLLECTION = "daily_rollups";
 export const OUTDOOR_DAILY_ROLLUPS_COLLECTION = "outdoor_daily_rollups";
 
+const DEFAULT_APP_NAME = "[DEFAULT]";
+
 /**
  * Lazily initializes Firebase Admin and returns the default Firestore instance.
  * Inside Cloud Functions 2nd Gen, credentials and project ID are injected automatically.
  */
 export function getDb(options?: AppOptions): Firestore {
-  if (getApps().length === 0) {
-    const projectId =
-      options?.projectId ??
-      process.env.GCLOUD_PROJECT ??
-      process.env.GOOGLE_CLOUD_PROJECT ??
-      process.env.FIREBASE_PROJECT_ID;
-
-    if (projectId || options) {
-      initializeApp({ ...options, ...(projectId ? { projectId } : {}) });
-    } else {
-      initializeApp();
-    }
+  const existingDefault = getApps().find((app) => app.name === DEFAULT_APP_NAME);
+  if (existingDefault) {
+    return getFirestore(existingDefault);
   }
-  return getFirestore();
+
+  const projectId =
+    options?.projectId ??
+    process.env.GCLOUD_PROJECT ??
+    process.env.GOOGLE_CLOUD_PROJECT ??
+    process.env.FIREBASE_PROJECT_ID;
+
+  const app =
+    projectId || options
+      ? initializeApp({ ...options, ...(projectId ? { projectId } : {}) })
+      : initializeApp();
+
+  return getFirestore(app);
 }
 
 export function roundTo(value: number, decimals: number): number {

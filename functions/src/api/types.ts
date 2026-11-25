@@ -68,7 +68,11 @@ export interface DashboardDataService {
     updatedBy: string
   ) => Promise<SiteLocationConfig>;
   getLatestOutdoorReading?: () => Promise<LatestOutdoorReadingResult | null>;
-  getOutdoorReadingsHistory?: (hours?: number, limit?: number) => Promise<OutdoorReading[]>;
+  getOutdoorReadingsHistory?: (
+    hours?: number,
+    limit?: number,
+    options?: { forceTailCheck?: boolean }
+  ) => Promise<OutdoorReading[]>;
   syncOutdoorReadingIfStale?: (options?: { force?: boolean }) => Promise<{
     synced: boolean;
     reason: string;

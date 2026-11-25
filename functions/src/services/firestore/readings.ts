@@ -23,8 +23,10 @@ import {
 } from "./db.js";
 import { mapDeviceData } from "./devices.js";
 import {
+  formatUtcDateString,
   groupContiguousDateRanges,
   readIndoorReadingsFromRollups,
+  utcDayRange,
 } from "./rollups.js";
 import {
   DEFAULT_HISTORY_HOURS,
@@ -147,6 +149,8 @@ async function fetchRawReadingsInWindow(
   return { readings, scanCapped };
 }
 
+const ROLLUP_TAIL_LAG_THRESHOLD_MS = STALE_THRESHOLD_MINUTES * 60_000;
+
 async function fetchReadingsWindowWithRollups(
   db: Firestore,
   options: {
@@ -155,6 +159,8 @@ async function fetchReadingsWindowWithRollups(
     startDate: Date;
     endDate: Date;
     maxScanDocs: number;
+    forceTailCheck?: boolean;
+    now?: Date;
   }
 ): Promise<{ readings: AirQualityReading[]; scanCapped: boolean }> {
   const rollupResult = await readIndoorReadingsFromRollups(
@@ -167,27 +173,64 @@ async function fetchReadingsWindowWithRollups(
     db
   );
 
-  if (rollupResult.missingDates.length === 0) {
+  const startMs = options.startDate.getTime();
+  const endMs = options.endDate.getTime();
+  const fallbackRanges: Array<{ startDate: Date; endDate: Date }> = [];
+
+  for (const range of groupContiguousDateRanges(rollupResult.missingDates)) {
+    const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
+    const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
+    if (clampedStart.getTime() <= clampedEnd.getTime()) {
+      fallbackRanges.push({ startDate: clampedStart, endDate: clampedEnd });
+    }
+  }
+
+  const now = options.now ?? new Date();
+  const endUtcDate = formatUtcDateString(options.endDate);
+  const nowUtcDate = formatUtcDateString(now);
+
+  if (endUtcDate === nowUtcDate && !rollupResult.missingDates.includes(endUtcDate)) {
+    let latestRollupMs: number | null = null;
+    for (const r of rollupResult.readings) {
+      const tsMs = Date.parse(r.timestamp);
+      if (Number.isFinite(tsMs) && (latestRollupMs === null || tsMs > latestRollupMs)) {
+        latestRollupMs = tsMs;
+      }
+    }
+
+    const needsTailCheck =
+      Boolean(options.forceTailCheck) ||
+      latestRollupMs === null ||
+      endMs - latestRollupMs > ROLLUP_TAIL_LAG_THRESHOLD_MS;
+
+    if (needsTailCheck) {
+      const todayStartMs = utcDayRange(endUtcDate).start.getTime();
+      const tailStartMs =
+        latestRollupMs !== null
+          ? Math.max(startMs, latestRollupMs + 1000)
+          : Math.max(startMs, todayStartMs);
+      if (tailStartMs <= endMs) {
+        fallbackRanges.push({
+          startDate: new Date(tailStartMs),
+          endDate: options.endDate,
+        });
+      }
+    }
+  }
+
+  if (fallbackRanges.length === 0) {
     return { readings: rollupResult.readings, scanCapped: false };
   }
 
-  const missingRanges = groupContiguousDateRanges(rollupResult.missingDates);
-  const startMs = options.startDate.getTime();
-  const endMs = options.endDate.getTime();
   let scanCapped = false;
 
   const fallbackBatches = await Promise.all(
-    missingRanges.map(async (range) => {
-      const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
-      const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
-      if (clampedStart.getTime() > clampedEnd.getTime()) {
-        return [];
-      }
+    fallbackRanges.map(async (range) => {
       const raw = await fetchRawReadingsInWindow(db, {
         device_id: options.device_id,
         location: options.location,
-        startDate: clampedStart,
-        endDate: clampedEnd,
+        startDate: range.startDate,
+        endDate: range.endDate,
         maxScanDocs: options.maxScanDocs,
       });
       if (raw.scanCapped) {
@@ -328,6 +371,8 @@ export async function getReadingsHistory(
     startDate,
     endDate,
     maxScanDocs: MAX_HISTORY_SCAN_DOCS,
+    forceTailCheck: options.forceTailCheck,
+    now,
   });
 
   const totalMatching = readings.length;
@@ -388,6 +433,7 @@ export async function getReadingsHistoryWithSummary(
           device_id: options.device_id,
           location: options.location,
           now: options.now,
+          forceTailCheck: options.forceTailCheck,
         },
         db
       ),
@@ -408,6 +454,8 @@ export async function getReadingsHistoryWithSummary(
     startDate,
     endDate: now,
     maxScanDocs: MAX_HISTORY_SCAN_DOCS,
+    forceTailCheck: options.forceTailCheck,
+    now,
   });
 
   const totalMatching = readings.length;
@@ -463,6 +511,8 @@ export async function getAirQualitySummary(
     startDate,
     endDate: now,
     maxScanDocs: MAX_SUMMARY_SCAN_DOCS,
+    forceTailCheck: options.forceTailCheck,
+    now,
   });
 
   return computeAirQualitySummaryFromReadings(readings, {

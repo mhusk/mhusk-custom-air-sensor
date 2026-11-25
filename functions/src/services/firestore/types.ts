@@ -179,6 +179,7 @@ export interface ReadingsHistoryOptions {
   location?: string;
   limit?: number;
   now?: Date;
+  forceTailCheck?: boolean;
 }
 
 export interface ReadingsHistoryResult {
@@ -230,6 +231,7 @@ export interface AirQualitySummaryOptions {
   device_id?: string;
   location?: string;
   now?: Date;
+  forceTailCheck?: boolean;
 }
 
 export interface AirQualitySummaryResult {

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 
+import { deleteApp, getApps, initializeApp } from "firebase-admin/app";
+
 import {
   assessReadingHealth,
   computeAirQualitySummaryFromReadings,
@@ -41,7 +43,7 @@ function makeReading(
   };
 }
 
-function runOfflineUnitChecks(): void {
+async function runOfflineUnitChecks(): Promise<void> {
   console.log("1. Running offline statistical & helper checks...");
 
   // Single-value stats (mirrors the single synthetic reading from Step 4)
@@ -131,6 +133,29 @@ function runOfflineUnitChecks(): void {
   assert.equal(filledSummary.threshold_exceedances.co2_above_1400_ppm_count, 1);
   assert.equal(filledSummary.notable_spikes.length, 2);
   console.log("   [PASS] computeAirQualitySummaryFromReadings() empty & spike aggregation");
+
+  // Regression check: firebase-functions v7 creates a named internal app ("__FIREBASE_FUNCTIONS_SDK__")
+  // during event deserialization before running triggers. Ensure getDb() still initializes "[DEFAULT]".
+  for (const app of [...getApps()]) {
+    await deleteApp(app);
+  }
+  try {
+    initializeApp({ projectId: "offline-test-project" }, "__FIREBASE_FUNCTIONS_SDK__");
+    assert.ok(getApps().some((a) => a.name === "__FIREBASE_FUNCTIONS_SDK__"));
+    assert.ok(!getApps().some((a) => a.name === "[DEFAULT]"));
+
+    const offlineDb = getDb({ projectId: "offline-test-project" });
+    assert.ok(offlineDb, "Expected getDb() to return a Firestore instance");
+    assert.ok(
+      getApps().some((a) => a.name === "[DEFAULT]"),
+      "Expected getDb() to initialize the [DEFAULT] app even when a named app exists"
+    );
+  } finally {
+    for (const app of [...getApps()]) {
+      await deleteApp(app);
+    }
+  }
+  console.log("   [PASS] getDb() initializes [DEFAULT] app alongside named SDK apps");
 }
 
 async function runLiveFirestoreChecks(): Promise<void> {
@@ -181,7 +206,7 @@ async function runLiveFirestoreChecks(): Promise<void> {
 
 async function main(): Promise<void> {
   const runLive = process.argv.includes("--live");
-  runOfflineUnitChecks();
+  await runOfflineUnitChecks();
 
   if (runLive) {
     try {
