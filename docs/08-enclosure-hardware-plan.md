@@ -239,8 +239,8 @@ Once the final v2 print finishes and all three boards are snapped inside, let th
 
 | Commissioning Check | Status | Measured / Final Value | Notes |
 | :--- | :--- | :--- | :--- |
-| **Mechanical Fit & Lid Action** | ⏳ Pending final print | — | Confirm Feather, SCD-40, PMSA003I snap cleanly and dovetail lid locks flush |
-| **Enclosed Thermal Offset (`temperature_offset_c`)** | ⏳ Pending final print | Default `4.0 °C` | Compare after 60 min against reference thermometer: `new = 4.0 + (sensor_c - ref_c)` |
-| **Site Elevation (`altitude_m`)** | ⏳ Pending final print | Default `0 m` | Set local elevation in meters for SCD-40 CO₂ pressure compensation |
-| **Dark-Room LED Light Bleed** | ⏳ Pending final print | — | Confirm solid rear wall blocks PMSA003I green LED; check SCD-40 left louvers |
-| **PMSA003I Fan Acoustics** | ⏳ Pending final print | — | Listen from pillow distance; add `1 mm` silicone dots on cradle pads if audible |
+| **Mechanical Fit & Lid Action** | ✅ Completed | Clean fit | Feather, SCD-40, and PMSA003I seated cleanly inside the v2 enclosure with sliding dovetail lid closed |
+| **Enclosed Thermal Offset (`temperature_offset_c`)** | ✅ Completed | **`6.8 °C`** *(was `4.0 °C`)* | `+2.8 °C` enclosed self-heating shift measured with the lid closed; applied live in SCD-40 RAM via `device_configs/feather-s3-01` |
+| **Site Elevation (`altitude_m`)** | ✅ Configured | Configured privately in `device_configs` | Local elevation applied for SCD-40 CO₂ pressure compensation (kept private outside Git) |
+| **Dark-Room LED Light Bleed** | ✅ Completed *(Note)* | Faint bleed through white lid | With a white PLA case, onboard breakout power LEDs bleed faintly through the `3.0 mm` top lid in a dark room. Mute the Feather NeoPixel in the dashboard (`led_enabled: false`) and either print in darker opaque filament (e.g., Charcoal Matte PLA) or cover breakout power LEDs with small squares of black electrical tape |
+| **PMSA003I Fan Acoustics** | ✅ Completed | Inaudible | No noticeable fan noise inside the printed enclosure at normal bedroom distance |
