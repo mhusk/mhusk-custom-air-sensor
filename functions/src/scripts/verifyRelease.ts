@@ -163,6 +163,15 @@ function runOfflineUnitChecks(): void {
     /Refusing to package protected file 'boot\.py'/
   );
   console.log("   [PASS] Protected file guard blocks boot.py and code.py from OTA bundles");
+
+  // Firestore security rules static structural check
+  const rulesText = fs.readFileSync(path.join(getDefaultRepoRoot(), "firestore.rules"), "utf8");
+  assert.match(rulesText, /function\s+authDeviceMatches\s*\(/);
+  assert.match(rulesText, /function\s+canActAsDevice\s*\(/);
+  assert.match(rulesText, /canActAsDevice\(request\.resource\.data\.device_id\)/);
+  assert.match(rulesText, /canActAsDevice\(deviceId\)/);
+  assert.match(rulesText, /!\(value in \['boot\.py', 'code\.py'\]\)/);
+  console.log("   [PASS] firestore.rules enforces per-device UID isolation and blocks boot.py/code.py");
 }
 
 async function httpJson(

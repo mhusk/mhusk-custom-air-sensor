@@ -1,8 +1,14 @@
 rules_version = '2';
 
-// Public-repo rules: the device UID is never hardcoded here.
+// Public-repo rules: no device UIDs, project IDs, or secrets are hardcoded here.
 // The Firebase Console (Admin/IAM) creates authorized_devices/{uid}.
 // Client SDKs and the Firestore REST API cannot read or write that collection.
+// Optional per-device UID isolation (Phase 4B multi-room fleet):
+//   - authorized_devices/{uid}.device_id (optional string): when set (non-null),
+//     binds that Auth UID strictly to the matching device_id across readings,
+//     devices/{deviceId}, and device_configs/{deviceId}.
+//   - When omitted or null (legacy single-sensor allowlist doc), any valid
+//     device_id is permitted for zero-downtime migration until migrated.
 // Authenticated allowlisted sensors may only:
 //   - create immutable documents in readings/{readingId}
 //   - create/update their status document in devices/{deviceId}
@@ -15,6 +21,21 @@ service cloud.firestore {
     function isSensorDevice() {
       return request.auth != null
         && exists(/databases/$(database)/documents/authorized_devices/$(request.auth.uid));
+    }
+
+    function authDeviceMatches(authData, deviceId) {
+      return !('device_id' in authData)
+        || authData.device_id == null
+        || (authData.device_id is string && authData.device_id == deviceId);
+    }
+
+    function canActAsDevice(deviceId) {
+      return isSensorDevice()
+        && isDeviceId(deviceId)
+        && authDeviceMatches(
+          get(/databases/$(database)/documents/authorized_devices/$(request.auth.uid)).data,
+          deviceId
+        );
     }
 
     function isDeviceId(value) {
@@ -224,7 +245,9 @@ service cloud.firestore {
     match /readings/{readingId} {
       allow read: if false;
       allow update, delete: if false;
-      allow create: if isSensorDevice()
+      allow create: if 'device_id' in request.resource.data
+        && isDeviceId(request.resource.data.device_id)
+        && canActAsDevice(request.resource.data.device_id)
         && isSafeDocId(readingId)
         && validReading(request.resource.data);
     }
@@ -232,7 +255,7 @@ service cloud.firestore {
     match /devices/{deviceId} {
       allow read: if false;
       allow delete: if false;
-      allow create, update: if isSensorDevice()
+      allow create, update: if canActAsDevice(deviceId)
         && isDeviceId(deviceId)
         && request.resource.data.device_id == deviceId
         && validDevice(request.resource.data);
@@ -243,7 +266,7 @@ service cloud.firestore {
     // but cannot list/enumerate configs or modify them.
     // Only Firebase Console (Admin/IAM) or Cloud Functions (Admin SDK) write here.
     match /device_configs/{deviceId} {
-      allow get: if isSensorDevice() && isDeviceId(deviceId);
+      allow get: if canActAsDevice(deviceId) && isDeviceId(deviceId);
       allow list: if false;
       allow write: if false;
     }
