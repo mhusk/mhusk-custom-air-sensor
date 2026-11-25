@@ -28,7 +28,7 @@ import {
   syncOutdoorReadingIfStale,
   updateSiteLocationConfig,
 } from "../services/outdoor.js";
-import { sendJson } from "./http.js";
+import { parseQueryParams, sendJson } from "./http.js";
 import { handleMeRoute, handlePublicAuthRoutes, resolveActorLabel } from "./routes/auth.js";
 import { handleDeviceActionRoute, matchDeviceConfigRoute } from "./routes/devices.js";
 import { handleFirmwareReleasesRoute, handleFirmwareRolloutRoute } from "./routes/firmware.js";
@@ -162,6 +162,7 @@ export async function handleDashboardApiRequest(
   }
 
   req.auth = authResult.authInfo;
+  res.setHeader("Cache-Control", "private, no-store");
   const actor = resolveActorLabel(authResult.authInfo);
 
   if (pathname === "/api/me" && method === "GET") {
@@ -171,35 +172,51 @@ export async function handleDashboardApiRequest(
 
   const service =
     options.dashboardService ?? createFirestoreDashboardService(options.db ?? getDb());
+  const cache = options.cache;
+  const queryParams = parseQueryParams(req);
+  const refreshParam = queryParams.get("refresh")?.trim().toLowerCase();
+  const bypassCache = refreshParam === "1" || refreshParam === "true";
 
   try {
     if (pathname === "/api/dashboard/overview" && method === "GET") {
-      await handleOverviewRoute(res, service);
+      await handleOverviewRoute(res, service, { cache, bypassCache });
       return;
     }
 
     if (pathname === "/api/readings/history" && method === "GET") {
-      await handleReadingsHistoryRoute(req, res, service);
+      await handleReadingsHistoryRoute(req, res, service, { cache, bypassCache });
       return;
     }
 
     if (pathname === "/api/site/config") {
-      await handleSiteConfigRoute(req, res, { pathname, method, actor, service });
+      await handleSiteConfigRoute(req, res, { pathname, method, actor, service, cache });
       return;
     }
 
     if (pathname === "/api/outdoor/refresh") {
-      await handleOutdoorRefreshRoute(res, { pathname, method, service });
+      await handleOutdoorRefreshRoute(res, { pathname, method, service, cache });
       return;
     }
 
     if (pathname === "/api/firmware/releases") {
-      await handleFirmwareReleasesRoute(res, { pathname, method, service });
+      await handleFirmwareReleasesRoute(res, {
+        pathname,
+        method,
+        service,
+        cache,
+        bypassCache,
+      });
       return;
     }
 
     if (pathname === "/api/firmware/rollout") {
-      await handleFirmwareRolloutRoute(req, res, { pathname, method, actor, service });
+      await handleFirmwareRolloutRoute(req, res, {
+        pathname,
+        method,
+        actor,
+        service,
+        cache,
+      });
       return;
     }
 
@@ -211,6 +228,7 @@ export async function handleDashboardApiRequest(
         actor,
         service,
         deviceRoute,
+        cache,
       });
       return;
     }

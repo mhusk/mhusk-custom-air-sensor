@@ -6,6 +6,7 @@ import { defineSecret } from "firebase-functions/params";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 
+import { DashboardResponseCache } from "./api/cache.js";
 import {
   handleDashboardApiRequest,
   type DashboardDataService,
@@ -242,6 +243,7 @@ export function createMcpHttpHandler(
 ): (req: IncomingMcpRequest, res: ServerResponse) => Promise<void> {
   const loadAuthServerMeta =
     options.loadAuthorizationServerMetadata ?? fetchAuthorizationServerMetadata;
+  const dashboardCache = new DashboardResponseCache();
 
   return async (req: IncomingMcpRequest, res: ServerResponse): Promise<void> => {
     const pathname = getNormalizedPathname(req);
@@ -339,6 +341,7 @@ export function createMcpHttpHandler(
         authDeps: options.authDeps,
         db: options.db,
         dashboardService: options.dashboardService,
+        cache: dashboardCache,
       });
       return;
     }

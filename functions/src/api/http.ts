@@ -19,7 +19,9 @@ export class BodyReadError extends Error {
 export function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Cache-Control", "no-store");
+  if (!res.hasHeader("Cache-Control")) {
+    res.setHeader("Cache-Control", "no-store");
+  }
   res.end(JSON.stringify(body));
 }
 

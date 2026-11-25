@@ -11,6 +11,11 @@ import {
   type SummaryPeriod,
 } from "../../services/firestore.js";
 import { computeIndoorOutdoorDelta, type OutdoorReading } from "../../services/outdoor.js";
+import {
+  HISTORY_CACHE_TTL_MS,
+  OVERVIEW_CACHE_TTL_MS,
+  type DashboardResponseCache,
+} from "../cache.js";
 import { parseQueryParams, sendJson } from "../http.js";
 import { DEVICE_ID_REGEX, SUMMARY_PERIOD_VALUES } from "../schemas.js";
 import type {
@@ -97,8 +102,18 @@ function resolvePeriodFromHours(hours: number): SummaryPeriod {
 
 export async function handleOverviewRoute(
   res: ServerResponse,
-  service: DashboardDataService
+  service: DashboardDataService,
+  cacheOpts: { cache?: DashboardResponseCache; bypassCache?: boolean } = {}
 ): Promise<void> {
+  const cacheKey = "overview";
+  if (cacheOpts.cache && !cacheOpts.bypassCache) {
+    const cached = cacheOpts.cache.get<Record<string, unknown>>(cacheKey);
+    if (cached !== undefined) {
+      sendJson(res, 200, cached);
+      return;
+    }
+  }
+
   const [statusResult, configMap, siteConfig, outdoorLatest] = await Promise.all([
     service.getSensorStatus(),
     service.listDeviceConfigs(),
@@ -124,7 +139,7 @@ export async function handleOverviewRoute(
     };
   });
 
-  sendJson(res, 200, {
+  const payload = {
     checked_at: statusResult.checked_at,
     stale_threshold_minutes: statusResult.stale_threshold_minutes,
     device_count: statusResult.device_count,
@@ -133,13 +148,16 @@ export async function handleOverviewRoute(
     devices: items,
     site_config: siteConfig,
     outdoor_latest: outdoorLatest,
-  });
+  };
+  cacheOpts.cache?.set(cacheKey, payload, OVERVIEW_CACHE_TTL_MS);
+  sendJson(res, 200, payload);
 }
 
 export async function handleReadingsHistoryRoute(
   req: IncomingApiRequest,
   res: ServerResponse,
-  service: DashboardDataService
+  service: DashboardDataService,
+  cacheOpts: { cache?: DashboardResponseCache; bypassCache?: boolean } = {}
 ): Promise<void> {
   const params = parseQueryParams(req);
   const rawHours = params.get("hours");
@@ -201,6 +219,15 @@ export async function handleReadingsHistoryRoute(
     summaryPeriod = rawPeriod as SummaryPeriod;
   }
 
+  const cacheKey = `history:${hours}|${limit}|${summaryPeriod}|${deviceId ?? "*"}|${location ?? "*"}`;
+  if (cacheOpts.cache && !cacheOpts.bypassCache) {
+    const cached = cacheOpts.cache.get<Record<string, unknown>>(cacheKey);
+    if (cached !== undefined) {
+      sendJson(res, 200, cached);
+      return;
+    }
+  }
+
   const outdoorPromise = service.getOutdoorReadingsHistory
     ? service.getOutdoorReadingsHistory(hours, limit)
     : Promise.resolve([]);
@@ -238,9 +265,11 @@ export async function handleReadingsHistoryRoute(
     outdoorHistory = outdoor;
   }
 
-  sendJson(res, 200, {
+  const payload = {
     history,
     summary,
     outdoor_history: outdoorHistory,
-  });
+  };
+  cacheOpts.cache?.set(cacheKey, payload, HISTORY_CACHE_TTL_MS);
+  sendJson(res, 200, payload);
 }

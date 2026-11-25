@@ -21,6 +21,8 @@ import { createMockAirQualityService } from "./localMcpServer.js";
 function createMockDashboardService(): {
   service: DashboardDataService;
   counts: {
+    getSensorStatus: number;
+    listFirmwareReleases: number;
     getReadingsHistory: number;
     getAirQualitySummary: number;
     getReadingsHistoryWithSummary: number;
@@ -28,6 +30,8 @@ function createMockDashboardService(): {
 } {
   const baseService = createMockAirQualityService();
   const counts = {
+    getSensorStatus: 0,
+    listFirmwareReleases: 0,
     getReadingsHistory: 0,
     getAirQualitySummary: 0,
     getReadingsHistoryWithSummary: 0,
@@ -91,6 +95,7 @@ function createMockDashboardService(): {
 
   const service: DashboardDataService = {
     getSensorStatus: async (options) => {
+      counts.getSensorStatus += 1;
       const result = await baseService.getSensorStatus(options);
       const devices: DeviceStatus[] = result.devices.map((device) => ({
         ...device,
@@ -180,8 +185,12 @@ function createMockDashboardService(): {
       configs.set(deviceId, next);
       return next;
     },
-    listFirmwareReleases: async () =>
-      Array.from(releases.values()).sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    listFirmwareReleases: async () => {
+      counts.listFirmwareReleases += 1;
+      return Array.from(releases.values()).sort((a, b) =>
+        b.created_at.localeCompare(a.created_at)
+      );
+    },
     getFirmwareRelease: async (version) => releases.get(version) ?? null,
     setDeviceTargetFirmwareVersion: async (deviceId, targetVersion, updatedBy) => {
       const existing = configs.get(deviceId);
@@ -202,6 +211,11 @@ function createMockDashboardService(): {
       configs.set(deviceId, next);
       return next;
     },
+    syncOutdoorReadingIfStale: async () => ({
+      synced: true,
+      reason: "forced_refresh",
+      reading: null,
+    }),
   };
 
   return { service, counts };
@@ -686,6 +700,72 @@ async function main(): Promise<void> {
     assert.equal(untrustedCorsRes.headers.get("access-control-allow-origin"), null);
     assert.equal(untrustedCorsRes.headers.get("vary"), "Origin");
     console.log("[PASS] 11. /api/* CORS allows localhost & allowlisted origins and omits untrusted origins");
+
+    // 12. Server-side TTL cache hits, ?refresh=1 bypass, Cache-Control, and write invalidation
+    const overviewHit1 = await apiRequest(baseUrl, "GET", "/api/dashboard/overview", {
+      token: ownerJwt,
+    });
+    assert.equal(overviewHit1.status, 200);
+    assert.equal(overviewHit1.headers.get("cache-control"), "private, no-store");
+    const statusCallsAfterWarm = mockDashboard.counts.getSensorStatus;
+
+    const overviewHit2 = await apiRequest(baseUrl, "GET", "/api/dashboard/overview", {
+      token: ownerJwt,
+    });
+    assert.equal(overviewHit2.status, 200);
+    assert.equal(
+      mockDashboard.counts.getSensorStatus,
+      statusCallsAfterWarm,
+      "Expected warm overview GET to hit cache"
+    );
+
+    const overviewBypass = await apiRequest(baseUrl, "GET", "/api/dashboard/overview?refresh=1", {
+      token: ownerJwt,
+    });
+    assert.equal(overviewBypass.status, 200);
+    assert.equal(
+      mockDashboard.counts.getSensorStatus,
+      statusCallsAfterWarm + 1,
+      "Expected ?refresh=1 to bypass overview cache"
+    );
+
+    const histCallsBefore = mockDashboard.counts.getReadingsHistoryWithSummary;
+    await apiRequest(baseUrl, "GET", "/api/readings/history?hours=24&device_id=feather-s3-01", {
+      token: ownerJwt,
+    });
+    assert.equal(mockDashboard.counts.getReadingsHistoryWithSummary, histCallsBefore);
+    await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/readings/history?hours=24&device_id=feather-s3-01&refresh=1",
+      { token: ownerJwt }
+    );
+    assert.equal(mockDashboard.counts.getReadingsHistoryWithSummary, histCallsBefore + 1);
+
+    const relCallsBefore = mockDashboard.counts.listFirmwareReleases;
+    await apiRequest(baseUrl, "GET", "/api/firmware/releases", { token: ownerJwt });
+    assert.equal(mockDashboard.counts.listFirmwareReleases, relCallsBefore);
+
+    // Outdoor refresh invalidates both overview and history caches
+    const outdoorRefreshRes = await apiRequest(baseUrl, "POST", "/api/outdoor/refresh", {
+      token: ownerJwt,
+    });
+    assert.equal(outdoorRefreshRes.status, 200);
+
+    const statusCallsAfterInvalidate = mockDashboard.counts.getSensorStatus;
+    const histCallsAfterInvalidate = mockDashboard.counts.getReadingsHistoryWithSummary;
+    await apiRequest(baseUrl, "GET", "/api/dashboard/overview", { token: ownerJwt });
+    await apiRequest(baseUrl, "GET", "/api/readings/history?hours=24&device_id=feather-s3-01", {
+      token: ownerJwt,
+    });
+    assert.equal(mockDashboard.counts.getSensorStatus, statusCallsAfterInvalidate + 1);
+    assert.equal(
+      mockDashboard.counts.getReadingsHistoryWithSummary,
+      histCallsAfterInvalidate + 1
+    );
+    console.log(
+      "[PASS] 12. Server-side TTL cache serves warm hits, honors ?refresh=1, sets Cache-Control, and invalidates on writes"
+    );
 
     console.log("\nAll Dashboard API & WorkOS Auth verification checks passed!");
   } finally {

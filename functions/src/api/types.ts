@@ -3,6 +3,8 @@ import type { IncomingMessage } from "node:http";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Firestore } from "firebase-admin/firestore";
 
+import type { DashboardResponseCache } from "./cache.js";
+
 import type {
   WorkosAuthConfig,
   WorkosAuthDependencies,
@@ -97,4 +99,5 @@ export interface HandleDashboardApiOptions {
   authDeps?: WorkosAuthDependencies;
   db?: Firestore;
   dashboardService?: DashboardDataService;
+  cache?: DashboardResponseCache;
 }

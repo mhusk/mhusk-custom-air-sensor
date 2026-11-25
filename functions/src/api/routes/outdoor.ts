@@ -1,6 +1,7 @@
 import type { ServerResponse } from "node:http";
 
 import type { OutdoorReading } from "../../services/outdoor.js";
+import type { DashboardResponseCache } from "../cache.js";
 import { parseValidatedJsonBody, sendJson, sendMethodNotAllowed } from "../http.js";
 import { updateSiteLocationConfigSchema } from "../schemas.js";
 import type { DashboardDataService, IncomingApiRequest } from "../types.js";
@@ -13,9 +14,10 @@ export async function handleSiteConfigRoute(
     method: string;
     actor: string;
     service: DashboardDataService;
+    cache?: DashboardResponseCache;
   }
 ): Promise<void> {
-  const { pathname, method, actor, service } = params;
+  const { pathname, method, actor, service, cache } = params;
 
   if (method === "GET") {
     const siteConfig = service.getSiteLocationConfig
@@ -61,6 +63,8 @@ export async function handleSiteConfigRoute(
       config: saved,
       outdoor_sync: syncResult,
     });
+    cache?.invalidate("overview");
+    cache?.invalidatePrefix("history:");
     return;
   }
 
@@ -73,9 +77,10 @@ export async function handleOutdoorRefreshRoute(
     pathname: string;
     method: string;
     service: DashboardDataService;
+    cache?: DashboardResponseCache;
   }
 ): Promise<void> {
-  const { pathname, method, service } = params;
+  const { pathname, method, service, cache } = params;
   if (method !== "POST") {
     sendMethodNotAllowed(res, method, pathname);
     return;
@@ -98,5 +103,7 @@ export async function handleOutdoorRefreshRoute(
     return;
   }
 
+  cache?.invalidate("overview");
+  cache?.invalidatePrefix("history:");
   sendJson(res, 200, outcome);
 }

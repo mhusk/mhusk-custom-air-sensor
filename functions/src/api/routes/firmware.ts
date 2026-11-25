@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 
+import { RELEASES_CACHE_TTL_MS, type DashboardResponseCache } from "../cache.js";
 import { parseValidatedJsonBody, sendJson, sendMethodNotAllowed } from "../http.js";
 import { fleetRolloutSchema } from "../schemas.js";
 import type { DashboardDataService, IncomingApiRequest } from "../types.js";
@@ -41,19 +42,32 @@ export async function handleFirmwareReleasesRoute(
     pathname: string;
     method: string;
     service: DashboardDataService;
+    cache?: DashboardResponseCache;
+    bypassCache?: boolean;
   }
 ): Promise<void> {
-  const { pathname, method, service } = params;
+  const { pathname, method, service, cache, bypassCache } = params;
   if (method !== "GET") {
     sendMethodNotAllowed(res, method, pathname);
     return;
   }
 
+  const cacheKey = "firmware_releases";
+  if (cache && !bypassCache) {
+    const cached = cache.get<Record<string, unknown>>(cacheKey);
+    if (cached !== undefined) {
+      sendJson(res, 200, cached);
+      return;
+    }
+  }
+
   const releases = await service.listFirmwareReleases();
-  sendJson(res, 200, {
+  const payload = {
     count: releases.length,
     releases,
-  });
+  };
+  cache?.set(cacheKey, payload, RELEASES_CACHE_TTL_MS);
+  sendJson(res, 200, payload);
 }
 
 export async function handleFirmwareRolloutRoute(
@@ -64,9 +78,10 @@ export async function handleFirmwareRolloutRoute(
     method: string;
     actor: string;
     service: DashboardDataService;
+    cache?: DashboardResponseCache;
   }
 ): Promise<void> {
-  const { pathname, method, actor, service } = params;
+  const { pathname, method, actor, service, cache } = params;
   if (method !== "POST") {
     sendMethodNotAllowed(res, method, pathname);
     return;
@@ -103,6 +118,7 @@ export async function handleFirmwareRolloutRoute(
       service.setDeviceTargetFirmwareVersion(id, targetVersion, actor)
     )
   );
+  cache?.invalidate("overview");
 
   sendJson(res, 200, {
     updated: true,

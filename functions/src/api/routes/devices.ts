@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 
+import type { DashboardResponseCache } from "../cache.js";
 import { parseValidatedJsonBody, sendJson, sendMethodNotAllowed } from "../http.js";
 import {
   DEVICE_ID_REGEX,
@@ -50,9 +51,10 @@ export async function handleDeviceActionRoute(
     actor: string;
     service: DashboardDataService;
     deviceRoute: { deviceId: string; action: "config" | "reboot" | "firmware"; invalidEncoding: boolean };
+    cache?: DashboardResponseCache;
   }
 ): Promise<void> {
-  const { pathname, method, actor, service, deviceRoute } = params;
+  const { pathname, method, actor, service, deviceRoute, cache } = params;
 
   if (deviceRoute.invalidEncoding) {
     sendJson(res, 400, {
@@ -104,6 +106,7 @@ export async function handleDeviceActionRoute(
     }
 
     const saved = await service.updateDeviceConfig(deviceId, body, actor);
+    cache?.invalidate("overview");
     sendJson(res, 200, {
       updated: true,
       config: saved,
@@ -127,6 +130,7 @@ export async function handleDeviceActionRoute(
       targetVersion,
       actor
     );
+    cache?.invalidate("overview");
     sendJson(res, 200, {
       updated: true,
       device_id: deviceId,
@@ -138,6 +142,7 @@ export async function handleDeviceActionRoute(
 
   if (action === "reboot" && method === "POST") {
     const saved = await service.requestDeviceReboot(deviceId, actor);
+    cache?.invalidate("overview");
     sendJson(res, 200, {
       reboot_requested: true,
       config: saved,
