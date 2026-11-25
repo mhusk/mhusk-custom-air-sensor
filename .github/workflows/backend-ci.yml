@@ -1,0 +1,34 @@
+name: Backend & Dashboard Verification CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-backend-and-web:
+    name: Typecheck, Build & Offline Verification Suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "functions/package-lock.json"
+
+      - name: Install Cloud Functions Dependencies
+        run: npm --prefix functions ci
+
+      - name: Run Typecheck, Build & All Backend Offline Checks
+        run: npm --prefix functions test
+
+      - name: Run Web Dashboard Offline Checks
+        run: node scripts/verify_web_dashboard.mjs

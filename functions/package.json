@@ -12,6 +12,8 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
+    "test": "npm run verify:all",
+    "verify:all": "npm run typecheck && npm run build && node lib/scripts/verifyFirestore.js && node lib/scripts/verifyMcp.js && node lib/scripts/verifyAuth.js && node lib/scripts/verifyApi.js && node lib/scripts/verifyOutdoor.js && node lib/scripts/verifyRelease.js",
     "verify:firestore": "npm run build && node lib/scripts/verifyFirestore.js",
     "verify:mcp": "npm run build && node lib/scripts/verifyMcp.js",
     "verify:auth": "npm run build && node lib/scripts/verifyAuth.js",
