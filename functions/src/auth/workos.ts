@@ -12,6 +12,9 @@ export const OAUTH_AUTHORIZATION_SERVER_PATH = "/.well-known/oauth-authorization
 
 const USER_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTH_SERVER_METADATA_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_USER_CACHE_ENTRIES = 128;
+const MAX_METADATA_CACHE_ENTRIES = 16;
+const MAX_CLIENT_CACHE_ENTRIES = 8;
 
 export interface WorkosAuthConfig {
   workosApiKey?: string;
@@ -104,20 +107,101 @@ export type AuthVerificationResult =
       missingToken?: boolean;
     };
 
-interface CachedUserEntry {
-  user: ResolvedWorkosUser;
+interface BoundedTtlEntry<V> {
+  value: V;
   expiresAt: number;
 }
 
-interface CachedMetadataEntry {
-  metadata: Record<string, unknown>;
-  expiresAt: number;
+/**
+ * In-memory TTL cache with a hard max-entry cap and automatic pruning of
+ * expired and oldest entries so warm serverless instances stay bounded.
+ */
+export class BoundedTtlCache<K, V> {
+  private readonly store = new Map<K, BoundedTtlEntry<V>>();
+
+  constructor(private readonly maxEntries: number) {
+    if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+      throw new Error("maxEntries must be a positive integer.");
+    }
+  }
+
+  get size(): number {
+    return this.store.size;
+  }
+
+  get(key: K, now = Date.now()): V | undefined {
+    const entry = this.store.get(key);
+    if (!entry) {
+      return undefined;
+    }
+    if (entry.expiresAt <= now) {
+      this.store.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: K, value: V, ttlMs: number, now = Date.now()): void {
+    // Re-insert to refresh insertion order for oldest-entry eviction.
+    if (this.store.has(key)) {
+      this.store.delete(key);
+    }
+    if (this.store.size >= this.maxEntries) {
+      this.prune(now);
+    }
+    while (this.store.size >= this.maxEntries) {
+      const oldestKey = this.store.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.store.delete(oldestKey);
+    }
+    this.store.set(key, { value, expiresAt: now + ttlMs });
+  }
+
+  prune(now = Date.now()): number {
+    let removed = 0;
+    for (const [key, entry] of this.store.entries()) {
+      if (entry.expiresAt <= now) {
+        this.store.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+}
+
+function setBoundedMapEntry<K, V>(
+  cache: Map<K, V>,
+  key: K,
+  value: V,
+  maxEntries: number
+): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  while (cache.size >= maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+  cache.set(key, value);
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 const workosClientCache = new Map<string, WorkOS>();
-const userProfileCache = new Map<string, CachedUserEntry>();
-const authServerMetadataCache = new Map<string, CachedMetadataEntry>();
+const userProfileCache = new BoundedTtlCache<string, ResolvedWorkosUser>(
+  MAX_USER_CACHE_ENTRIES
+);
+const authServerMetadataCache = new BoundedTtlCache<string, Record<string, unknown>>(
+  MAX_METADATA_CACHE_ENTRIES
+);
 
 /**
  * Normalizes a WorkOS AuthKit domain into an origin-only HTTPS URL without a
@@ -255,8 +339,8 @@ export async function fetchAuthorizationServerMetadata(
   }
 
   const cached = authServerMetadataCache.get(cleanAuthKit);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.metadata;
+  if (cached) {
+    return cached;
   }
 
   const discoveryUrl = `${cleanAuthKit}${OAUTH_AUTHORIZATION_SERVER_PATH}`;
@@ -272,10 +356,7 @@ export async function fetchAuthorizationServerMetadata(
   }
 
   const metadata = (await response.json()) as Record<string, unknown>;
-  authServerMetadataCache.set(cleanAuthKit, {
-    metadata,
-    expiresAt: Date.now() + AUTH_SERVER_METADATA_CACHE_TTL_MS,
-  });
+  authServerMetadataCache.set(cleanAuthKit, metadata, AUTH_SERVER_METADATA_CACHE_TTL_MS);
 
   return metadata;
 }
@@ -287,7 +368,7 @@ function getRemoteJwksForAuthKit(authkitDomain: string): ReturnType<typeof creat
     return existing;
   }
   const created = createRemoteJWKSet(new URL(jwksUrl));
-  jwksCache.set(jwksUrl, created);
+  setBoundedMapEntry(jwksCache, jwksUrl, created, MAX_CLIENT_CACHE_ENTRIES);
   return created;
 }
 
@@ -303,7 +384,7 @@ function getWorkosClient(apiKey: string, clientId?: string): WorkOS {
   }
 
   const client = new WorkOS(apiKey, clientId ? { clientId } : undefined);
-  workosClientCache.set(keyHash, client);
+  setBoundedMapEntry(workosClientCache, keyHash, client, MAX_CLIENT_CACHE_ENTRIES);
   return client;
 }
 
@@ -323,8 +404,8 @@ async function resolveWorkosUserById(
 
   const cacheKey = `${crypto.createHash("sha256").update(apiKey, "utf8").digest("hex").slice(0, 12)}:${userId}`;
   const cached = userProfileCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.user;
+  if (cached) {
+    return cached;
   }
 
   const workos = getWorkosClient(apiKey, config.workosClientId?.trim() || undefined);
@@ -335,10 +416,7 @@ async function resolveWorkosUserById(
     emailVerified: user.emailVerified,
   };
 
-  userProfileCache.set(cacheKey, {
-    user: resolved,
-    expiresAt: Date.now() + USER_CACHE_TTL_MS,
-  });
+  userProfileCache.set(cacheKey, resolved, USER_CACHE_TTL_MS);
 
   return resolved;
 }

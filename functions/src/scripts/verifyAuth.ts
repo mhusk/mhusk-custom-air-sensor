@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import {
+  BoundedTtlCache,
   normalizeAuthKitDomain,
   parseAllowlist,
   type ResolvedWorkosUser,
@@ -54,6 +55,26 @@ async function main(): Promise<void> {
   assert.equal(parsedAllowlist.emails.has("second@example.org"), true);
   assert.equal(parsedAllowlist.userIds.has("user_test_owner_123"), true);
   console.log("[PASS] AuthKit domain normalization & allowlist parsing");
+
+  // 1b. BoundedTtlCache TTL expiry, expired pruning, and max-entry eviction
+  const cache = new BoundedTtlCache<string, string>(2);
+  cache.set("k1", "v1", 100, 1000);
+  cache.set("k2", "v2", 500, 1000);
+  assert.equal(cache.get("k1", 1050), "v1");
+  assert.equal(cache.get("k1", 1100), undefined);
+  // Adding k3 when k1 expired should not evict valid k2
+  cache.set("k1", "v1-expired", 100, 1000);
+  cache.set("k3", "v3", 500, 1150);
+  assert.equal(cache.size, 2);
+  assert.equal(cache.get("k2", 1150), "v2");
+  assert.equal(cache.get("k3", 1150), "v3");
+  // Adding k4 when both k2 and k3 are active evicts oldest (k2)
+  cache.set("k4", "v4", 500, 1200);
+  assert.equal(cache.size, 2);
+  assert.equal(cache.get("k2", 1200), undefined);
+  assert.equal(cache.get("k3", 1200), "v3");
+  assert.equal(cache.get("k4", 1200), "v4");
+  console.log("[PASS] BoundedTtlCache enforces TTL expiry, pruning, and capacity bounds");
 
   // 2. Generate ephemeral RS256 keypair simulating WorkOS AuthKit JWKS
   const { publicKey, privateKey } = await generateKeyPair("RS256");
