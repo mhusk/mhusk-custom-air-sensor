@@ -6,6 +6,7 @@ import {
 } from "firebase-admin/firestore";
 
 import {
+  appendOutdoorRollupSample,
   downsampleReadings,
   getDb,
   groupContiguousDateRanges,
@@ -632,7 +633,12 @@ export function buildOutdoorReadingDocId(
  * Location or clicks Refresh.
  */
 export async function syncOutdoorReadingIfStale(
-  options: { force?: boolean; db?: Firestore; deps?: OpenMeteoFetchDependencies } = {}
+  options: {
+    force?: boolean;
+    includeReading?: boolean;
+    db?: Firestore;
+    deps?: OpenMeteoFetchDependencies;
+  } = {}
 ): Promise<{
   synced: boolean;
   reason: string;
@@ -641,6 +647,7 @@ export async function syncOutdoorReadingIfStale(
   const db = options.db ?? getDb();
   const now = options.deps?.now ? options.deps.now() : new Date();
   const force = Boolean(options.force);
+  const includeReading = options.includeReading !== false;
   const siteRef = db.collection(SITE_CONFIGS_COLLECTION).doc(HOME_SITE_CONFIG_ID);
 
   let siteConfig: SiteLocationConfig | null = null;
@@ -701,7 +708,7 @@ export async function syncOutdoorReadingIfStale(
     }
 
     if (lease.status === "cached_fresh" || lease.status === "sync_in_progress") {
-      const latest = await getLatestOutdoorReading(db, now);
+      const latest = includeReading ? await getLatestOutdoorReading(db, now) : null;
       return {
         synced: false,
         reason:
@@ -742,18 +749,20 @@ export async function syncOutdoorReadingIfStale(
     ...snapshot,
     timestamp: Timestamp.fromDate(new Date(snapshot.timestamp)),
   };
+  const fullReading: OutdoorReading = {
+    id: docId,
+    ...snapshot,
+  };
 
   await Promise.all([
     db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData),
     siteRef.set({ outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true }),
+    appendOutdoorRollupSample(fullReading, db),
   ]);
 
   return {
     synced: true,
     reason: force ? "forced_refresh" : "cache_expired",
-    reading: {
-      id: docId,
-      ...snapshot,
-    },
+    reading: fullReading,
   };
 }

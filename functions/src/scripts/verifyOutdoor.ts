@@ -14,7 +14,9 @@ import type { DashboardDataService } from "../api/dashboard.js";
 import { createMcpHttpHandler } from "../index.js";
 import type { AirQualityDataService } from "../mcp/tools.js";
 import {
+  OUTDOOR_DAILY_ROLLUPS_COLLECTION,
   assessReadingHealth,
+  decodeOutdoorRollupDoc,
   type AirQualityReading,
   type DeviceConfig,
   type DeviceStatus,
@@ -471,11 +473,32 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
     [OUTDOOR_READINGS_COLLECTION, new Map()],
   ]);
 
+  let readCount = 0;
   let txLock: Promise<void> = Promise.resolve();
+  const mergeDocData = (
+    existing: Record<string, unknown>,
+    incoming: Record<string, unknown>
+  ): Record<string, unknown> => {
+    const merged: Record<string, unknown> = { ...existing, ...incoming };
+    if (
+      typeof existing.samples === "object" &&
+      existing.samples !== null &&
+      typeof incoming.samples === "object" &&
+      incoming.samples !== null
+    ) {
+      merged.samples = {
+        ...(existing.samples as Record<string, unknown>),
+        ...(incoming.samples as Record<string, unknown>),
+      };
+    }
+    return merged;
+  };
+
   const makeDocRef = (colName: string, docId: string) => ({
     colName,
     docId,
     async get() {
+      readCount += 1;
       const data = store.get(colName)?.get(docId);
       return {
         id: docId,
@@ -487,7 +510,7 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
       const col = store.get(colName) ?? new Map<string, Record<string, unknown>>();
       store.set(colName, col);
       const existing = opts?.merge ? (col.get(docId) ?? {}) : {};
-      col.set(docId, { ...existing, ...data });
+      col.set(docId, opts?.merge ? mergeDocData(existing, data) : { ...data });
     },
   });
 
@@ -509,6 +532,7 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
                 return dir === "desc" ? tb.localeCompare(ta) : ta.localeCompare(tb);
               });
               const sliced = docs.slice(0, n);
+              readCount += Math.max(1, sliced.length);
               return { empty: sliced.length === 0, docs: sliced };
             },
           }),
@@ -603,6 +627,27 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
   assert.equal(forced.reason, "forced_refresh");
   assert.equal(fetchCalls, 4);
   assert.equal(store.get(OUTDOOR_READINGS_COLLECTION)?.size, 2);
+
+  // Verify outdoor_daily_rollups received both synced snapshots
+  const rollupDoc = store.get(OUTDOOR_DAILY_ROLLUPS_COLLECTION)?.get("2026-11-24");
+  assert.ok(rollupDoc, "Expected outdoor_daily_rollups/2026-11-24 to be populated");
+  const decodedRollups = decodeOutdoorRollupDoc(rollupDoc);
+  assert.equal(decodedRollups.length, 2);
+
+  // Verify includeReading: false performs only 1 Firestore read on cached_fresh trigger hit
+  const readsBeforeCached = readCount;
+  const cachedOutcome = await syncOutdoorReadingIfStale({
+    includeReading: false,
+    db: mockDb,
+    deps: { fetchImpl: mockFetch, now: () => new Date("2026-11-24T17:10:00.000Z") },
+  });
+  assert.equal(cachedOutcome.synced, false);
+  assert.equal(cachedOutcome.reading, null);
+  assert.equal(
+    readCount - readsBeforeCached,
+    1,
+    "Expected only 1 Firestore read (site_configs/home) when includeReading=false"
+  );
   console.log("[PASS] 5. Concurrent outdoor sync coalesces via lease while force=true refreshes");
 }
 

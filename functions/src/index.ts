@@ -23,7 +23,7 @@ import {
 } from "./auth/workos.js";
 import { handleStatelessMcpHttpRequest, MCP_SERVER_INFO } from "./mcp/server.js";
 import type { AirQualityDataService } from "./mcp/tools.js";
-import { getDb } from "./services/firestore.js";
+import { appendIndoorRollupFromRawDoc, getDb } from "./services/firestore.js";
 import { syncOutdoorReadingIfStale } from "./services/outdoor.js";
 
 // Google Cloud Secret Manager bindings (injected at Cloud Run runtime; never committed to Git)
@@ -441,10 +441,10 @@ export const mcp = onRequest(
 
 /**
  * Firestore trigger (2nd Gen): whenever an ESP32-S3 sensor publishes a new
- * indoor reading, opportunistically captures an Open-Meteo outdoor weather +
- * US EPA AQI snapshot into `outdoor_readings` (throttled by `site_configs/home`'s
- * `outdoor_poll_interval_minutes`, default 15 min) so indoor-vs-outdoor deltas
- * and chart overlays stay populated with zero firmware changes.
+ * indoor reading, (1) idempotently appends the compact sample to `daily_rollups`
+ * with 0 Firestore reads, and (2) opportunistically captures an Open-Meteo
+ * outdoor weather + US EPA AQI snapshot into `outdoor_readings` +
+ * `outdoor_daily_rollups` (throttled by `site_configs/home`).
  */
 export const syncOutdoorOnReading = onDocumentCreated(
   {
@@ -454,14 +454,50 @@ export const syncOutdoorOnReading = onDocumentCreated(
     timeoutSeconds: 30,
     maxInstances: 2,
   },
-  async () => {
-    try {
-      const outcome = await syncOutdoorReadingIfStale({ db: getDb() });
-      console.log(`[outdoor] syncOutdoorOnReading: synced=${outcome.synced} (${outcome.reason})`);
-    } catch (error) {
+  async (event) => {
+    const db = getDb();
+    const readingId = event.params?.readingId;
+    const rawData = event.data?.data();
+
+    const rollupPromise =
+      readingId && rawData
+        ? appendIndoorRollupFromRawDoc(readingId, rawData, db)
+        : Promise.resolve(null);
+
+    const outdoorPromise = syncOutdoorReadingIfStale({
+      db,
+      includeReading: false,
+    });
+
+    const [rollupResult, outdoorResult] = await Promise.allSettled([
+      rollupPromise,
+      outdoorPromise,
+    ]);
+
+    if (rollupResult.status === "fulfilled") {
+      if (rollupResult.value) {
+        console.log(`[rollup] syncOutdoorOnReading: appended ${rollupResult.value}`);
+      }
+    } else {
+      console.error(
+        "[rollup] syncOutdoorOnReading rollup append failed (non-fatal):",
+        rollupResult.reason instanceof Error
+          ? rollupResult.reason.message
+          : String(rollupResult.reason)
+      );
+    }
+
+    if (outdoorResult.status === "fulfilled") {
+      const outcome = outdoorResult.value;
+      console.log(
+        `[outdoor] syncOutdoorOnReading: synced=${outcome.synced} (${outcome.reason})`
+      );
+    } else {
       console.error(
         "[outdoor] syncOutdoorOnReading failed (non-fatal):",
-        error instanceof Error ? error.message : String(error)
+        outdoorResult.reason instanceof Error
+          ? outdoorResult.reason.message
+          : String(outdoorResult.reason)
       );
     }
   }
