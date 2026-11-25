@@ -8,7 +8,9 @@ import {
 import {
   downsampleReadings,
   getDb,
+  groupContiguousDateRanges,
   parseTimestampToDateOrNull,
+  readOutdoorReadingsFromRollups,
   roundTo,
   type AirQualityReading,
   type AqiCategory,
@@ -543,22 +545,63 @@ export async function getOutdoorReadingsHistory(
   const clampedLimit = Math.max(1, Math.min(500, Math.round(limit)));
   const startDate = new Date(now.getTime() - clampedHours * 60 * 60 * 1000);
 
-  const snap = await db
-    .collection(OUTDOOR_READINGS_COLLECTION)
-    .where("timestamp", ">=", Timestamp.fromDate(startDate))
-    .orderBy("timestamp", "asc")
-    .limit(1000)
-    .get();
+  const rollupResult = await readOutdoorReadingsFromRollups(
+    { startDate, endDate: now },
+    db
+  );
 
-  const readings: OutdoorReading[] = [];
-  for (const doc of snap.docs) {
-    const mapped = mapOutdoorReadingDoc(doc);
-    if (mapped) {
-      readings.push(mapped);
+  if (rollupResult.missingDates.length === 0) {
+    return downsampleReadings(rollupResult.readings, clampedLimit);
+  }
+
+  const missingRanges = groupContiguousDateRanges(rollupResult.missingDates);
+  const startMs = startDate.getTime();
+  const endMs = now.getTime();
+
+  const fallbackBatches = await Promise.all(
+    missingRanges.map(async (range) => {
+      const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
+      const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
+      if (clampedStart.getTime() > clampedEnd.getTime()) {
+        return [];
+      }
+
+      const snap = await db
+        .collection(OUTDOOR_READINGS_COLLECTION)
+        .where("timestamp", ">=", Timestamp.fromDate(clampedStart))
+        .where("timestamp", "<=", Timestamp.fromDate(clampedEnd))
+        .orderBy("timestamp", "asc")
+        .limit(1000)
+        .get();
+
+      const items: OutdoorReading[] = [];
+      for (const doc of snap.docs) {
+        const mapped = mapOutdoorReadingDoc(doc);
+        if (mapped) {
+          items.push(mapped);
+        }
+      }
+      return items;
+    })
+  );
+
+  const deduped = new Map<number, OutdoorReading>();
+  for (const r of rollupResult.readings) {
+    deduped.set(Math.floor(Date.parse(r.timestamp) / 1000), r);
+  }
+  for (const batch of fallbackBatches) {
+    for (const r of batch) {
+      const key = Math.floor(Date.parse(r.timestamp) / 1000);
+      if (!deduped.has(key)) {
+        deduped.set(key, r);
+      }
     }
   }
 
-  return downsampleReadings(readings, clampedLimit);
+  const merged = Array.from(deduped.values()).sort((a, b) =>
+    a.timestamp.localeCompare(b.timestamp)
+  );
+  return downsampleReadings(merged, clampedLimit);
 }
 
 /**

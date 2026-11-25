@@ -23,6 +23,10 @@ import {
 } from "./db.js";
 import { mapDeviceData } from "./devices.js";
 import {
+  groupContiguousDateRanges,
+  readIndoorReadingsFromRollups,
+} from "./rollups.js";
+import {
   DEFAULT_HISTORY_HOURS,
   DEFAULT_HISTORY_LIMIT,
   MAX_EXPLICIT_WINDOW_DAYS,
@@ -111,6 +115,113 @@ function buildReadingsQuery(
 
   query = query.orderBy("timestamp", "desc").limit(filters.limit);
   return { query, postFilterLocation };
+}
+
+async function fetchRawReadingsInWindow(
+  db: Firestore,
+  options: {
+    device_id?: string;
+    location?: string;
+    startDate: Date;
+    endDate: Date;
+    maxScanDocs: number;
+  }
+): Promise<{ readings: AirQualityReading[]; scanCapped: boolean }> {
+  const { query, postFilterLocation } = buildReadingsQuery(db, {
+    device_id: options.device_id,
+    location: options.location,
+    startDate: options.startDate,
+    endDate: options.endDate,
+    limit: options.maxScanDocs,
+  });
+
+  const snapshot = await query.get();
+  const scanCapped = snapshot.size >= options.maxScanDocs;
+
+  let readings = snapshot.docs.map(mapReadingSnapshot);
+  if (postFilterLocation) {
+    readings = readings.filter((r) => r.location === postFilterLocation);
+  }
+  // Reverse from Firestore DESC order into chronological ASC order.
+  readings.reverse();
+  return { readings, scanCapped };
+}
+
+async function fetchReadingsWindowWithRollups(
+  db: Firestore,
+  options: {
+    device_id?: string;
+    location?: string;
+    startDate: Date;
+    endDate: Date;
+    maxScanDocs: number;
+  }
+): Promise<{ readings: AirQualityReading[]; scanCapped: boolean }> {
+  const rollupResult = await readIndoorReadingsFromRollups(
+    {
+      startDate: options.startDate,
+      endDate: options.endDate,
+      device_id: options.device_id,
+      location: options.location,
+    },
+    db
+  );
+
+  if (rollupResult.missingDates.length === 0) {
+    return { readings: rollupResult.readings, scanCapped: false };
+  }
+
+  const missingRanges = groupContiguousDateRanges(rollupResult.missingDates);
+  const startMs = options.startDate.getTime();
+  const endMs = options.endDate.getTime();
+  let scanCapped = false;
+
+  const fallbackBatches = await Promise.all(
+    missingRanges.map(async (range) => {
+      const clampedStart = new Date(Math.max(startMs, range.startDate.getTime()));
+      const clampedEnd = new Date(Math.min(endMs, range.endDate.getTime()));
+      if (clampedStart.getTime() > clampedEnd.getTime()) {
+        return [];
+      }
+      const raw = await fetchRawReadingsInWindow(db, {
+        device_id: options.device_id,
+        location: options.location,
+        startDate: clampedStart,
+        endDate: clampedEnd,
+        maxScanDocs: options.maxScanDocs,
+      });
+      if (raw.scanCapped) {
+        scanCapped = true;
+      }
+      return raw.readings;
+    })
+  );
+
+  if (rollupResult.readings.length === 0 && fallbackBatches.length === 1) {
+    return { readings: fallbackBatches[0], scanCapped };
+  }
+
+  const deduped = new Map<string, AirQualityReading>();
+  const addReading = (reading: AirQualityReading): void => {
+    const dedupeKey = `${reading.device_id}|${Math.floor(Date.parse(reading.timestamp) / 1000)}`;
+    if (!deduped.has(dedupeKey)) {
+      deduped.set(dedupeKey, reading);
+    }
+  };
+
+  for (const r of rollupResult.readings) {
+    addReading(r);
+  }
+  for (const batch of fallbackBatches) {
+    for (const r of batch) {
+      addReading(r);
+    }
+  }
+
+  const merged = Array.from(deduped.values()).sort((a, b) =>
+    a.timestamp.localeCompare(b.timestamp)
+  );
+  return { readings: merged, scanCapped };
 }
 
 /**
@@ -211,24 +322,13 @@ export async function getReadingsHistory(
     MAX_HISTORY_LIMIT
   );
 
-  const { query, postFilterLocation } = buildReadingsQuery(db, {
+  const { readings, scanCapped } = await fetchReadingsWindowWithRollups(db, {
     device_id: options.device_id,
     location: options.location,
     startDate,
     endDate,
-    limit: MAX_HISTORY_SCAN_DOCS,
+    maxScanDocs: MAX_HISTORY_SCAN_DOCS,
   });
-
-  const snapshot = await query.get();
-  const scanCapped = snapshot.size >= MAX_HISTORY_SCAN_DOCS;
-
-  let readings = snapshot.docs.map(mapReadingSnapshot);
-  if (postFilterLocation) {
-    readings = readings.filter((r) => r.location === postFilterLocation);
-  }
-
-  // Reverse from Firestore DESC order into chronological ASC order for trend reading.
-  readings.reverse();
 
   const totalMatching = readings.length;
   const downsampled = totalMatching > limit;
@@ -302,22 +402,13 @@ export async function getReadingsHistoryWithSummary(
     MAX_HISTORY_LIMIT
   );
 
-  const { query, postFilterLocation } = buildReadingsQuery(db, {
+  const { readings, scanCapped } = await fetchReadingsWindowWithRollups(db, {
     device_id: options.device_id,
     location: options.location,
     startDate,
     endDate: now,
-    limit: MAX_HISTORY_SCAN_DOCS,
+    maxScanDocs: MAX_HISTORY_SCAN_DOCS,
   });
-
-  const snapshot = await query.get();
-  const scanCapped = snapshot.size >= MAX_HISTORY_SCAN_DOCS;
-
-  let readings = snapshot.docs.map(mapReadingSnapshot);
-  if (postFilterLocation) {
-    readings = readings.filter((r) => r.location === postFilterLocation);
-  }
-  readings.reverse();
 
   const totalMatching = readings.length;
   const downsampled = totalMatching > limit;
@@ -366,22 +457,13 @@ export async function getAirQualitySummary(
   const now = options.now ?? new Date();
   const startDate = new Date(now.getTime() - periodMs);
 
-  const { query, postFilterLocation } = buildReadingsQuery(db, {
+  const { readings, scanCapped } = await fetchReadingsWindowWithRollups(db, {
     device_id: options.device_id,
     location: options.location,
     startDate,
     endDate: now,
-    limit: MAX_SUMMARY_SCAN_DOCS,
+    maxScanDocs: MAX_SUMMARY_SCAN_DOCS,
   });
-
-  const snapshot = await query.get();
-  const scanCapped = snapshot.size >= MAX_SUMMARY_SCAN_DOCS;
-
-  let readings = snapshot.docs.map(mapReadingSnapshot);
-  if (postFilterLocation) {
-    readings = readings.filter((r) => r.location === postFilterLocation);
-  }
-  readings.reverse();
 
   return computeAirQualitySummaryFromReadings(readings, {
     period: options.period,

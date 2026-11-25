@@ -11,6 +11,7 @@ import { Timestamp, type DocumentData, type Firestore } from "firebase-admin/fir
 import {
   DAILY_ROLLUPS_COLLECTION,
   OUTDOOR_DAILY_ROLLUPS_COLLECTION,
+  READINGS_COLLECTION,
   appendIndoorRollupFromRawDoc,
   appendIndoorRollupSample,
   appendOutdoorRollupSample,
@@ -21,13 +22,19 @@ import {
   encodeIndoorRollupSample,
   encodeOutdoorRollupSample,
   formatUtcDateString,
+  getAirQualitySummary,
+  getReadingsHistoryWithSummary,
   groupContiguousDateRanges,
   listUtcDateStrings,
   readIndoorReadingsFromRollups,
   readOutdoorReadingsFromRollups,
   type AirQualityReading,
 } from "../services/firestore.js";
-import type { OutdoorReading } from "../services/outdoor.js";
+import {
+  OUTDOOR_READINGS_COLLECTION,
+  getOutdoorReadingsHistory,
+  type OutdoorReading,
+} from "../services/outdoor.js";
 
 function deepMergeMaps(
   target: Record<string, unknown>,
@@ -334,6 +341,123 @@ async function runTests(): Promise<void> {
   assert.equal(outRes.readings.length, 1);
   assert.equal(outRes.readings[0].us_aqi, 34);
   console.log("   [PASS] Outdoor rollup writer & batch reader");
+
+  // 5. Parity & O(days) read count on 7d/30d history + summary + mixed raw fallback
+  const rollupHarness = createMockRollupFirestore();
+  const rawOnlyHarness = createMockRollupFirestore();
+  const endNow = new Date("2026-11-24T20:00:00.000Z");
+
+  // Seed 7 days (288 readings/day @ 5-min cadence = 2,016 readings) into raw-only DB
+  // and seed days 2..7 into rollupHarness rollups while leaving day 1 (Nov 18) only in raw readings
+  const seededCount = 7 * 288;
+  const startSeedMs = endNow.getTime() - 7 * 24 * 60 * 60 * 1000;
+  for (let i = 0; i < seededCount; i++) {
+    const ts = new Date(startSeedMs + i * 5 * 60 * 1000);
+    const co2 = i % 100 === 0 ? 1150 : 600 + (i % 150);
+    const pm25 = i % 140 === 0 ? 14.5 : 4.0;
+    const sample = makeSampleReading({
+      id: `feather-s3-01_${Math.floor(ts.getTime() / 1000)}`,
+      timestamp: ts.toISOString(),
+      co2_ppm: co2,
+      pm2_5_ug_m3: pm25,
+    });
+    const rawDoc = {
+      ...sample,
+      timestamp: Timestamp.fromDate(ts),
+    };
+    let rawCol = rawOnlyHarness.store.get(READINGS_COLLECTION);
+    if (!rawCol) {
+      rawCol = new Map();
+      rawOnlyHarness.store.set(READINGS_COLLECTION, rawCol);
+    }
+    rawCol.set(sample.id, rawDoc);
+
+    const dateStr = formatUtcDateString(ts);
+    if (dateStr === "2026-11-17" || dateStr === "2026-11-18") {
+      let mixedRaw = rollupHarness.store.get(READINGS_COLLECTION);
+      if (!mixedRaw) {
+        mixedRaw = new Map();
+        rollupHarness.store.set(READINGS_COLLECTION, mixedRaw);
+      }
+      mixedRaw.set(sample.id, rawDoc);
+    } else {
+      await appendIndoorRollupSample(sample, rollupHarness.db);
+    }
+  }
+
+  // Also seed full 7d in a pure-rollup harness to verify O(days) read count
+  const pureRollupHarness = createMockRollupFirestore();
+  for (const [, rawDoc] of rawOnlyHarness.store.get(READINGS_COLLECTION)!.entries()) {
+    const tsDate = (rawDoc.timestamp as Timestamp).toDate();
+    await appendIndoorRollupSample(
+      makeSampleReading({
+        id: String(rawDoc.id ?? ""),
+        timestamp: tsDate.toISOString(),
+        co2_ppm: Number(rawDoc.co2_ppm),
+        pm2_5_ug_m3: Number(rawDoc.pm2_5_ug_m3),
+      }),
+      pureRollupHarness.db
+    );
+  }
+  pureRollupHarness.counts.reads = 0;
+  pureRollupHarness.counts.writes = 0;
+
+  const rawRes = await getReadingsHistoryWithSummary(
+    { hours: 168, period: "7d", limit: 240, device_id: "feather-s3-01", now: endNow },
+    rawOnlyHarness.db
+  );
+  const pureRes = await getReadingsHistoryWithSummary(
+    { hours: 168, period: "7d", limit: 240, device_id: "feather-s3-01", now: endNow },
+    pureRollupHarness.db
+  );
+  const mixedRes = await getReadingsHistoryWithSummary(
+    { hours: 168, period: "7d", limit: 240, device_id: "feather-s3-01", now: endNow },
+    rollupHarness.db
+  );
+
+  // Raw fallback checked 8 missing rollup docs + scanned 2,016 raw docs; pure rollup read only 8 daily docs!
+  assert.equal(rawOnlyHarness.counts.reads, 8 + seededCount);
+  assert.equal(pureRollupHarness.counts.reads, 8);
+  assert.deepEqual(pureRes.summary.metrics, rawRes.summary.metrics);
+  assert.deepEqual(pureRes.summary.threshold_exceedances, rawRes.summary.threshold_exceedances);
+  assert.equal(pureRes.summary.notable_spikes.length, rawRes.summary.notable_spikes.length);
+  assert.deepEqual(mixedRes.summary.metrics, rawRes.summary.metrics);
+  assert.equal(mixedRes.history.total_matching, rawRes.history.total_matching);
+
+  // 30d summary reads <= 31 rollup docs
+  pureRollupHarness.counts.reads = 0;
+  const summary30d = await getAirQualitySummary(
+    { period: "30d", device_id: "feather-s3-01", now: endNow },
+    pureRollupHarness.db
+  );
+  assert.ok(pureRollupHarness.counts.reads <= 31);
+  assert.equal(summary30d.sample_count, seededCount);
+
+  // Outdoor 7d history reads <= 8 docs from rollups + falls back cleanly for missing days
+  const outMixedHarness = createMockRollupFirestore();
+  for (let d = 0; d < 4; d++) {
+    const ts = new Date(endNow.getTime() - d * 24 * 60 * 60 * 1000);
+    const outItem = makeSampleOutdoor({
+      id: `outdoor_${d}`,
+      timestamp: ts.toISOString(),
+      temperature_f: 55 + d,
+    });
+    if (d < 2) {
+      await appendOutdoorRollupSample(outItem, outMixedHarness.db);
+    } else {
+      let outRaw = outMixedHarness.store.get(OUTDOOR_READINGS_COLLECTION);
+      if (!outRaw) {
+        outRaw = new Map();
+        outMixedHarness.store.set(OUTDOOR_READINGS_COLLECTION, outRaw);
+      }
+      outRaw.set(outItem.id, { ...outItem, timestamp: Timestamp.fromDate(ts) });
+    }
+  }
+  outMixedHarness.counts.reads = 0;
+  const outHistory = await getOutdoorReadingsHistory(168, 200, outMixedHarness.db, endNow);
+  assert.equal(outHistory.length, 4);
+  assert.ok(outMixedHarness.counts.reads <= 12);
+  console.log("   [PASS] 7d/30d rollup parity, O(days) read reduction, and mixed raw fallback");
 }
 
 runTests()
