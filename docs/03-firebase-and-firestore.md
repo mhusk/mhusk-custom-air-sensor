@@ -16,13 +16,16 @@ flowchart LR
     FS -->|"Indexed Time-Series Queries<br/>via Admin SDK"| MCP["Cloud Functions<br/>Remote MCP Server"]
 ```
 
-### Why Two Firestore Collections? (`readings` + `devices`)
+### Why Two Firestore Collections? (`readings` + `devices`) — Plus Daily Rollups
 1. **`readings` (Append-Only Time-Series Collection)**:
    - Every 5 minutes (288 readings/day), the ESP32-S3 writes one immutable document containing CO<sub>2</sub>, temperature, humidity, PM<sub>1.0</sub>/PM<sub>2.5</sub>/PM<sub>10</sub>, raw particle counts, and the computed US EPA AQI.
-   - Keeping each sample as its own small document makes range queries (`"last 24 hours"`, `"past 7 days"`) fast and cheap, and stays well inside Firestore's free tier (~288 writes/day vs. 20,000 free writes/day).
+   - Keeping each sample as its own small document keeps sensor writes simple and write-only via `firestore.rules`, and stays well inside Firestore's free tier (~288 writes/day vs. 20,000 free writes/day).
 2. **`devices` (Device Registry & Latest Status)**:
    - One document per physical sensor (`devices/{device_id}`), updated on every publish with `last_seen_at`, firmware metadata, and a snapshot of the `latest_reading`.
    - When an AI assistant asks *"Is my office sensor online?"*, the MCP server reads a single tiny document instead of scanning historical readings.
+3. **`daily_rollups` & `outdoor_daily_rollups` (UTC-Day Read Optimization — [Guide 13](./13-firestore-read-optimization-and-rollups.md))**:
+   - Maintained server-side via Admin SDK (`syncOutdoorOnReading` + [`backfillRollups.ts`](../functions/src/scripts/backfillRollups.ts)), storing compact lossless per-reading maps per UTC day (`daily_rollups/{device_id}_{YYYY-MM-DD}` and `outdoor_daily_rollups/{YYYY-MM-DD}`).
+   - [`firestore.indexes.json`](../firestore.indexes.json) includes `fieldOverrides` disabling automatic indexing on both `samples` maps so dense days never approach Firestore's 40,000 index-entries-per-document limit. This cuts 24h/7d dashboard and MCP history queries by **>99%** with automatic raw fallback for any missing day.
 
 ### Why Do We Need Composite Indexes (`firestore.indexes.json`)?
 Firestore automatically indexes every single field on its own, which handles simple queries like `WHERE device_id == "feather-s3-01"`. However, as soon as you combine a **filter on one field** with an **order or range on a second field**—such as:

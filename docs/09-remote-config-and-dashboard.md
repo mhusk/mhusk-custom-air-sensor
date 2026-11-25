@@ -309,8 +309,8 @@ Your live dashboard is immediately available at `https://<your-firebase-project-
 > In [`firebase.json`](../firebase.json), writing `"function": "mcp"` defaults Firebase Hosting to `us-central1` and returns `404` when your function lives in `us-east1`. Always use the object form `{ "functionId": "mcp", "region": "us-east1" }` and keep the `/api/**` rewrite **above** the `"source": "**"` SPA catch-all rewrite.
 
 > [!TIP]
-> **Why Manual Refresh + Zero-Build Static Files?**
-> With manual refresh only (no background polling loop while a tab sits open overnight), the dashboard incurs zero idle Cloud Functions invocations or Firestore reads, keeping monthly usage comfortably inside Firebase's free tier. Zero-build ES Modules also eliminate `node_modules` bloat and let `firebase deploy --only hosting` finish in a few seconds.
+> **Why Manual Refresh + Multi-Layer Caching + Zero-Build Static Files?**
+> With manual refresh only (no background polling loop while a tab sits open overnight), plus a 5-minute in-memory browser `chartsCache`, lazy Fleet tab release loading, targeted `refreshOverviewOnly()` updates after config saves, a 60s–300s server-side `DashboardResponseCache` (bypassed via `?refresh=1`), and UTC-day `daily_rollups` (see [Guide 13](./13-firestore-read-optimization-and-rollups.md)), the dashboard incurs **0 idle reads** and only a handful of Firestore reads on live refreshes—keeping monthly usage comfortably inside Firebase's free tier. Zero-build ES Modules also eliminate `node_modules` bloat and let `firebase deploy --only hosting` finish in a few seconds.
 
 > [!NOTE]
 > **WorkOS UI Gotcha: "Redirect URIs" Lives Under Applications (Not Top-Level Redirects or Admin Portal).**
