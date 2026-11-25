@@ -6,6 +6,8 @@ export const DEVICES_COLLECTION = "devices";
 export const DEVICE_CONFIGS_COLLECTION = "device_configs";
 export const FIRMWARE_RELEASES_COLLECTION = "firmware_releases";
 export const FIRMWARE_RELEASE_FILES_SUBCOLLECTION = "files";
+export const DAILY_ROLLUPS_COLLECTION = "daily_rollups";
+export const OUTDOOR_DAILY_ROLLUPS_COLLECTION = "outdoor_daily_rollups";
 
 /**
  * Lazily initializes Firebase Admin and returns the default Firestore instance.

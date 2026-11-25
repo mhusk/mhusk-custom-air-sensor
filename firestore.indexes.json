@@ -29,5 +29,16 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "daily_rollups",
+      "fieldPath": "samples",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "outdoor_daily_rollups",
+      "fieldPath": "samples",
+      "indexes": []
+    }
+  ]
 }
