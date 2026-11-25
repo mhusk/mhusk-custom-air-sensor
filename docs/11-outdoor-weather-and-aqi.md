@@ -10,10 +10,10 @@
    - Because this repository is public on GitHub, your home latitude/longitude is **never** committed to Git or hardcoded in Cloud Functions.
    - Instead, you configure it once in the Web Dashboard (**Configure Home Location** → `PUT /api/site/config`), which stores `{ label, latitude, longitude, outdoor_poll_interval_minutes }` in Cloud Firestore at `site_configs/home`.
    - `firestore.rules` denies all client/sensor access to `site_configs` and `outdoor_readings` via the default catch-all rule (`allow read, write: if false;`), so only the Cloud Functions Admin SDK can read or write them.
-2. **Event-Driven Capture with Deduplication (`syncOutdoorOnReading`)**:
+2. **Event-Driven Capture with Deduplication & Transaction Lease (`syncOutdoorOnReading`)**:
    - A 2nd Gen Firestore trigger (`onDocumentCreated("readings/{readingId}")` in `us-east1`) runs whenever any ESP32-S3 sensor publishes a reading.
-   - Before calling Open-Meteo, it checks the newest document in `outdoor_readings`. If it is fresher than `outdoor_poll_interval_minutes` (default **15 minutes**), the trigger exits immediately—so adding multiple room sensors never causes redundant weather API calls.
-   - When the cache expires (or when you save your location / click **Refresh Outdoor**), `fetchOpenMeteoSnapshot()` fetches Open-Meteo's Weather API and Air Quality API in parallel and writes a timestamped document to `outdoor_readings`.
+   - Before calling Open-Meteo, `syncOutdoorReadingIfStale()` acquires a lightweight Firestore transaction lease on `site_configs/home` (`outdoor_last_synced_at` and `outdoor_last_sync_attempt_at` with a 60-second lease window) and falls back to checking the newest `outdoor_readings` document. If a snapshot is fresher than `outdoor_poll_interval_minutes` (default **15 minutes**) or another trigger already holds the sync lease, it exits immediately—coalescing concurrent multi-room triggers into a single Open-Meteo call.
+   - When the cache expires (or when you save your location / click **Refresh Outdoor**, which uses `force: true`), `fetchOpenMeteoSnapshot()` fetches Open-Meteo's Weather API and Air Quality API in parallel and writes a document to `outdoor_readings` (using a deterministic interval-bucketed ID for scheduled trigger syncs).
 3. **Zero Firmware Changes**:
    - The ESP32-S3 keeps publishing its lightweight indoor payload untouched; all outdoor enrichment happens server-side in Cloud Functions.
 

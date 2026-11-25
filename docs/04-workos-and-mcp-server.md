@@ -1,6 +1,6 @@
 # Guide 04: Cloud Functions (2nd Gen), Firestore Query Service & Remote MCP Server
 
-> **Built across Steps 5, 6, and 7 of [`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md)** — Part 1 (Step 5) scaffolds the Node.js 22 + TypeScript Cloud Functions project and implements the typed Cloud Firestore data access & statistical aggregation layer ([`functions/src/services/firestore.ts`](../functions/src/services/firestore.ts)). Part 2 (Step 6) adds the MCP Server tools, prompts, and resources. Part 3 (Step 7) wires up WorkOS AuthKit OAuth 2.1, the owner allowlist, and deploys to Cloud Functions (2nd Gen).
+> **Built across Steps 5, 6, and 7 of [`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md)** — Part 1 (Step 5) scaffolds the Node.js 22 + TypeScript Cloud Functions project and implements the typed Cloud Firestore data access & statistical aggregation layer (organized into domain modules under [`functions/src/services/firestore/`](../functions/src/services/firestore/) behind the [`functions/src/services/firestore.ts`](../functions/src/services/firestore.ts) barrel). Part 2 (Step 6) adds the MCP Server tools, prompts, and resources. Part 3 (Step 7) wires up WorkOS AuthKit OAuth 2.1, the owner allowlist, and deploys to Cloud Functions (2nd Gen).
 
 ---
 
@@ -97,9 +97,11 @@ npm --prefix functions run build
 ## 3. Single Focused Validation Checkpoint (Part 1)
 
 ### 1. Offline TypeScript Build & Unit Verification
-Run the build + offline statistical/helper checks (tests `computeMetricStats`, `downsampleReadings`, `assessReadingHealth`, and `detectNotableSpikes`):
+Run the unified build, typecheck, and all 6 offline backend verification suites in one command (or run `verify:firestore` individually):
 
 ```bash
+npm --prefix functions test
+# Or run the Firestore unit suite alone:
 npm --prefix functions run verify:firestore
 ```
 

@@ -159,8 +159,12 @@ flowchart TD
     ALLOW --> FS
 ```
 
-### Why the device UID stays out of the rules file
-This repository is public, and a fork should deploy the same rules without inheriting someone else's device. The rules ask one question: does a document exist at `authorized_devices/{request.auth.uid}`? The Firebase Console writes that document with Admin privileges. Client calls cannot create it, read it, or change it. `exists()` inside rules still sees it, because the rules engine performs that lookup itself and does not hand the document to the caller.
+### Why the device UID stays out of the rules file (and Optional Per-Device Isolation)
+This repository is public, and a fork should deploy the same rules without inheriting someone else's device. The rules first check whether a document exists at `authorized_devices/{request.auth.uid}` (`isSensorDevice()`). The Firebase Console writes that document with Admin privileges. Client calls cannot create it, read it, or change it, while the rules engine reads it server-side without exposing it to the caller.
+
+For multi-room fleets (Phase 4B), `canActAsDevice(deviceId)` also supports an optional `device_id` string field on `authorized_devices/{uid}`:
+- **When `device_id` is set** (for example, `"feather-s3-01"`), that Firebase Auth UID can only write `readings` with that exact `device_id`, write `devices/{device_id}`, and `get` `device_configs/{device_id}`—preventing one compromised node from spoofing or reading another room's config.
+- **When `device_id` is omitted or `null`** (legacy single-sensor allowlist doc), any valid `device_id` is permitted for zero-downtime migration until you stamp `device_id` in Firebase Console (with zero firmware changes).
 
 ### What the device account is allowed to do
 | Path | Create | Update | Delete | Read |
@@ -201,7 +205,7 @@ Numbers are checked with `is number`, which accepts both integers and doubles. F
 1. Open **Firebase Console → Firestore Database → Data**.
 2. Start a collection named `authorized_devices`.
 3. Set the **Document ID** to the device user's **User UID** from Authentication (the UID, not the email).
-4. Add one field: `role` (string) = `sensor`. The rules ignore the field. They only check that the document exists.
+4. Add one field: `role` (string) = `sensor`. Optionally add `device_id` (string, e.g., `feather-s3-01`) to strictly bind this Auth UID to a single sensor node across `readings`, `devices`, and `device_configs`.
 5. Save.
 
 Do this from the Console. After the rules below are deployed, the REST API and client SDKs are locked out of `authorized_devices`, while the Console still writes with Admin privileges.

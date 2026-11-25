@@ -187,7 +187,9 @@ Watch the serial console (`screen /dev/cu.usbmodem* 115200`) on boot and confirm
 
 Instead of standing up a separate server, the lightweight Dashboard REST API lives inside the same **2nd Gen Firebase Cloud Function** (`functions/src/index.ts`) that already serves your Remote MCP Server—reusing your existing Google Cloud Secret Manager bindings (`WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_AUTHKIT_DOMAIN`, `ALLOWED_USER_EMAILS`, `MCP_BEARER_FALLBACK_SECRET`) with zero new secrets required.
 
-### API Endpoint Map (`functions/src/api/dashboard.ts`)
+### API Endpoint Map ([`functions/src/api/dashboard.ts`](../functions/src/api/dashboard.ts) & [`functions/src/api/routes/`](../functions/src/api/routes/))
+
+Route handlers are grouped by domain under `functions/src/api/routes/` (`auth.ts`, `telemetry.ts`, `outdoor.ts`, `firmware.ts`, `devices.ts`) with shared Zod schemas in `schemas.ts` and JSON/validation helpers in `http.ts`. Standard `GET /api/readings/history` chart loads use `getReadingsHistoryWithSummary()` to compute both downsampled points and summary stats from a **single** Firestore `readings` query.
 
 | Method & Route | Auth Required? | Purpose |
 | :--- | :--- | :--- |
@@ -245,8 +247,8 @@ sequenceDiagram
 > MCP clients receive WorkOS Connect OAuth 2.1 tokens (`iss: https://<subdomain>.authkit.app`, verified against `${authkitDomain}/oauth2/jwks`). Browser dashboards using `authenticateWithCode()` receive WorkOS UserManagement session access tokens (carrying `sid` + `auth_time`, verified via `workos.userManagement.verifyAccessToken()`). Supporting both paths inside [`functions/src/auth/workos.ts`](../functions/src/auth/workos.ts) while enforcing the exact same fail-closed `ALLOWED_USER_EMAILS` check keeps AI assistants and the web dashboard seamlessly protected under one WorkOS setup.
 
 > [!TIP]
-> **Don't forget `PUT` in `Access-Control-Allow-Methods`!**
-> Earlier MCP-only CORS headers only allowed `GET, POST, DELETE, OPTIONS`. Adding `PUT` in [`functions/src/index.ts`](../functions/src/index.ts) ensures browser preflights for `PUT /api/devices/:deviceId/config` succeed cleanly.
+> **CORS Restrictions for `/api/*` vs. Open CORS for `/mcp`.**
+> [`functions/src/index.ts`](../functions/src/index.ts) keeps open CORS on `/mcp` and `/.well-known/*` for remote AI assistants and MCP Inspector (allowing `GET, POST, PUT, DELETE, OPTIONS`), while restricting `/api/*` `Access-Control-Allow-Origin` to the server's own public origin, `localhost`/`127.0.0.1` dev origins, and any extra comma-separated origins configured via the optional `ALLOWED_DASHBOARD_ORIGINS` environment variable.
 
 ---
 
