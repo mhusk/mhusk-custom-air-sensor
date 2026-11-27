@@ -8,6 +8,9 @@ export const FIRMWARE_RELEASES_COLLECTION = "firmware_releases";
 export const FIRMWARE_RELEASE_FILES_SUBCOLLECTION = "files";
 export const DAILY_ROLLUPS_COLLECTION = "daily_rollups";
 export const OUTDOOR_DAILY_ROLLUPS_COLLECTION = "outdoor_daily_rollups";
+export const EXPERIMENTS_COLLECTION = "experiments";
+export const HOUSE_PLAYBOOK_COLLECTION = "house_playbook";
+export const HOUSE_PLAYBOOK_SUMMARY_DOC_ID = "summary";
 
 const DEFAULT_APP_NAME = "[DEFAULT]";
 
