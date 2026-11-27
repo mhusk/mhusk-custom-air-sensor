@@ -335,6 +335,122 @@ async function main(): Promise<void> {
     assert.equal(failClosed.status, 403);
     console.log("[PASS] Empty ALLOWED_USER_EMAILS fails closed with 403 Forbidden");
 
+    // 14b. Transient WorkOS getUserById failure returns 503 Service Unavailable (not 403)
+    const transientHandler = createMcpHttpHandler({
+      getAuthConfig: () => ({
+        ...currentConfig,
+        allowedUserEmails: "owner@example.com",
+      }),
+      authDeps: {
+        getKey: localJwks,
+        getUserById: async () => {
+          throw new Error("WorkOS upstream 503 timeout");
+        },
+      },
+      service: createMockAirQualityService(),
+    });
+    const transientServer = http.createServer((req, res) => {
+      void transientHandler(req, res);
+    });
+    await new Promise<void>((resolve) => transientServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port: tPort } = transientServer.address() as AddressInfo;
+      const tOrigin = `http://127.0.0.1:${tPort}`;
+      const tJwt = await new SignJWT({
+        client_id: fakeClientId,
+        scope: "openid profile email",
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "test-workos-key-1" })
+        .setIssuer(fakeAuthKitDomain)
+        .setAudience(`${tOrigin}/mcp`)
+        .setSubject("user_owner_allowed")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(privateKey);
+      const tRes = await postMcp(
+        `${tOrigin}/mcp`,
+        { jsonrpc: "2.0", id: 12, method: "tools/list", params: {} },
+        tJwt
+      );
+      assert.equal(tRes.status, 503);
+      console.log("[PASS] Transient WorkOS getUserById failure returns 503 instead of 403");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        transientServer.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+
+    // 14c. Untrusted X-Forwarded-Host ignored on discovery + audience spoofing, Vary emitted, and UM issuer skips Connect JWKS
+    const spoofedMetaRes = await fetch(`${origin}/.well-known/oauth-protected-resource`, {
+      headers: {
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "evil.example.com",
+      },
+    });
+    assert.equal(spoofedMetaRes.status, 200);
+    assert.equal(spoofedMetaRes.headers.get("vary"), "Host, X-Forwarded-Host");
+    const spoofedMeta = (await spoofedMetaRes.json()) as { resource: string };
+    assert.equal(spoofedMeta.resource, mcpUrl);
+
+    const spoofedAudRes = await fetch(mcpUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${wrongAudJwt}`,
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "some-other-service.example.com",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "tools/list", params: {} }),
+    });
+    assert.equal(spoofedAudRes.status, 401);
+
+    // UserManagement token routing skips Connect JWKS getKey
+    let getKeyCalls = 0;
+    const umToken = await new SignJWT({ scope: "openid email" })
+      .setProtectedHeader({ alg: "RS256", kid: "um-key" })
+      .setIssuer("https://api.workos.com/user_management/client_test")
+      .setSubject("user_owner_allowed")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const umHandler = createMcpHttpHandler({
+      getAuthConfig: () => ({
+        ...currentConfig,
+        allowedUserEmails: "owner@example.com",
+      }),
+      authDeps: {
+        getKey: (async (header, tokenObj) => {
+          getKeyCalls += 1;
+          return localJwks(header, tokenObj);
+        }) as typeof localJwks,
+        verifyUserAccessToken: async () => ({ sub: "user_owner_allowed" }),
+        getUserById: async (uid) => fakeUsers[uid] ?? null,
+      },
+      service: createMockAirQualityService(),
+    });
+    const umServer = http.createServer((req, res) => {
+      void umHandler(req, res);
+    });
+    await new Promise<void>((resolve) => umServer.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port: umPort } = umServer.address() as AddressInfo;
+      const umRes = await postMcp(
+        `http://127.0.0.1:${umPort}/mcp`,
+        { jsonrpc: "2.0", id: 14, method: "tools/list", params: {} },
+        umToken
+      );
+      assert.equal(umRes.status, 200);
+      assert.equal(getKeyCalls, 0, "Expected UserManagement token to skip Connect JWKS lookup");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        umServer.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+    console.log(
+      "[PASS] Untrusted X-Forwarded-Host blocked, Vary emitted, and UserManagement issuer skips Connect JWKS"
+    );
+
     // 15. /mcp preserves open CORS for remote AI assistants and MCP Inspector
     const mcpCorsRes = await fetch(mcpUrl, {
       method: "OPTIONS",

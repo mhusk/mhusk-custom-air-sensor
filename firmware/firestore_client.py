@@ -53,30 +53,48 @@ class _UrllibSession:
         self._urllib_error = urllib.error
         self._timeout = timeout
 
-    def _request(self, method, url, json_body=None, headers=None):
+    def _request(self, method, url, json_body=None, headers=None, timeout=None):
         req_headers = dict(headers) if headers else {}
         data = None
         if json_body is not None:
             data = json.dumps(json_body).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
 
+        effective_timeout = self._timeout if timeout is None else timeout
         req = self._urllib_request.Request(
             url, data=data, headers=req_headers, method=method
         )
         try:
-            with self._urllib_request.urlopen(req, timeout=self._timeout) as resp:
+            with self._urllib_request.urlopen(req, timeout=effective_timeout) as resp:
                 return _UrllibResponse(resp.status, resp.read())
         except self._urllib_error.HTTPError as err:
             return _UrllibResponse(err.code, err.read())
 
-    def get(self, url, headers=None):
-        return self._request("GET", url, json_body=None, headers=headers)
+    def get(self, url, headers=None, timeout=None):
+        return self._request("GET", url, json_body=None, headers=headers, timeout=timeout)
 
-    def post(self, url, json=None, headers=None):  # pylint: disable=redefined-builtin
-        return self._request("POST", url, json_body=json, headers=headers)
+    def post(self, url, json=None, headers=None, timeout=None):  # pylint: disable=redefined-builtin
+        return self._request("POST", url, json_body=json, headers=headers, timeout=timeout)
 
-    def patch(self, url, json=None, headers=None):  # pylint: disable=redefined-builtin
-        return self._request("PATCH", url, json_body=json, headers=headers)
+    def patch(self, url, json=None, headers=None, timeout=None):  # pylint: disable=redefined-builtin
+        return self._request("PATCH", url, json_body=json, headers=headers, timeout=timeout)
+
+
+def _monotonic_ms():
+    """Return monotonic milliseconds via integer nanoseconds to avoid 30-bit float drift."""
+    if hasattr(time, "monotonic_ns"):
+        return time.monotonic_ns() // 1_000_000
+    return int(time.monotonic() * 1000)
+
+
+def _is_finite_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value == value
+        and value != float("inf")
+        and value != float("-inf")
+    )
 
 
 def format_utc_timestamp(struct_time=None):
@@ -303,6 +321,24 @@ def is_valid_ota_filename(value):
     return True
 
 
+def is_valid_document_id(value):
+    """Validate Firestore document IDs generated or referenced by firmware."""
+    if not isinstance(value, str):
+        return False
+    length = len(value)
+    if length < 1 or length > 128:
+        return False
+    for ch in value:
+        if not (
+            ("A" <= ch <= "Z")
+            or ("a" <= ch <= "z")
+            or ("0" <= ch <= "9")
+            or ch in ("_", "-")
+        ):
+            return False
+    return True
+
+
 def _clamp_number(value, low, high):
     if value < low:
         return low
@@ -317,7 +353,8 @@ def normalize_device_config(raw_config, defaults):
     If `raw_config` is `None` (e.g., document does not exist yet), returns a clean copy
     of `defaults` with `config_version=0` and `reboot_requested_at=None`.
     """
-    default_location = str(defaults.get("location", "home-office"))
+    raw_default_loc = str(defaults.get("location", "home-office"))
+    default_location = raw_default_loc if is_valid_slug(raw_default_loc) else "home-office"
     default_interval = int(
         _clamp_number(int(defaults.get("reporting_interval_seconds", 300)), 60, 3600)
     )
@@ -349,19 +386,19 @@ def normalize_device_config(raw_config, defaults):
         normalized["location"] = raw_loc
 
     raw_interval = raw_config.get("reporting_interval_seconds")
-    if isinstance(raw_interval, (int, float)) and not isinstance(raw_interval, bool):
+    if _is_finite_number(raw_interval):
         normalized["reporting_interval_seconds"] = int(
             _clamp_number(round(raw_interval), 60, 3600)
         )
 
     raw_offset = raw_config.get("temperature_offset_c")
-    if isinstance(raw_offset, (int, float)) and not isinstance(raw_offset, bool):
+    if _is_finite_number(raw_offset):
         normalized["temperature_offset_c"] = round(
             float(_clamp_number(float(raw_offset), 0.0, 20.0)), 2
         )
 
     raw_altitude = raw_config.get("altitude_m")
-    if isinstance(raw_altitude, (int, float)) and not isinstance(raw_altitude, bool):
+    if _is_finite_number(raw_altitude):
         normalized["altitude_m"] = int(_clamp_number(round(raw_altitude), 0, 5000))
 
     raw_led = raw_config.get("led_enabled")
@@ -518,17 +555,19 @@ class FirestoreClient:
         device_password,
         session=None,
         token_refresh_margin=300,
+        request_timeout=15,
     ):
         self.project_id = project_id
         self.web_api_key = web_api_key
         self.device_email = device_email
         self.device_password = device_password
-        self._session = session if session is not None else _UrllibSession()
+        self._session = session if session is not None else _UrllibSession(timeout=request_timeout)
         self._token_refresh_margin = token_refresh_margin
+        self._request_timeout = request_timeout
 
         self._id_token = None
         self._refresh_token = None
-        self._token_expires_at = 0.0
+        self._token_expires_at_ms = 0
         self.user_id = None
 
     @property
@@ -545,7 +584,7 @@ class FirestoreClient:
             "password": self.device_password,
             "returnSecureToken": True,
         }
-        response = self._session.post(url, json=payload)
+        response = self._session.post(url, json=payload, timeout=self._request_timeout)
         try:
             if response.status_code != 200:
                 raise FirestoreError(
@@ -558,7 +597,7 @@ class FirestoreClient:
             self._refresh_token = data["refreshToken"]
             self.user_id = data.get("localId")
             expires_in = int(data.get("expiresIn", 3600))
-            self._token_expires_at = time.monotonic() + expires_in
+            self._token_expires_at_ms = _monotonic_ms() + (expires_in * 1000)
             return self._id_token
         finally:
             response.close()
@@ -573,27 +612,32 @@ class FirestoreClient:
             "grant_type": "refresh_token",
             "refresh_token": self._refresh_token,
         }
-        response = self._session.post(url, json=payload)
+        should_fallback = False
+        response = self._session.post(url, json=payload, timeout=self._request_timeout)
         try:
             if response.status_code != 200:
-                # Refresh token may be revoked or expired; fall back to full sign-in.
-                return self.sign_in()
-            data = response.json()
-            # Note: securetoken.googleapis.com returns snake_case keys (unlike signInWithPassword).
-            self._id_token = data["id_token"]
-            self._refresh_token = data.get("refresh_token", self._refresh_token)
-            self.user_id = data.get("user_id", self.user_id)
-            expires_in = int(data.get("expires_in", 3600))
-            self._token_expires_at = time.monotonic() + expires_in
-            return self._id_token
+                # Refresh token may be revoked or expired; fall back after closing this TLS socket.
+                should_fallback = True
+            else:
+                data = response.json()
+                # Note: securetoken.googleapis.com returns snake_case keys (unlike signInWithPassword).
+                self._id_token = data["id_token"]
+                self._refresh_token = data.get("refresh_token", self._refresh_token)
+                self.user_id = data.get("user_id", self.user_id)
+                expires_in = int(data.get("expires_in", 3600))
+                self._token_expires_at_ms = _monotonic_ms() + (expires_in * 1000)
+                return self._id_token
         finally:
             response.close()
+
+        if should_fallback:
+            return self.sign_in()
 
     def ensure_authenticated(self):
         """Return a valid Firebase ID token, signing in or refreshing proactively."""
         if not self._id_token:
             return self.sign_in()
-        if time.monotonic() >= (self._token_expires_at - self._token_refresh_margin):
+        if _monotonic_ms() >= (self._token_expires_at_ms - (self._token_refresh_margin * 1000)):
             return self.refresh_id_token()
         return self._id_token
 
@@ -605,20 +649,24 @@ class FirestoreClient:
                 "Authorization": "Bearer {}".format(token),
             }
             if method == "GET":
-                response = self._session.get(url, headers=headers)
+                response = self._session.get(url, headers=headers, timeout=self._request_timeout)
             elif method == "POST":
                 headers["Content-Type"] = "application/json"
-                response = self._session.post(url, json=payload, headers=headers)
+                response = self._session.post(
+                    url, json=payload, headers=headers, timeout=self._request_timeout
+                )
             elif method == "PATCH":
                 headers["Content-Type"] = "application/json"
-                response = self._session.patch(url, json=payload, headers=headers)
+                response = self._session.patch(
+                    url, json=payload, headers=headers, timeout=self._request_timeout
+                )
             else:
                 raise ValueError("Unsupported HTTP method: {}".format(method))
 
             try:
                 if response.status_code == 401 and attempt == 0:
                     # Force token refresh and retry once.
-                    self._token_expires_at = 0.0
+                    self._token_expires_at_ms = 0
                     continue
                 if allow_not_found and response.status_code == 404:
                     return None
@@ -638,6 +686,8 @@ class FirestoreClient:
 
     def fetch_device_config(self, device_id):
         """Fetch and decode `device_configs/{device_id}` (returns None on HTTP 404)."""
+        if not is_valid_slug(device_id):
+            raise ValueError("Invalid device_id slug: {!r}".format(device_id))
         url = "{}/device_configs/{}".format(self.documents_base_url, device_id)
         doc = self._authorized_request("GET", url, allow_not_found=True)
         if not doc:
@@ -671,7 +721,9 @@ class FirestoreClient:
     def publish_reading(self, reading, document_id=None):
         """Create a new immutable document in the `readings` collection."""
         url = "{}/readings".format(self.documents_base_url)
-        if document_id:
+        if document_id is not None:
+            if not is_valid_document_id(document_id):
+                raise ValueError("Invalid reading document_id: {!r}".format(document_id))
             url = "{}?documentId={}".format(url, document_id)
 
         payload = {
@@ -684,6 +736,8 @@ class FirestoreClient:
     def update_device_status(self, device_status):
         """Create or update the `devices/{device_id}` registry document."""
         device_id = device_status["device_id"]
+        if not is_valid_slug(device_id):
+            raise ValueError("Invalid device_id slug: {!r}".format(device_id))
         url = "{}/devices/{}".format(self.documents_base_url, device_id)
         payload = {
             "fields": encode_firestore_fields(

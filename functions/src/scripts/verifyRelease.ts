@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+
+import type { Firestore } from "firebase-admin/firestore";
 
 import {
   isValidFirmwareVersion,
@@ -12,6 +15,7 @@ import {
   extractAppFirmwareVersion,
   getDefaultRepoRoot,
   parsePublishArgs,
+  publishReleaseToFirestore,
 } from "./publishRelease.js";
 
 interface SettingsToml {
@@ -172,6 +176,60 @@ function runOfflineUnitChecks(): void {
   assert.match(rulesText, /canActAsDevice\(deviceId\)/);
   assert.match(rulesText, /!\(value in \['boot\.py', 'code\.py'\]\)/);
   console.log("   [PASS] firestore.rules enforces per-device UID isolation and blocks boot.py/code.py");
+
+  // Symlink escape guard in buildReleaseBundle
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-release-symlink-"));
+  try {
+    const fakeFwDir = path.join(tmpRoot, "firmware");
+    const outsideFile = path.join(tmpRoot, "outside.py");
+    fs.mkdirSync(fakeFwDir);
+    fs.writeFileSync(outsideFile, 'FIRMWARE_VERSION = "1.3.3"\ndef main(): pass\n', "utf8");
+    fs.symlinkSync(outsideFile, path.join(fakeFwDir, "app.py"));
+    assert.throws(
+      () =>
+        buildReleaseBundle({
+          firmwareDir: fakeFwDir,
+          files: ["app.py"],
+          version: "1.3.3",
+        }),
+      /symlink resolves outside/
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+  console.log("   [PASS] buildReleaseBundle blocks symlinks resolving outside firmware/");
+}
+
+async function runPublishValidationChecks(): Promise<void> {
+  const firmwareDir = path.join(getDefaultRepoRoot(), "firmware");
+  const bundle = buildReleaseBundle({ firmwareDir });
+  let batchCommitted = false;
+  const mockDb = {
+    collection: () => ({
+      doc: () => ({
+        get: async () => ({ exists: false }),
+      }),
+    }),
+    batch: () => ({
+      set: () => {},
+      delete: () => {},
+      commit: async () => {
+        batchCommitted = true;
+      },
+    }),
+  } as unknown as Firestore;
+
+  await assert.rejects(
+    () =>
+      publishReleaseToFirestore(
+        bundle,
+        { setTargetDeviceId: "../bad-target" },
+        mockDb
+      ),
+    /Invalid target device ID/
+  );
+  assert.equal(batchCommitted, false, "Must reject invalid --set-target before committing release");
+  console.log("   [PASS] publishReleaseToFirestore rejects invalid --set-target before committing");
 }
 
 async function httpJson(
@@ -359,6 +417,7 @@ async function main(): Promise<void> {
       : "1.2.0-rc1";
 
   runOfflineUnitChecks();
+  await runPublishValidationChecks();
 
   if (runLive) {
     await runLiveChecks(liveVersion);

@@ -1131,7 +1131,8 @@ dialog[open]:where(:not([data-closing])) {
   gap: 0.25rem;
 }
 
-.field label {
+.field label,
+.field .field__label {
   font-size: 0.875rem;
   font-weight: 600;
 }
@@ -1597,14 +1598,16 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
   padding: 2rem 1rem !important;
 }
 
-@container (width < 720px) {
+@media (max-width: 720px) {
   .table-wrapper {
     max-block-size: none;
     background-color: transparent;
     border: 0;
     box-shadow: none;
   }
+}
 
+@container (width < 720px) {
   .fleet-table,
   .fleet-table thead,
   .fleet-table tbody,

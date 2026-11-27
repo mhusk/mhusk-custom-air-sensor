@@ -52,6 +52,10 @@ const state = {
   period: "24h",
   historyPayload: null,
   chartsCache: new Map(),
+  chartsRequestSeq: 0,
+  chartsAbortController: null,
+  sessionEpoch: 0,
+  isOutdoorRefreshing: false,
   editingDeviceId: null,
   pendingRollout: null,
   isRefreshing: false,
@@ -794,22 +798,22 @@ function renderOutdoorCard() {
     grid.append(
       buildOutdoorTile(
         "Outdoor US AQI",
-        r.us_aqi !== null ? String(Math.round(r.us_aqi)) : "—",
+        r.us_aqi != null ? String(Math.round(r.us_aqi)) : "—",
         "",
         r.us_aqi_category || "Unavailable",
-        r.us_aqi !== null ? toneForAqi(r.us_aqi) : "neutral"
+        r.us_aqi != null ? toneForAqi(r.us_aqi) : "neutral"
       ),
       buildOutdoorTile(
         "Outdoor PM2.5",
-        r.pm2_5_ug_m3 !== null ? Number(r.pm2_5_ug_m3).toFixed(1) : "—",
-        r.pm2_5_ug_m3 !== null ? "µg/m³" : "",
-        r.pm10_0_ug_m3 !== null ? `PM10 ${Number(r.pm10_0_ug_m3).toFixed(1)} µg/m³` : "Open-Meteo AQ"
+        r.pm2_5_ug_m3 != null ? Number(r.pm2_5_ug_m3).toFixed(1) : "—",
+        r.pm2_5_ug_m3 != null ? "µg/m³" : "",
+        r.pm10_0_ug_m3 != null ? `PM10 ${Number(r.pm10_0_ug_m3).toFixed(1)} µg/m³` : "Open-Meteo AQ"
       ),
       buildOutdoorTile(
         "Outdoor Temp",
         `${Number(r.temperature_f).toFixed(1)}°F`,
         "",
-        r.apparent_temperature_f !== null
+        r.apparent_temperature_f != null
           ? `Feels like ${Number(r.apparent_temperature_f).toFixed(1)}°F`
           : r.weather_description
       ),
@@ -821,7 +825,7 @@ function renderOutdoorCard() {
           const dpF = computeOutdoorDewPointF(Number(r.temperature_f), Number(r.humidity_percent));
           const dpText = dpF !== null ? `Dew pt ${dpF.toFixed(1)}°F` : null;
           const windText =
-            r.wind_speed_mph !== null ? `Wind ${Number(r.wind_speed_mph).toFixed(1)} mph` : null;
+            r.wind_speed_mph != null ? `Wind ${Number(r.wind_speed_mph).toFixed(1)} mph` : null;
           return [dpText, windText].filter(Boolean).join(" · ") || r.weather_description;
         })()
       )
@@ -842,7 +846,7 @@ function renderOutdoorCard() {
       );
       const copy = document.createElement("span");
       copy.className = "forecast-strip__text";
-      const aqiPart = win.max_us_aqi !== null ? `, AQI ${win.max_us_aqi}` : "";
+      const aqiPart = win.max_us_aqi != null ? `, AQI ${win.max_us_aqi}` : "";
       copy.textContent = `${formatLocalHourRange(win.start_time, win.end_time)} (${win.duration_hours}h) · ~${Number(win.avg_temp_f).toFixed(1)}°F, Dew pt ${Number(win.avg_dew_point_f).toFixed(1)}°F${aqiPart}`;
       strip.append(copy);
     } else if (forecast.lowest_tax_fallback_hour) {
@@ -851,7 +855,8 @@ function renderOutdoorCard() {
       const copy = document.createElement("span");
       copy.className = "forecast-strip__text";
       const fbTime = formatLocalTimestamp(fb.timestamp);
-      copy.textContent = `Lowest-tax hour: ${fbTime} · ${Number(fb.temperature_f).toFixed(1)}°F, Dew pt ${Number(fb.dew_point_f).toFixed(1)}°F (${fb.energy_tax.tier} tax)`;
+      const taxTier = fb.energy_tax?.tier ?? "unknown";
+      copy.textContent = `Lowest-tax hour: ${fbTime} · ${Number(fb.temperature_f).toFixed(1)}°F, Dew pt ${Number(fb.dew_point_f).toFixed(1)}°F (${taxTier} tax)`;
       strip.append(copy);
     }
 
@@ -926,8 +931,10 @@ function renderDeviceCards() {
     const badges = document.createElement("div");
     badges.className = "device-card__badges";
 
-    const statusTone = device.status === "online" ? "good" : device.status === "stale" ? "warn" : "danger";
-    badges.append(createPill(device.status.toUpperCase(), statusTone, true));
+    const deviceStatusText = String(device.status ?? "offline");
+    const statusTone =
+      deviceStatusText === "online" ? "good" : deviceStatusText === "stale" ? "warn" : "danger";
+    badges.append(createPill(deviceStatusText.toUpperCase(), statusTone, true));
 
     if (syncStatus === "synced" && desired) {
       badges.append(createPill(`Config v${desired.config_version} synced`, "good"));
@@ -1023,20 +1030,19 @@ function renderDeviceCards() {
 
       const metricsWrap = document.createElement("div");
       metricsWrap.className = "delta-strip__metrics";
+      const tempDelta = formatSignedDelta(d.temperature_diff_f, "°F", 1);
+      const rhDelta = formatSignedDelta(d.humidity_diff_percent, "%", 0);
+      const dewDelta = d.energy_tax
+        ? formatSignedDelta(d.energy_tax.dew_point_delta_f, "°F", 1)
+        : null;
       const deltaParts = [
-        formatSignedDelta(d.temperature_diff_f, "°F", 1)
-          ? `Temp ${formatSignedDelta(d.temperature_diff_f, "°F", 1)}`
-          : null,
-        formatSignedDelta(d.humidity_diff_percent, "% RH", 0)
-          ? `RH ${formatSignedDelta(d.humidity_diff_percent, "%", 0)}`
-          : null,
-        d.energy_tax && formatSignedDelta(d.energy_tax.dew_point_delta_f, "°F", 1)
-          ? `Dew pt ${formatSignedDelta(d.energy_tax.dew_point_delta_f, "°F", 1)}`
-          : null,
-        d.pm2_5_diff_ug_m3 !== null
+        tempDelta ? `Temp ${tempDelta}` : null,
+        rhDelta ? `RH ${rhDelta}` : null,
+        dewDelta ? `Dew pt ${dewDelta}` : null,
+        d.pm2_5_diff_ug_m3 != null
           ? `PM2.5 ${formatSignedDelta(d.pm2_5_diff_ug_m3, " µg/m³", 1)}`
           : null,
-        d.aqi_diff !== null ? `AQI ${formatSignedDelta(d.aqi_diff, "", 0)}` : null,
+        d.aqi_diff != null ? `AQI ${formatSignedDelta(d.aqi_diff, "", 0)}` : null,
       ].filter(Boolean);
 
       const prefix = document.createElement("span");
@@ -1148,9 +1154,11 @@ function renderCharts() {
   const metrics = summary?.metrics || null;
 
   const deviceLabel = state.selectedDeviceId ? ` · ${state.selectedDeviceId}` : "";
-  const sampleNote = history.downsampled
-    ? `${history.returned_count} plotted (${history.total_matching} total samples)`
-    : `${history.returned_count} samples`;
+  const returnedCount = history?.returned_count ?? readings.length;
+  const totalMatching = history?.total_matching ?? readings.length;
+  const sampleNote = history?.downsampled
+    ? `${returnedCount} plotted (${totalMatching} total samples)`
+    : `${returnedCount} samples`;
   const outdoorNote =
     Array.isArray(outdoorHistory) && outdoorHistory.length > 0
       ? ` · ${outdoorHistory.length} outdoor samples overlaid`
@@ -1406,9 +1414,10 @@ function renderFleetPanel() {
       const roomSpan = document.createElement("span");
       roomSpan.className = "fleet-sensor__room";
       roomSpan.textContent = formatRoomName(device.location);
+      const deviceStatusText = String(device.status ?? "offline");
       const onlineTone =
-        device.status === "online" ? "good" : device.status === "stale" ? "warn" : "danger";
-      head.append(roomSpan, createPill(device.status.toUpperCase(), onlineTone, true));
+        deviceStatusText === "online" ? "good" : deviceStatusText === "stale" ? "warn" : "danger";
+      head.append(roomSpan, createPill(deviceStatusText.toUpperCase(), onlineTone, true));
 
       const idSpan = document.createElement("span");
       idSpan.className = "fleet-sensor__id";
@@ -1904,6 +1913,8 @@ async function handleSiteLocationSubmit(event) {
 }
 
 async function handleOutdoorRefresh(button) {
+  if (state.isOutdoorRefreshing) return;
+  state.isOutdoorRefreshing = true;
   button.disabled = true;
   const prevText = button.textContent;
   button.textContent = "Fetching…";
@@ -1923,6 +1934,7 @@ async function handleOutdoorRefresh(button) {
       "danger"
     );
   } finally {
+    state.isOutdoorRefreshing = false;
     button.disabled = false;
     button.textContent = prevText;
   }
@@ -1934,6 +1946,9 @@ async function handleOutdoorRefresh(button) {
 
 function handleSessionExpired() {
   clearSession();
+  state.sessionEpoch += 1;
+  state.chartsAbortController?.abort();
+  state.chartsAbortController = null;
   state.session = null;
   if (els.rolloutDialog.open) els.rolloutDialog.close("");
   if (els.rebootDialog.open) els.rebootDialog.close("");
@@ -1995,10 +2010,19 @@ async function loadCharts({ forceRefresh = false } = {}) {
     cached &&
     Date.now() - cached.fetchedAt < CLIENT_CACHE_TTL_MS
   ) {
+    state.chartsAbortController?.abort();
+    state.chartsAbortController = null;
+    state.chartsRequestSeq += 1;
     state.historyPayload = cached.payload;
     renderCharts();
     return;
   }
+
+  state.chartsAbortController?.abort();
+  const controller = new AbortController();
+  state.chartsAbortController = controller;
+  const seq = ++state.chartsRequestSeq;
+  const epoch = state.sessionEpoch;
 
   try {
     const limit = state.hours >= 168 ? 240 : 200;
@@ -2008,11 +2032,24 @@ async function loadCharts({ forceRefresh = false } = {}) {
       period: state.period,
       deviceId: state.selectedDeviceId || undefined,
       refresh: forceRefresh,
+      signal: controller.signal,
     });
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     setCachedChartPayload(key, payload);
+    if (seq !== state.chartsRequestSeq) {
+      return;
+    }
     state.historyPayload = payload;
     renderCharts();
   } catch (err) {
+    if (err?.name === "AbortError") {
+      return;
+    }
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     if (err instanceof ApiError && err.status === 401) {
       handleSessionExpired();
       return;
@@ -2025,18 +2062,26 @@ async function loadCharts({ forceRefresh = false } = {}) {
 }
 
 async function refreshOverviewOnly({ forceRefresh = true, silentBanner = true } = {}) {
+  const epoch = state.sessionEpoch;
   try {
     const overview = await fetchDashboardOverview({ refresh: forceRefresh });
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     state.overview = overview;
+    const devices = overview?.devices || [];
     if (
       !state.selectedDeviceId ||
-      !overview.devices.some((d) => d.device.device_id === state.selectedDeviceId)
+      !devices.some((d) => d.device?.device_id === state.selectedDeviceId)
     ) {
-      state.selectedDeviceId = overview.devices[0]?.device.device_id ?? null;
+      state.selectedDeviceId = devices[0]?.device?.device_id ?? null;
     }
     renderDeviceCards();
     renderFleetPanel();
   } catch (err) {
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     if (err instanceof ApiError && err.status === 401) {
       handleSessionExpired();
       return;
@@ -2052,6 +2097,7 @@ async function refreshOverviewOnly({ forceRefresh = true, silentBanner = true } 
 
 async function refreshDashboard({ silentBanner = false, forceRefresh = false } = {}) {
   if (state.isRefreshing) return;
+  const epoch = state.sessionEpoch;
   state.isRefreshing = true;
   els.refreshBtn.disabled = true;
   els.refreshBtn.querySelector(".btn__label").textContent = "Refreshing…";
@@ -2071,23 +2117,30 @@ async function refreshDashboard({ silentBanner = false, forceRefresh = false } =
         ? fetchFirmwareReleases({ refresh: forceRefresh }).catch(() => null)
         : Promise.resolve(null),
     ]);
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     state.overview = overview;
     if (releasesPayload) {
       state.releases = Array.isArray(releasesPayload?.releases) ? releasesPayload.releases : [];
       state.releasesLoadedAt = Date.now();
     }
 
+    const devices = overview?.devices || [];
     if (
       !state.selectedDeviceId ||
-      !overview.devices.some((d) => d.device.device_id === state.selectedDeviceId)
+      !devices.some((d) => d.device?.device_id === state.selectedDeviceId)
     ) {
-      state.selectedDeviceId = overview.devices[0]?.device.device_id ?? null;
+      state.selectedDeviceId = devices[0]?.device?.device_id ?? null;
     }
 
     renderDeviceCards();
     renderFleetPanel();
     await loadCharts({ forceRefresh });
   } catch (err) {
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     if (err instanceof ApiError && err.status === 401) {
       handleSessionExpired();
       return;
@@ -2140,28 +2193,33 @@ async function init() {
   installTabsController();
   setView("loading");
 
-  // 1. Check if returning from WorkOS AuthKit redirect (/auth/callback?code=...)
-  els.loadingLabel.textContent = "Completing sign-in…";
-  const callbackResult = await handleAuthCallbackIfPresent();
-  if (callbackResult.handled) {
-    if (callbackResult.ok) {
-      enterAuthenticatedApp(callbackResult.session);
+  try {
+    // 1. Check if returning from WorkOS AuthKit redirect (/auth/callback?code=...)
+    els.loadingLabel.textContent = "Completing sign-in…";
+    const callbackResult = await handleAuthCallbackIfPresent();
+    if (callbackResult.handled) {
+      if (callbackResult.ok) {
+        enterAuthenticatedApp(callbackResult.session);
+        return;
+      }
+      await loadAuthScreen();
+      showAuthError(callbackResult.error);
       return;
     }
+
+    // 2. Restore existing session if present
+    const existing = loadSession();
+    if (existing) {
+      enterAuthenticatedApp(existing);
+      return;
+    }
+
+    // 3. Otherwise show WorkOS Sign-In view
     await loadAuthScreen();
-    showAuthError(callbackResult.error);
-    return;
+  } catch (err) {
+    await loadAuthScreen();
+    showAuthError(err instanceof Error ? err.message : "Unable to initialize dashboard.");
   }
-
-  // 2. Restore existing session if present
-  const existing = loadSession();
-  if (existing) {
-    enterAuthenticatedApp(existing);
-    return;
-  }
-
-  // 3. Otherwise show WorkOS Sign-In view
-  await loadAuthScreen();
 }
 
 // ============================================================================
@@ -2208,6 +2266,9 @@ els.refreshBtn.addEventListener("click", () => refreshDashboard({ forceRefresh: 
 
 els.signoutBtn.addEventListener("click", async () => {
   clearSession();
+  state.sessionEpoch += 1;
+  state.chartsAbortController?.abort();
+  state.chartsAbortController = null;
   state.session = null;
   state.overview = null;
   state.releases = [];
@@ -2346,4 +2407,6 @@ els.siteGeolocateBtn.addEventListener("click", () => {
   );
 });
 
-init();
+init().catch((err) => {
+  console.error("Dashboard initialization failed:", err);
+});

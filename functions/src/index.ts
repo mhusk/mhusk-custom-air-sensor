@@ -6,26 +6,41 @@ import { defineSecret } from "firebase-functions/params";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 
-import { DashboardResponseCache } from "./api/cache.js";
-import {
-  handleDashboardApiRequest,
-  type DashboardDataService,
-} from "./api/dashboard.js";
-import {
-  authenticateMcpRequest,
-  buildProtectedResourceMetadata,
-  buildWwwAuthenticateHeader,
-  fetchAuthorizationServerMetadata,
-  normalizeAuthKitDomain,
-  OAUTH_AUTHORIZATION_SERVER_PATH,
-  OAUTH_PROTECTED_RESOURCE_PATH,
-  type WorkosAuthConfig,
-  type WorkosAuthDependencies,
-} from "./auth/workos.js";
-import { handleStatelessMcpHttpRequest, MCP_SERVER_INFO } from "./mcp/server.js";
+import type { DashboardResponseCache } from "./api/cache.js";
+import type { DashboardDataService } from "./api/dashboard.js";
+import type { WorkosAuthConfig, WorkosAuthDependencies } from "./auth/workos.js";
 import type { AirQualityDataService } from "./mcp/tools.js";
 import { appendIndoorRollupFromRawDoc, getDb } from "./services/firestore.js";
+import { processReadingForExperiments } from "./services/experiments.js";
 import { syncOutdoorReadingIfStale } from "./services/outdoor.js";
+
+interface HttpRuntimeDeps {
+  DashboardResponseCache: typeof import("./api/cache.js").DashboardResponseCache;
+  handleDashboardApiRequest: typeof import("./api/dashboard.js").handleDashboardApiRequest;
+  workos: typeof import("./auth/workos.js");
+  handleStatelessMcpHttpRequest: typeof import("./mcp/server.js").handleStatelessMcpHttpRequest;
+  MCP_SERVER_INFO: typeof import("./mcp/server.js").MCP_SERVER_INFO;
+}
+
+let httpDepsPromise: Promise<HttpRuntimeDeps> | null = null;
+
+function loadHttpRuntimeDeps(): Promise<HttpRuntimeDeps> {
+  if (!httpDepsPromise) {
+    httpDepsPromise = Promise.all([
+      import("./api/cache.js"),
+      import("./api/dashboard.js"),
+      import("./auth/workos.js"),
+      import("./mcp/server.js"),
+    ]).then(([cacheMod, dashMod, workosMod, mcpMod]) => ({
+      DashboardResponseCache: cacheMod.DashboardResponseCache,
+      handleDashboardApiRequest: dashMod.handleDashboardApiRequest,
+      workos: workosMod,
+      handleStatelessMcpHttpRequest: mcpMod.handleStatelessMcpHttpRequest,
+      MCP_SERVER_INFO: mcpMod.MCP_SERVER_INFO,
+    }));
+  }
+  return httpDepsPromise;
+}
 
 // Google Cloud Secret Manager bindings (injected at Cloud Run runtime; never committed to Git)
 const workosApiKey = defineSecret("WORKOS_API_KEY");
@@ -69,23 +84,80 @@ function getHeaderString(value: string | string[] | undefined): string | undefin
 
 const SAFE_HOST_REGEX = /^[A-Za-z0-9.\-:\[\]]+$/;
 
+function extractHostnameFromHostHeader(hostHeader: string): string {
+  const lower = hostHeader.trim().toLowerCase();
+  if (lower.startsWith("[")) {
+    const endBracket = lower.indexOf("]");
+    return endBracket > 1 ? lower.slice(1, endBracket) : lower;
+  }
+  const colonIdx = lower.indexOf(":");
+  return colonIdx > 0 ? lower.slice(0, colonIdx) : lower;
+}
+
+function buildTrustedForwardedHostSet(authConfig?: WorkosAuthConfig): Set<string> {
+  const hosts = new Set<string>();
+  const addOriginHost = (rawOrigin?: string): void => {
+    if (!rawOrigin) return;
+    try {
+      const parsed = new URL(rawOrigin);
+      if (parsed.hostname) {
+        hosts.add(parsed.hostname.toLowerCase());
+      }
+    } catch {
+      // Ignore malformed origin strings
+    }
+  };
+
+  for (const origin of parseAllowedDashboardOrigins(authConfig?.allowedDashboardOrigins)) {
+    addOriginHost(origin);
+  }
+  addOriginHost(authConfig?.publicOrigin ?? process.env.PUBLIC_ORIGIN);
+  return hosts;
+}
+
+function isTrustedForwardedHost(rawHost: string, extraTrustedHosts?: Set<string>): boolean {
+  const hostname = extractHostnameFromHostHeader(rawHost);
+  if (!hostname) {
+    return false;
+  }
+  if (extraTrustedHosts?.has(hostname)) {
+    return true;
+  }
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    return true;
+  }
+  return (
+    hostname.endsWith(".web.app") ||
+    hostname.endsWith(".firebaseapp.com") ||
+    hostname.endsWith(".cloudfunctions.net") ||
+    hostname.endsWith(".run.app")
+  );
+}
+
 /**
  * Reconstructs the public HTTPS origin behind Cloud Run / Cloud Functions
- * reverse proxies (respecting `X-Forwarded-Proto` and `X-Forwarded-Host`),
- * falling back safely on malformed header values.
+ * reverse proxies (respecting `X-Forwarded-Proto` and trusted `X-Forwarded-Host`),
+ * falling back safely on malformed or untrusted header values.
  */
-export function getPublicOrigin(req: IncomingMessage): string {
+export function getPublicOrigin(
+  req: IncomingMessage,
+  options?: { trustedHosts?: Set<string> }
+): string {
   const rawForwardedHost = getHeaderString(req.headers["x-forwarded-host"])
     ?.split(",")[0]
     .trim();
   const rawHostHeader = getHeaderString(req.headers.host)?.split(",")[0].trim();
 
-  const host =
-    rawForwardedHost && SAFE_HOST_REGEX.test(rawForwardedHost)
+  const trustedForwardedHost =
+    rawForwardedHost &&
+    SAFE_HOST_REGEX.test(rawForwardedHost) &&
+    isTrustedForwardedHost(rawForwardedHost, options?.trustedHosts)
       ? rawForwardedHost
-      : rawHostHeader && SAFE_HOST_REGEX.test(rawHostHeader)
-        ? rawHostHeader
-        : "localhost";
+      : undefined;
+
+  const host =
+    trustedForwardedHost ??
+    (rawHostHeader && SAFE_HOST_REGEX.test(rawHostHeader) ? rawHostHeader : "localhost");
 
   const forwardedProto = getHeaderString(req.headers["x-forwarded-proto"])
     ?.split(",")[0]
@@ -98,11 +170,13 @@ export function getPublicOrigin(req: IncomingMessage): string {
     host.startsWith("[::1]");
 
   const proto =
-    forwardedProto === "http" || forwardedProto === "https"
-      ? forwardedProto
-      : isLocalHost
-        ? "http"
-        : "https";
+    isLocalHost && !trustedForwardedHost
+      ? "http"
+      : forwardedProto === "http" || forwardedProto === "https"
+        ? forwardedProto
+        : isLocalHost
+          ? "http"
+          : "https";
 
   const candidate = `${proto}://${host}`;
   try {
@@ -241,14 +315,18 @@ function hasPreparsedJsonBody(req: IncomingMcpRequest): boolean {
 export function createMcpHttpHandler(
   options: CreateMcpHttpHandlerOptions
 ): (req: IncomingMcpRequest, res: ServerResponse) => Promise<void> {
-  const loadAuthServerMeta =
-    options.loadAuthorizationServerMetadata ?? fetchAuthorizationServerMetadata;
-  const dashboardCache = new DashboardResponseCache();
+  let dashboardCache: DashboardResponseCache | null = null;
 
   return async (req: IncomingMcpRequest, res: ServerResponse): Promise<void> => {
+    const deps = await loadHttpRuntimeDeps();
+    dashboardCache ??= new deps.DashboardResponseCache();
+    const loadAuthServerMeta =
+      options.loadAuthorizationServerMetadata ?? deps.workos.fetchAuthorizationServerMetadata;
+
     const pathname = getNormalizedPathname(req);
-    const origin = getPublicOrigin(req);
     const authConfig = options.getAuthConfig();
+    const trustedHosts = buildTrustedForwardedHostSet(authConfig);
+    const origin = getPublicOrigin(req, { trustedHosts });
 
     setCorsHeaders(req, res, {
       pathname: pathname ?? "/",
@@ -269,14 +347,14 @@ export function createMcpHttpHandler(
       });
       return;
     }
-    const authkitDomain = normalizeAuthKitDomain(authConfig.workosAuthKitDomain);
+    const authkitDomain = deps.workos.normalizeAuthKitDomain(authConfig.workosAuthKitDomain);
 
     // 1. Public liveness/health check (reveals zero secrets or user info)
     if (pathname === "/health" && req.method === "GET") {
       sendJson(res, 200, {
         status: "ok",
-        service: MCP_SERVER_INFO.name,
-        version: MCP_SERVER_INFO.version,
+        service: deps.MCP_SERVER_INFO.name,
+        version: deps.MCP_SERVER_INFO.version,
         endpoint: `${origin}/mcp`,
         auth: {
           workos_oauth_configured: Boolean(authkitDomain),
@@ -289,8 +367,8 @@ export function createMcpHttpHandler(
     // 2. OAuth 2.1 Protected Resource Metadata (RFC 9728)
     if (
       req.method === "GET" &&
-      (pathname === OAUTH_PROTECTED_RESOURCE_PATH ||
-        pathname === `${OAUTH_PROTECTED_RESOURCE_PATH}/mcp`)
+      (pathname === deps.workos.OAUTH_PROTECTED_RESOURCE_PATH ||
+        pathname === `${deps.workos.OAUTH_PROTECTED_RESOURCE_PATH}/mcp`)
     ) {
       if (!authkitDomain) {
         sendJson(res, 503, {
@@ -300,13 +378,14 @@ export function createMcpHttpHandler(
         return;
       }
 
+      res.setHeader("Vary", "Host, X-Forwarded-Host");
       res.setHeader("Cache-Control", "public, max-age=300");
-      sendJson(res, 200, buildProtectedResourceMetadata(origin, authkitDomain));
+      sendJson(res, 200, deps.workos.buildProtectedResourceMetadata(origin, authkitDomain));
       return;
     }
 
     // 3. OAuth 2.1 Authorization Server Metadata proxy (for legacy MCP 2025-03-26 clients)
-    if (req.method === "GET" && pathname === OAUTH_AUTHORIZATION_SERVER_PATH) {
+    if (req.method === "GET" && pathname === deps.workos.OAUTH_AUTHORIZATION_SERVER_PATH) {
       if (!authkitDomain) {
         sendJson(res, 503, {
           error: "oauth_not_configured",
@@ -334,7 +413,7 @@ export function createMcpHttpHandler(
 
     // 4. Dashboard JSON API endpoints (`/api/*`)
     if (pathname === "/api" || pathname.startsWith("/api/")) {
-      await handleDashboardApiRequest(req, res, {
+      await deps.handleDashboardApiRequest(req, res, {
         pathname,
         origin,
         authConfig,
@@ -348,7 +427,7 @@ export function createMcpHttpHandler(
 
     // 5. Protected MCP Streamable HTTP endpoint (`/mcp`, plus `/` for cloudfunctions.net URLs)
     if (pathname === "/mcp" || pathname === "/") {
-      const authResult = await authenticateMcpRequest(
+      const authResult = await deps.workos.authenticateMcpRequest(
         req,
         origin,
         authConfig,
@@ -361,7 +440,7 @@ export function createMcpHttpHandler(
           const metadataBaseUrl = isCloudFunctionsHost ? `${origin}/mcp` : origin;
           res.setHeader(
             "WWW-Authenticate",
-            buildWwwAuthenticateHeader(
+            deps.workos.buildWwwAuthenticateHeader(
               metadataBaseUrl,
               authResult.missingToken
                 ? {}
@@ -376,7 +455,12 @@ export function createMcpHttpHandler(
         sendJson(res, authResult.status, {
           jsonrpc: "2.0",
           error: {
-            code: authResult.status === 401 ? -32001 : -32003,
+            code:
+              authResult.status === 401
+                ? -32001
+                : authResult.status === 403
+                  ? -32003
+                  : -32000,
             message: authResult.message,
           },
           id: null,
@@ -387,7 +471,7 @@ export function createMcpHttpHandler(
       req.auth = authResult.authInfo;
 
       const db = options.service ? undefined : (options.db ?? getDb());
-      await handleStatelessMcpHttpRequest(req, res, {
+      await deps.handleStatelessMcpHttpRequest(req, res, {
         db,
         service: options.service,
         parsedBody: hasPreparsedJsonBody(req) ? req.body : undefined,
@@ -403,16 +487,29 @@ export function createMcpHttpHandler(
   };
 }
 
-const cloudFunctionHandler = createMcpHttpHandler({
-  getAuthConfig: () => ({
-    workosApiKey: workosApiKey.value(),
-    workosClientId: workosClientId.value(),
-    workosAuthKitDomain: workosAuthKitDomain.value(),
-    allowedUserEmails: allowedUserEmails.value(),
-    bearerFallbackSecret: mcpBearerFallbackSecret.value(),
-    allowedDashboardOrigins: process.env.ALLOWED_DASHBOARD_ORIGINS,
-  }),
-});
+let cloudFunctionHandler:
+  | ((req: IncomingMcpRequest, res: ServerResponse) => Promise<void>)
+  | null = null;
+
+function getCloudFunctionHandler(): (
+  req: IncomingMcpRequest,
+  res: ServerResponse
+) => Promise<void> {
+  if (!cloudFunctionHandler) {
+    cloudFunctionHandler = createMcpHttpHandler({
+      getAuthConfig: () => ({
+        workosApiKey: workosApiKey.value(),
+        workosClientId: workosClientId.value(),
+        workosAuthKitDomain: workosAuthKitDomain.value(),
+        allowedUserEmails: allowedUserEmails.value(),
+        bearerFallbackSecret: mcpBearerFallbackSecret.value(),
+        allowedDashboardOrigins: process.env.ALLOWED_DASHBOARD_ORIGINS,
+        publicOrigin: process.env.PUBLIC_ORIGIN,
+      }),
+    });
+  }
+  return cloudFunctionHandler;
+}
 
 /**
  * Firebase Cloud Function (2nd Gen) HTTPS entrypoint for the Remote MCP Server.
@@ -438,16 +535,17 @@ export const mcp = onRequest(
     ],
   },
   async (req, res) => {
-    await cloudFunctionHandler(req as IncomingMcpRequest, res);
+    await getCloudFunctionHandler()(req as IncomingMcpRequest, res);
   }
 );
 
 /**
  * Firestore trigger (2nd Gen): whenever an ESP32-S3 sensor publishes a new
  * indoor reading, (1) idempotently appends the compact sample to `daily_rollups`
- * with 0 Firestore reads, and (2) opportunistically captures an Open-Meteo
+ * with 0 Firestore reads, (2) opportunistically captures an Open-Meteo
  * outdoor weather + US EPA AQI snapshot into `outdoor_readings` +
- * `outdoor_daily_rollups` (throttled by `site_configs/home`).
+ * `outdoor_daily_rollups` (throttled by `site_configs/home`), and (3) runs
+ * passive experiment step-change detection & due pending-experiment evaluation.
  */
 export const syncOutdoorOnReading = onDocumentCreated(
   {
@@ -472,9 +570,14 @@ export const syncOutdoorOnReading = onDocumentCreated(
       includeReading: false,
     });
 
-    const [rollupResult, outdoorResult] = await Promise.allSettled([
+    const experimentsPromise = rawData
+      ? processReadingForExperiments(rawData, { db })
+      : Promise.resolve(null);
+
+    const [rollupResult, outdoorResult, experimentsResult] = await Promise.allSettled([
       rollupPromise,
       outdoorPromise,
+      experimentsPromise,
     ]);
 
     if (rollupResult.status === "fulfilled") {
@@ -501,6 +604,22 @@ export const syncOutdoorOnReading = onDocumentCreated(
         outdoorResult.reason instanceof Error
           ? outdoorResult.reason.message
           : String(outdoorResult.reason)
+      );
+    }
+
+    if (experimentsResult.status === "fulfilled") {
+      const outcome = experimentsResult.value;
+      if (outcome && (outcome.detection.detected || outcome.finalized_ids.length > 0)) {
+        console.log(
+          `[experiments] syncOutdoorOnReading: detected=${outcome.detection.detected} (${outcome.detection.reason}), finalized=${outcome.finalized_ids.length}`
+        );
+      }
+    } else {
+      console.error(
+        "[experiments] syncOutdoorOnReading experiments processing failed (non-fatal):",
+        experimentsResult.reason instanceof Error
+          ? experimentsResult.reason.message
+          : String(experimentsResult.reason)
       );
     }
   }

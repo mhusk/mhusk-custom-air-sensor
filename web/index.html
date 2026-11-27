@@ -323,7 +323,7 @@
             required
             min="0"
             max="20"
-            step="0.1"
+            step="0.01"
             inputmode="decimal"
             aria-describedby="cfg-temp-offset-hint"
             data-error="cfg-temp-offset-error"
@@ -447,6 +447,7 @@
             type="text"
             required
             maxlength="64"
+            pattern=".*\S.*"
             placeholder="Home Outdoor"
             aria-describedby="site-label-hint"
             data-error="site-label-error"
@@ -459,7 +460,7 @@
 
         <div class="field">
           <div class="coord-header">
-            <label for="site-latitude">Coordinates (Latitude / Longitude)</label>
+            <span class="field__label">Coordinates (Latitude / Longitude)</span>
             <button type="button" id="site-geolocate-btn" class="chip-btn">Use Browser Location</button>
           </div>
           <span id="site-coords-hint" class="field__hint">

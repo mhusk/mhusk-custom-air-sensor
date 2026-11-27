@@ -91,6 +91,10 @@ elif data.startswith(b"\x89PNG\r\n\x1a\n"):
 PY
 }
 
+file_size_bytes() {
+  wc -c < "$1" | tr -d '[:space:]'
+}
+
 verify_images() {
   if [[ ! -d "$OUT_DIR" ]]; then
     echo "ℹ️  No docs/images/ directory found yet."
@@ -105,7 +109,7 @@ verify_images() {
     local name
     name="$(basename "$img")"
     local size_bytes
-    size_bytes="$(stat -f%z "$img")"
+    size_bytes="$(file_size_bytes "$img")"
     local size_kb=$(( (size_bytes + 1023) / 1024 ))
 
     local meta_status
@@ -210,7 +214,7 @@ process_all() {
       local dst_png="${OUT_DIR}/${stem}.png"
       sips -s format png -Z "$MAX_DIM" "$src" --out "$dst_png" >/dev/null
       strip_metadata "$dst_png"
-      local size_kb=$(( ($(stat -f%z "$dst_png") + 1023) / 1024 ))
+      local size_kb=$(( ($(file_size_bytes "$dst_png") + 1023) / 1024 ))
       if (( size_kb > MAX_KB )); then
         # Fall back to high-quality JPEG if PNG screenshot is too large
         rm -f "$dst_png"
@@ -218,7 +222,7 @@ process_all() {
         for q in 88 80 72; do
           sips -s format jpeg -s formatOptions "$q" -Z "$MAX_DIM" "$src" --out "$dst_jpg" >/dev/null
           strip_metadata "$dst_jpg"
-          size_kb=$(( ($(stat -f%z "$dst_jpg") + 1023) / 1024 ))
+          size_kb=$(( ($(file_size_bytes "$dst_jpg") + 1023) / 1024 ))
           (( size_kb <= MAX_KB )) && break
         done
         echo "🖼️  ${filename} -> docs/images/${stem}.jpg (${size_kb} KB, EXIF stripped)"
@@ -231,7 +235,7 @@ process_all() {
       for q in 84 76 68; do
         sips -s format jpeg -s formatOptions "$q" -Z "$MAX_DIM" "$src" --out "$dst_jpg" >/dev/null
         strip_metadata "$dst_jpg"
-        size_kb=$(( ($(stat -f%z "$dst_jpg") + 1023) / 1024 ))
+        size_kb=$(( ($(file_size_bytes "$dst_jpg") + 1023) / 1024 ))
         (( size_kb <= MAX_KB )) && break
       done
       echo "📷 ${filename} -> docs/images/${stem}.jpg (${size_kb} KB, EXIF/GPS stripped)"

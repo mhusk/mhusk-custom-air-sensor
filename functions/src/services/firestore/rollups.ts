@@ -467,6 +467,25 @@ export async function appendIndoorRollupFromRawDoc(
 }
 
 /**
+ * Builds the `outdoor_daily_rollups/{YYYY-MM-DD}` doc ID and merge payload for one outdoor reading.
+ */
+export function buildOutdoorRollupWrite(
+  reading: OutdoorReading
+): { docId: string; payload: Record<string, unknown> } {
+  const { epochKey, dateStr, sample } = encodeOutdoorRollupSample(reading, reading.id);
+  return {
+    docId: buildOutdoorRollupDocId(dateStr),
+    payload: {
+      date: dateStr,
+      updated_at: Timestamp.now(),
+      samples: {
+        [epochKey]: sample,
+      },
+    },
+  };
+}
+
+/**
  * Idempotently appends one outdoor reading into `outdoor_daily_rollups/{YYYY-MM-DD}`
  * using `set(..., { merge: true })` (0 Firestore reads on write).
  */
@@ -474,21 +493,11 @@ export async function appendOutdoorRollupSample(
   reading: OutdoorReading,
   db: Firestore = getDb()
 ): Promise<string> {
-  const { epochKey, dateStr, sample } = encodeOutdoorRollupSample(reading, reading.id);
-  const docId = buildOutdoorRollupDocId(dateStr);
+  const { docId, payload } = buildOutdoorRollupWrite(reading);
   await db
     .collection(OUTDOOR_DAILY_ROLLUPS_COLLECTION)
     .doc(docId)
-    .set(
-      {
-        date: dateStr,
-        updated_at: Timestamp.now(),
-        samples: {
-          [epochKey]: sample,
-        },
-      },
-      { merge: true }
-    );
+    .set(payload, { merge: true });
   return docId;
 }
 
@@ -555,28 +564,71 @@ export async function readIndoorReadingsFromRollups(
     docsRead = snap.size;
 
     const coveredDates = new Set<string>();
+    const locationCoveredDates = new Set<string>();
+    const datesByDevice = new Map<string, Set<string>>();
+
     for (const doc of snap.docs) {
       const data = doc.data();
       const docDate =
         typeof data.date === "string" && data.date.length === 10
           ? data.date
           : doc.id.slice(-10);
+      const docDeviceId =
+        typeof data.device_id === "string" && data.device_id.length > 0
+          ? data.device_id
+          : doc.id.slice(0, -11);
+
       coveredDates.add(docDate);
+      if (docDeviceId) {
+        let devDates = datesByDevice.get(docDeviceId);
+        if (!devDates) {
+          devDates = new Set<string>();
+          datesByDevice.set(docDeviceId, devDates);
+        }
+        devDates.add(docDate);
+      }
 
       const decoded = decodeIndoorRollupDoc(doc.id, data);
+      let matchedLocation = false;
       for (const item of decoded) {
         const tsMs = Date.parse(item.timestamp);
         if (tsMs >= startMs && tsMs <= endMs) {
           if (!options.location || item.location === options.location) {
             readings.push(item);
+            matchedLocation = true;
           }
         }
       }
+      if (options.location && matchedLocation) {
+        locationCoveredDates.add(docDate);
+      }
     }
 
-    for (const dateStr of dates) {
-      if (!coveredDates.has(dateStr)) {
-        missingDates.push(dateStr);
+    if (options.location) {
+      for (const dateStr of dates) {
+        if (!locationCoveredDates.has(dateStr)) {
+          missingDates.push(dateStr);
+        }
+      }
+    } else {
+      const deviceSpans = Array.from(datesByDevice.values()).map((devDates) => {
+        const sorted = Array.from(devDates).sort();
+        return {
+          devDates,
+          minDate: sorted[0],
+          maxDate: sorted[sorted.length - 1],
+        };
+      });
+
+      for (const dateStr of dates) {
+        const missingFleetDate = !coveredDates.has(dateStr);
+        const missingMidRangeDeviceDate = deviceSpans.some(
+          ({ devDates, minDate, maxDate }) =>
+            dateStr > minDate && dateStr < maxDate && !devDates.has(dateStr)
+        );
+        if (missingFleetDate || missingMidRangeDeviceDate) {
+          missingDates.push(dateStr);
+        }
       }
     }
   }

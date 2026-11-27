@@ -11,6 +11,7 @@ import { Timestamp, type DocumentData, type Firestore } from "firebase-admin/fir
 import {
   DEVICES_COLLECTION,
   EXPERIMENTS_COLLECTION,
+  EXPERIMENT_DETECTOR_STATE_COLLECTION,
   HOUSE_PLAYBOOK_COLLECTION,
   HOUSE_PLAYBOOK_SUMMARY_DOC_ID,
   appendIndoorRollupSample,
@@ -27,10 +28,14 @@ import {
   computeMetricSnapshot,
   computePlaybookFromExperiments,
   createExperiment,
+  detectUnlabeledEventCandidate,
   evaluateExperimentOutcome,
+  evaluateStepChange,
+  finalizeDuePendingExperiments,
   getExperiment,
   getHousePlaybook,
   listExperiments,
+  processReadingForExperiments,
   rankPlaybookRecommendations,
   updateExperiment,
   type ExperimentRecord,
@@ -686,9 +691,287 @@ async function testCrudEvaluationAndCrossRoomRollups(): Promise<void> {
   );
 }
 
+async function testAutoDetectionAndOpportunisticFinalizer(): Promise<void> {
+  const { db, store } = createMockExperimentsFirestore();
+
+  await db.collection(DEVICES_COLLECTION).doc("feather-s3-01").set({
+    device_id: "feather-s3-01",
+    location: "master-bedroom",
+    latest_reading: {
+      co2_ppm: 1200,
+      temperature_f: 70.0,
+      humidity_percent: 45.0,
+      pm2_5_ug_m3: 5.0,
+      aqi_us: 21,
+      aqi_category: "Good",
+    },
+  });
+
+  // Pure evaluateStepChange checks
+  const outOfOrder = evaluateStepChange(
+    {
+      device_id: "feather-s3-01",
+      last_timestamp: "2026-11-27T10:05:00.000Z",
+      last_co2_ppm: 1200,
+      last_pm2_5_ug_m3: 5,
+      last_detected_at: null,
+    },
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:05:00.000Z",
+      co2_ppm: 900,
+      pm2_5_ug_m3: 5,
+    }
+  );
+  assert.equal(outOfOrder.triggered, false);
+  assert.equal(outOfOrder.reason, "out_of_order_or_duplicate");
+
+  // 1. Baseline initialization on first reading
+  const initRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:00:00.000Z",
+      co2_ppm: 1200,
+      pm2_5_ug_m3: 5.0,
+    },
+    { db, now: new Date("2026-11-27T10:00:00.000Z") }
+  );
+  assert.equal(initRes.detected, false);
+  assert.equal(initRes.reason, "initialized_baseline");
+  assert.ok(store.get(EXPERIMENT_DETECTOR_STATE_COLLECTION)?.has("feather-s3-01"));
+
+  // 2. Normal small drift (+40 ppm, +2 ug/m3) does NOT trigger
+  const driftRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:05:00.000Z",
+      co2_ppm: 1240,
+      pm2_5_ug_m3: 7.0,
+    },
+    { db, now: new Date("2026-11-27T10:05:00.000Z") }
+  );
+  assert.equal(driftRes.detected, false);
+  assert.equal(driftRes.reason, "below_threshold");
+
+  // 3. Sharp CO2 drop (-220 ppm over 5 min) creates an unlabeled candidate
+  const co2DropRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:10:00.000Z",
+      co2_ppm: 1020,
+      pm2_5_ug_m3: 7.0,
+    },
+    { db, now: new Date("2026-11-27T10:10:00.000Z") }
+  );
+  assert.equal(co2DropRes.detected, true);
+  assert.equal(co2DropRes.reason, "candidate_created");
+  assert.equal(co2DropRes.co2_delta_ppm, -220);
+  assert.ok(co2DropRes.experiment);
+  assert.equal(co2DropRes.experiment.status, "unlabeled");
+  assert.equal(co2DropRes.experiment.source, "auto_detected");
+  assert.equal(co2DropRes.experiment.started_at, "2026-11-27T10:05:00.000Z");
+  assert.equal(co2DropRes.experiment.ended_at, "2026-11-27T10:10:00.000Z");
+  assert.match(co2DropRes.experiment.notes ?? "", /CO₂ drop of -220 ppm/);
+
+  // 4. 30-minute cooldown suppresses a second sharp jump 10 min later
+  const cooldownRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:20:00.000Z",
+      co2_ppm: 780,
+      pm2_5_ug_m3: 7.0,
+    },
+    { db, now: new Date("2026-11-27T10:20:00.000Z") }
+  );
+  assert.equal(cooldownRes.detected, false);
+  assert.equal(cooldownRes.reason, "cooldown_active");
+
+  // 5. Gap > 15 min (e.g., 25 min since 10:20) does NOT trigger
+  const gapRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:45:00.000Z",
+      co2_ppm: 1200,
+      pm2_5_ug_m3: 7.0,
+    },
+    { db, now: new Date("2026-11-27T10:45:00.000Z") }
+  );
+  assert.equal(gapRes.detected, false);
+  assert.equal(gapRes.reason, "gap_too_large");
+
+  // 6. Sharp PM2.5 spike (+25 ug/m3 over 5 min) triggers after cooldown expires
+  const pmSpikeRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T10:50:00.000Z",
+      co2_ppm: 1220,
+      pm2_5_ug_m3: 32.0,
+    },
+    { db, now: new Date("2026-11-27T10:50:00.000Z") }
+  );
+  assert.equal(pmSpikeRes.detected, true);
+  assert.equal(pmSpikeRes.reason, "candidate_created");
+  assert.equal(pmSpikeRes.pm2_5_delta_ug_m3, 25);
+  assert.match(pmSpikeRes.experiment?.notes ?? "", /PM2\.5 spike of \+25\.0/);
+
+  // 7. Overlap suppression: active experiment suppresses, dismissed does NOT
+  const { db: dbOverlap } = createMockExperimentsFirestore();
+  await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T12:00:00.000Z",
+      co2_ppm: 1300,
+      pm2_5_ug_m3: 5.0,
+    },
+    { db: dbOverlap, now: new Date("2026-11-27T12:00:00.000Z") }
+  );
+  const dismissedExp = await createExperiment(
+    {
+      action_type: "crack_window",
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      started_at: "2026-11-27T12:00:00.000Z",
+      ended_at: "2026-11-27T12:05:00.000Z",
+      evaluate_if_ready: false,
+      now: new Date("2026-11-27T12:05:00.000Z"),
+    },
+    dbOverlap
+  );
+  await updateExperiment(
+    dismissedExp.id,
+    { status: "dismissed", now: new Date("2026-11-27T12:05:00.000Z") },
+    dbOverlap
+  );
+  // Dismissed experiment should NOT suppress detection
+  const afterDismissedRes = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T12:05:00.000Z",
+      co2_ppm: 1050,
+      pm2_5_ug_m3: 5.0,
+    },
+    { db: dbOverlap, now: new Date("2026-11-27T12:05:00.000Z") }
+  );
+  assert.equal(afterDismissedRes.detected, true);
+
+  // Active experiment suppresses detection once cooldown clears
+  await createExperiment(
+    {
+      action_type: "cross_ventilate",
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      started_at: "2026-11-27T12:40:00.000Z",
+      now: new Date("2026-11-27T12:40:00.000Z"),
+    },
+    dbOverlap
+  );
+  await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T12:40:00.000Z",
+      co2_ppm: 1350,
+      pm2_5_ug_m3: 5.0,
+    },
+    { db: dbOverlap, now: new Date("2026-11-27T12:40:00.000Z") }
+  );
+  const suppressedByActive = await detectUnlabeledEventCandidate(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: "2026-11-27T12:45:00.000Z",
+      co2_ppm: 950,
+      pm2_5_ug_m3: 5.0,
+    },
+    { db: dbOverlap, now: new Date("2026-11-27T12:45:00.000Z") }
+  );
+  assert.equal(suppressedByActive.detected, false);
+  assert.equal(suppressedByActive.reason, "overlapping_experiment");
+
+  // 8. finalizeDuePendingExperiments & processReadingForExperiments
+  const { db: dbFin } = createMockExperimentsFirestore();
+  await appendIndoorRollupSample(
+    makeReading("feather-s3-01", "master-bedroom", "2026-11-27T13:50:00.000Z", {
+      co2_ppm: 1300,
+    }),
+    dbFin
+  );
+  await appendIndoorRollupSample(
+    makeReading("feather-s3-01", "master-bedroom", "2026-11-27T14:25:00.000Z", {
+      co2_ppm: 950,
+    }),
+    dbFin
+  );
+
+  const dueExp = await createExperiment(
+    {
+      action_type: "crack_window",
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      started_at: "2026-11-27T14:00:00.000Z",
+      ended_at: "2026-11-27T14:10:00.000Z",
+      evaluate_if_ready: false,
+      now: new Date("2026-11-27T14:10:00.000Z"),
+    },
+    dbFin
+  );
+  const notDueExp = await createExperiment(
+    {
+      action_type: "open_door",
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      started_at: "2026-11-27T14:20:00.000Z",
+      ended_at: "2026-11-27T14:25:00.000Z",
+      evaluate_if_ready: false,
+      now: new Date("2026-11-27T14:25:00.000Z"),
+    },
+    dbFin
+  );
+
+  // At 14:32: dueExp (ended 14:10 + 20m = 14:30) finalizes; notDueExp (14:25 + 20m = 14:45) stays pending
+  const processRes = await processReadingForExperiments(
+    {
+      device_id: "feather-s3-01",
+      location: "master-bedroom",
+      timestamp: Timestamp.fromDate(new Date("2026-11-27T14:32:00.000Z")),
+      co2_ppm: 940,
+      pm2_5_ug_m3: 8,
+    },
+    { db: dbFin, now: new Date("2026-11-27T14:32:00.000Z") }
+  );
+  assert.deepEqual(processRes.finalized_ids, [dueExp.id]);
+  assert.equal(processRes.detection.reason, "initialized_baseline");
+
+  const dueAfter = await getExperiment(dueExp.id, dbFin);
+  const notDueAfter = await getExperiment(notDueExp.id, dbFin);
+  assert.equal(dueAfter?.status, "evaluated");
+  assert.equal(dueAfter?.evaluation?.co2_delta_ppm, -350);
+  assert.equal(notDueAfter?.status, "pending_evaluation");
+
+  const playbook = await getHousePlaybook(dbFin);
+  assert.equal(playbook.evaluated_experiment_count, 1);
+  assert.equal(playbook.entries.length, 1);
+
+  const noneDue = await finalizeDuePendingExperiments({
+    db: dbFin,
+    now: new Date("2026-11-27T14:40:00.000Z"),
+  });
+  assert.deepEqual(noneDue, []);
+}
+
 async function main(): Promise<void> {
   await testPureHelpersAndPlaybookRanking();
   await testCrudEvaluationAndCrossRoomRollups();
+  await testAutoDetectionAndOpportunisticFinalizer();
   console.log("PASS: verifyExperiments (all experiment & house playbook assertions passed)");
 }
 

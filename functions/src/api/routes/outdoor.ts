@@ -1,6 +1,10 @@
 import type { ServerResponse } from "node:http";
 
-import { findBestVentilationWindows, type OutdoorReading } from "../../services/outdoor.js";
+import {
+  findBestVentilationWindows,
+  selectIndoorBaseline,
+  type OutdoorReading,
+} from "../../services/outdoor.js";
 import { FORECAST_CACHE_TTL_MS, type DashboardResponseCache } from "../cache.js";
 import { parseValidatedJsonBody, sendJson, sendMethodNotAllowed } from "../http.js";
 import { updateSiteLocationConfigSchema } from "../schemas.js";
@@ -58,14 +62,14 @@ export async function handleSiteConfigRoute(
       }
     }
 
+    cache?.invalidate("overview");
+    cache?.invalidate("forecast");
+    cache?.invalidatePrefix("history:");
     sendJson(res, 200, {
       updated: true,
       config: saved,
       outdoor_sync: syncResult,
     });
-    cache?.invalidate("overview");
-    cache?.invalidate("forecast");
-    cache?.invalidatePrefix("history:");
     return;
   }
 
@@ -141,13 +145,7 @@ export async function handleOutdoorForecastRoute(
     service.getLatestOutdoorForecast ? service.getLatestOutdoorForecast() : Promise.resolve(null),
   ]);
 
-  const baselineDevice = statusResult.devices.find((d) => d.latest_reading !== null);
-  const indoorBaseline = baselineDevice?.latest_reading
-    ? {
-        temperature_f: baselineDevice.latest_reading.temperature_f,
-        humidity_percent: baselineDevice.latest_reading.humidity_percent,
-      }
-    : { temperature_f: 70.0, humidity_percent: 45.0 };
+  const indoorBaseline = selectIndoorBaseline(statusResult.devices);
 
   if (!siteConfig || !forecastResult) {
     const emptyPayload = {

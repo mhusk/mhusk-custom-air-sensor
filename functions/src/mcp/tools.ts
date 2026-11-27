@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Firestore } from "firebase-admin/firestore";
 import { z } from "zod";
 
+import { DEVICE_ID_REGEX } from "../api/schemas.js";
 import {
   DEFAULT_HISTORY_HOURS,
   DEFAULT_HISTORY_LIMIT,
@@ -91,8 +92,24 @@ function jsonToolResult(payload: unknown): CallToolResult {
   };
 }
 
+const slugInputSchema = z
+  .string()
+  .trim()
+  .regex(
+    DEVICE_ID_REGEX,
+    "Must be 1-64 characters using only letters, numbers, hyphens, or underscores."
+  );
+
+const SAFE_VALIDATION_ERROR_RE =
+  /^(Invalid (start_time|end_time)|'start_time' must be|Requested window exceeds)/;
+
 function errorToolResult(toolName: string, error: unknown): CallToolResult {
-  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[mcp] Tool '${toolName}' failed:`, error);
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const safeMessage =
+    error instanceof RangeError || SAFE_VALIDATION_ERROR_RE.test(rawMessage)
+      ? rawMessage
+      : "Internal server error while executing tool.";
   return {
     isError: true,
     content: [
@@ -101,7 +118,7 @@ function errorToolResult(toolName: string, error: unknown): CallToolResult {
         text: JSON.stringify(
           {
             error: `Tool '${toolName}' failed`,
-            message,
+            message: safeMessage,
           },
           null,
           2
@@ -112,7 +129,7 @@ function errorToolResult(toolName: string, error: unknown): CallToolResult {
 }
 
 /**
- * Registers all five indoor/outdoor air quality MCP tools on the provided McpServer.
+ * Registers all six indoor/outdoor air quality MCP tools on the provided McpServer.
  */
 export function registerAirQualityTools(
   server: McpServer,
@@ -125,16 +142,10 @@ export function registerAirQualityTools(
       description:
         "Fetches the most recent indoor air quality sensor reading from Firestore along with device metadata, freshness (minutes_ago / is_stale), CO2, temperature, humidity, PM1.0/PM2.5/PM10, US EPA AQI, particle counts, and qualitative health context.",
       inputSchema: {
-        device_id: z
-          .string()
-          .trim()
-          .min(1)
+        device_id: slugInputSchema
           .optional()
           .describe("Optional sensor device ID (e.g., 'feather-s3-01'). Omit to query all sensors."),
-        location: z
-          .string()
-          .trim()
-          .min(1)
+        location: slugInputSchema
           .optional()
           .describe("Optional room or location slug (e.g., 'home-office')."),
       },
@@ -202,16 +213,10 @@ export function registerAirQualityTools(
           .min(1)
           .optional()
           .describe("Optional ISO-8601 UTC end timestamp. Defaults to current server time."),
-        device_id: z
-          .string()
-          .trim()
-          .min(1)
+        device_id: slugInputSchema
           .optional()
           .describe("Optional sensor device ID filter (e.g., 'feather-s3-01')."),
-        location: z
-          .string()
-          .trim()
-          .min(1)
+        location: slugInputSchema
           .optional()
           .describe("Optional room or location filter (e.g., 'home-office')."),
         limit: z
@@ -254,16 +259,10 @@ export function registerAirQualityTools(
           .enum(["1h", "6h", "24h", "7d", "30d"])
           .default("24h")
           .describe("Aggregation time window: '1h', '6h', '24h', '7d', or '30d' (default '24h')."),
-        device_id: z
-          .string()
-          .trim()
-          .min(1)
+        device_id: slugInputSchema
           .optional()
           .describe("Optional sensor device ID filter (e.g., 'feather-s3-01')."),
-        location: z
-          .string()
-          .trim()
-          .min(1)
+        location: slugInputSchema
           .optional()
           .describe("Optional room or location filter (e.g., 'home-office')."),
       },
@@ -290,10 +289,7 @@ export function registerAirQualityTools(
       description:
         "Inspects registered air quality sensors in the Firestore `devices` collection, reporting online (<=15 min), stale (16-60 min), or offline (>60 min) health relative to the expected 5-minute reporting interval, along with firmware version, attached sensors, and latest snapshot metrics.",
       inputSchema: {
-        device_id: z
-          .string()
-          .trim()
-          .min(1)
+        device_id: slugInputSchema
           .optional()
           .describe("Optional specific sensor device ID. Omit to list all registered sensors."),
       },
@@ -383,16 +379,10 @@ export function registerAirQualityTools(
       description:
         "Evaluates the current heating/cooling/dehumidification energy tax of opening a window (using dew point and moist-air enthalpy) and scans the cached 24-hour Open-Meteo hourly weather + AQI forecast to find the next clean, low-energy-tax ventilation window.",
       inputSchema: {
-        device_id: z
-          .string()
-          .trim()
-          .min(1)
+        device_id: slugInputSchema
           .optional()
           .describe("Optional indoor sensor device ID to use as the indoor temp/RH baseline."),
-        location: z
-          .string()
-          .trim()
-          .min(1)
+        location: slugInputSchema
           .optional()
           .describe("Optional room/location slug to use as the indoor temp/RH baseline."),
         refresh: z

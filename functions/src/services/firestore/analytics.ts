@@ -134,15 +134,16 @@ function collectSpikesForMetric(
   highThreshold: number
 ): NotableSpike[] {
   const spikes: NotableSpike[] = [];
-  let active: NotableSpike | null = null;
+  const activeByDevice = new Map<string, NotableSpike>();
 
   for (const reading of readingsAsc) {
     const value = reading[metric];
+    const active = activeByDevice.get(reading.device_id);
     if (value > elevatedThreshold) {
       const severity: NotableSpike["severity"] =
         value >= highThreshold ? "high" : "elevated";
 
-      if (active && active.device_id === reading.device_id) {
+      if (active) {
         active.ended_at = reading.timestamp;
         active.reading_count += 1;
         if (value > active.peak_value) {
@@ -153,10 +154,7 @@ function collectSpikesForMetric(
           active.severity = "high";
         }
       } else {
-        if (active) {
-          spikes.push(active);
-        }
-        active = {
+        activeByDevice.set(reading.device_id, {
           metric,
           unit,
           threshold: elevatedThreshold,
@@ -168,15 +166,15 @@ function collectSpikesForMetric(
           reading_count: 1,
           device_id: reading.device_id,
           location: reading.location,
-        };
+        });
       }
     } else if (active) {
       spikes.push(active);
-      active = null;
+      activeByDevice.delete(reading.device_id);
     }
   }
 
-  if (active) {
+  for (const active of activeByDevice.values()) {
     spikes.push(active);
   }
   return spikes;

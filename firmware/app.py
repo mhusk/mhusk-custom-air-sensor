@@ -44,7 +44,7 @@ import ota_updater
 from firestore_client import FirestoreClient, FirestoreError
 
 # Firmware & hardware constants
-FIRMWARE_VERSION = "1.3.3"
+FIRMWARE_VERSION = "1.3.4"
 SUPPORTS_HEALTH_CALLBACK = True
 SENSORS = ["SCD-40", "PMSA003I"]
 SCD40_I2C_ADDR = 0x62
@@ -131,6 +131,13 @@ class HardwareError(Exception):
     """Raised when an I2C sensor is missing or fails to respond."""
 
 
+def _monotonic_ms():
+    """Return monotonic milliseconds via integer nanoseconds to avoid 30-bit float drift."""
+    if hasattr(time, "monotonic_ns"):
+        return time.monotonic_ns() // 1_000_000
+    return int(time.monotonic() * 1000)
+
+
 class StatusLED:
     """Thin wrapper around the Feather ESP32-S3 onboard RGB NeoPixel."""
 
@@ -166,19 +173,19 @@ class StatusLED:
             self.off()
             sleep_with_watchdog(total_seconds)
             return
-        deadline = time.monotonic() + total_seconds
-        while time.monotonic() < deadline:
+        deadline_ms = _monotonic_ms() + int(round(total_seconds * 1000))
+        while _monotonic_ms() < deadline_ms:
             self.set(color)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining_ms = deadline_ms - _monotonic_ms()
+            if remaining_ms <= 0:
                 break
-            sleep_with_watchdog(min(on_seconds, remaining))
+            sleep_with_watchdog(min(on_seconds, remaining_ms / 1000.0))
 
             self.off()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining_ms = deadline_ms - _monotonic_ms()
+            if remaining_ms <= 0:
                 break
-            sleep_with_watchdog(min(off_seconds, remaining))
+            sleep_with_watchdog(min(off_seconds, remaining_ms / 1000.0))
         self.off()
 
 
@@ -219,13 +226,13 @@ def sleep_with_watchdog(seconds):
     if seconds <= 0:
         feed_watchdog()
         return
-    deadline = time.monotonic() + seconds
+    deadline_ms = _monotonic_ms() + int(round(seconds * 1000))
     while True:
         feed_watchdog()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining_ms = deadline_ms - _monotonic_ms()
+        if remaining_ms <= 0:
             break
-        time.sleep(min(1.0, remaining))
+        time.sleep(min(1.0, remaining_ms / 1000.0))
 
 
 def _clamp(value, low, high):
@@ -262,6 +269,18 @@ def load_config():
 
     device_id = str(os.getenv("SENSOR_DEVICE_ID") or "feather-s3-01").strip()
     location = str(os.getenv("SENSOR_LOCATION") or "home-office").strip()
+    if not firestore_client.is_valid_slug(device_id):
+        raise ValueError(
+            "Invalid SENSOR_DEVICE_ID {!r}: must match ^[A-Za-z0-9][A-Za-z0-9_-]{{0,63}}$".format(
+                device_id
+            )
+        )
+    if not firestore_client.is_valid_slug(location):
+        raise ValueError(
+            "Invalid SENSOR_LOCATION {!r}: must match ^[A-Za-z0-9][A-Za-z0-9_-]{{0,63}}$".format(
+                location
+            )
+        )
 
     raw_interval = os.getenv("SENSOR_INTERVAL_SECONDS")
     try:
@@ -281,9 +300,9 @@ def load_config():
 
 def scan_i2c_addresses(i2c):
     """Return a list of 7-bit I2C addresses currently responding on the bus."""
-    deadline = time.monotonic() + 2.0
+    deadline_ms = _monotonic_ms() + 2000
     while not i2c.try_lock():
-        if time.monotonic() > deadline:
+        if _monotonic_ms() > deadline_ms:
             raise HardwareError("Timed out acquiring I2C bus lock")
         time.sleep(0.05)
     try:
@@ -357,8 +376,8 @@ def apply_scd40_calibration(scd4x, temperature_offset_c, altitude_m):
 
 def _read_scd40(scd4x, timeout_seconds=15.0):
     """Wait for a fresh SCD-40 sample and return (co2_ppm, temp_c, temp_f, rh)."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    deadline_ms = _monotonic_ms() + int(round(timeout_seconds * 1000))
+    while _monotonic_ms() < deadline_ms:
         feed_watchdog()
         try:
             if scd4x.data_ready:
@@ -371,7 +390,7 @@ def _read_scd40(scd4x, timeout_seconds=15.0):
                     temp_f_val = _clamp((temp_c_val * 9.0 / 5.0) + 32.0, -40.0, 185.0)
                     humidity_val = _clamp(float(humidity), 0.0, 100.0)
                     return co2_ppm, temp_c_val, temp_f_val, humidity_val
-        except OSError as err:
+        except (OSError, RuntimeError) as err:
             raise HardwareError("SCD-40 I2C read error: {}".format(err))
         sleep_with_watchdog(0.5)
 
@@ -460,14 +479,14 @@ def _build_google_ssl_context():
 def sync_ntp_utc(pool):
     """Sync the ESP32-S3 hardware RTC to UTC via NTP (required by firestore.rules)."""
     feed_watchdog()
-    ntp = adafruit_ntp.NTP(pool, tz_offset=0)
+    ntp = adafruit_ntp.NTP(pool, tz_offset=0, socket_timeout=10)
     rtc.RTC().datetime = ntp.datetime
     now = time.localtime()
     if now.tm_year < 2024:
         raise RuntimeError("NTP returned invalid year: {}".format(now.tm_year))
     ts = firestore_client.format_utc_timestamp(now)
     print("[NTP] Clock synced to UTC: {}".format(ts))
-    return time.monotonic()
+    return _monotonic_ms()
 
 
 def main(on_healthy=None):
@@ -513,7 +532,7 @@ def main(on_healthy=None):
     pm25 = None
     pool = None
     client = None
-    last_ntp_sync = None
+    last_ntp_sync_ms = None
     boot_epoch = None
     applied_scd40_offset = None
     applied_scd40_altitude = None
@@ -527,13 +546,13 @@ def main(on_healthy=None):
     ota_failed_version = boot_ota["failed_version"]
     ota_target_version = None
     last_attempted_ota_target = None
-    ota_retry_after_mono = 0.0
+    ota_retry_after_ms = 0
     if boot_ota["ota_state"] == ota_updater.OTA_STATE_ROLLED_BACK:
         print("[OTA WARN] {}".format(ota_last_error))
 
     try:
         while True:
-            cycle_start = time.monotonic()
+            cycle_start_ms = _monotonic_ms()
             if first_boot:
                 led.set(COLOR_BLUE)
 
@@ -562,15 +581,21 @@ def main(on_healthy=None):
                     )
 
                 # 3. Sync UTC clock on boot and every 6 hours to prevent drift
-                now_mono = time.monotonic()
-                if (
-                    last_ntp_sync is None
-                    or (now_mono - last_ntp_sync) >= NTP_RESYNC_INTERVAL_SECONDS
-                ):
-                    last_ntp_sync = sync_ntp_utc(pool)
+                now_ms = _monotonic_ms()
+                if last_ntp_sync_ms is None or time.localtime().tm_year < 2024:
+                    last_ntp_sync_ms = sync_ntp_utc(pool)
                     if boot_epoch is None:
                         boot_epoch = firestore_client.parse_utc_timestamp_epoch(
                             firestore_client.format_utc_timestamp(time.localtime())
+                        )
+                elif (now_ms - last_ntp_sync_ms) >= (NTP_RESYNC_INTERVAL_SECONDS * 1000):
+                    try:
+                        last_ntp_sync_ms = sync_ntp_utc(pool)
+                    except Exception as ntp_err:
+                        print(
+                            "[NTP WARN] Periodic resync failed (keeping RTC): {}".format(
+                                ntp_err
+                            )
                         )
 
                 # 4. Poll remote config (`device_configs/{device_id}`) non-fatally in RAM
@@ -678,7 +703,7 @@ def main(on_healthy=None):
                 sample = read_sensors(scd4x, pm25)
                 now_utc = time.localtime()
                 if now_utc.tm_year < 2024:
-                    last_ntp_sync = sync_ntp_utc(pool)
+                    last_ntp_sync_ms = sync_ntp_utc(pool)
                     now_utc = time.localtime()
 
                 ts = firestore_client.format_utc_timestamp(now_utc)
@@ -762,9 +787,10 @@ def main(on_healthy=None):
                     boot_confirmed
                     and target_fw is not None
                     and target_fw != FIRMWARE_VERSION
+                    and target_fw != ota_failed_version
                     and (
                         target_fw != last_attempted_ota_target
-                        or time.monotonic() >= ota_retry_after_mono
+                        or _monotonic_ms() >= ota_retry_after_ms
                     )
                 ):
                     print(
@@ -772,13 +798,15 @@ def main(on_healthy=None):
                             target_fw, FIRMWARE_VERSION
                         )
                     )
-                    led.set(COLOR_CYAN)
+                    if not ota_updater.is_fs_readonly():
+                        led.set(COLOR_CYAN)
 
                     def _report_updating(ver):
+                        updating_ts = firestore_client.format_utc_timestamp(time.localtime())
                         updating_doc = firestore_client.build_device_status_document(
                             device_id=device_id,
                             location=location,
-                            last_seen_at=ts,
+                            last_seen_at=updating_ts,
                             firmware_version=FIRMWARE_VERSION,
                             sensors=SENSORS,
                             reporting_interval_seconds=interval_seconds,
@@ -811,17 +839,18 @@ def main(on_healthy=None):
                     ):
                         ota_last_error = ota_result["ota_last_error"]
                     last_attempted_ota_target = target_fw
-                    ota_retry_after_mono = time.monotonic() + OTA_ERROR_COOLDOWN_SECONDS
+                    ota_retry_after_ms = _monotonic_ms() + (OTA_ERROR_COOLDOWN_SECONDS * 1000)
                     print(
                         "[OTA WARN] {} (status={}, error={})".format(
                             ota_result["action"], ota_status, ota_last_error
                         )
                     )
                     try:
+                        err_ts = firestore_client.format_utc_timestamp(time.localtime())
                         err_doc = firestore_client.build_device_status_document(
                             device_id=device_id,
                             location=location,
-                            last_seen_at=ts,
+                            last_seen_at=err_ts,
                             firmware_version=FIRMWARE_VERSION,
                             sensors=SENSORS,
                             reporting_interval_seconds=interval_seconds,
@@ -847,7 +876,7 @@ def main(on_healthy=None):
                 gc.collect()
                 led.pulse_success(1.0)
 
-                elapsed = time.monotonic() - cycle_start
+                elapsed = (_monotonic_ms() - cycle_start_ms) / 1000.0
                 sleep_remaining = interval_seconds - elapsed
                 if sleep_remaining > 0:
                     sleep_with_watchdog(sleep_remaining)

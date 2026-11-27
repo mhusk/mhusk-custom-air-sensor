@@ -38,8 +38,12 @@ export function sendMethodNotAllowed(
 
 export function parseQueryParams(req: IncomingApiRequest): URLSearchParams {
   const rawUrl = req.url ?? "/";
-  const parsed = new URL(rawUrl, "http://localhost");
-  return parsed.searchParams;
+  try {
+    const parsed = new URL(rawUrl, "http://localhost");
+    return parsed.searchParams;
+  } catch {
+    throw new BodyReadError(400, "invalid_request", "Malformed request query string.");
+  }
 }
 
 export async function readJsonBody(req: IncomingApiRequest): Promise<unknown> {

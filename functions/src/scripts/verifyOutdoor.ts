@@ -37,7 +37,9 @@ import {
   fetchOpenMeteoSnapshotWithForecast,
   findBestVentilationWindows,
   mapUsAqiCategory,
+  selectIndoorBaseline,
   syncOutdoorReadingIfStale,
+  updateSiteLocationConfig,
   type LatestOutdoorForecastResult,
   type LatestOutdoorReadingResult,
   type OutdoorForecast,
@@ -194,6 +196,48 @@ async function testOpenMeteoParsing(): Promise<void> {
   assert.equal(fallbackSnap.pm2_5_ug_m3, null);
   assert.equal(fallbackSnap.us_aqi, null);
 
+  // Graceful fallback when Air Quality API rejects (network/timeout) or returns invalid JSON
+  for (const aqMode of ["reject", "bad_json"] as const) {
+    const mockFetchAqFailure: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("api.open-meteo.com/v1/forecast")) {
+        return new Response(
+          JSON.stringify({
+            current: {
+              temperature_2m: 12.0,
+              relative_humidity_2m: 55,
+              weather_code: 1,
+            },
+            hourly: {
+              time: ["2026-11-24T17:00"],
+              temperature_2m: [12.0],
+              relative_humidity_2m: [55],
+              wind_speed_10m: [4.0],
+              weather_code: [1],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (aqMode === "reject") {
+        throw new Error("Simulated Open-Meteo AQ timeout");
+      }
+      return new Response("{truncated json", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const res = await fetchOpenMeteoSnapshotWithForecast(
+      { label: "Home Outdoor", latitude: 37.7749, longitude: -122.4194 },
+      { fetchImpl: mockFetchAqFailure, now: () => new Date("2026-11-24T17:00:00.000Z") }
+    );
+    assert.equal(res.reading.temperature_f, 53.6);
+    assert.equal(res.reading.pm2_5_ug_m3, null);
+    assert.equal(res.reading.us_aqi, null);
+    assert.equal(res.forecast?.hours.length, 1);
+  }
+
   // 24h hourly forecast parsing
   const mockFetchForecast: typeof fetch = async (input) => {
     const url = String(input);
@@ -297,6 +341,21 @@ function testIndoorOutdoorDelta(): void {
   assert.equal(openDelta.aqi_diff, -9);
   assert.equal(openDelta.window_recommendation, "open_recommended");
   assert.equal(openDelta.energy_tax.tier, "low");
+
+  // Online-first indoor baseline selection ignores alphabetically earlier offline sensors
+  const pickedBaseline = selectIndoorBaseline([
+    {
+      is_online: false,
+      last_seen_at: "2026-11-24T12:00:00.000Z",
+      latest_reading: { temperature_f: 52.0, humidity_percent: 80.0 },
+    },
+    {
+      is_online: true,
+      last_seen_at: "2026-11-24T17:00:00.000Z",
+      latest_reading: { temperature_f: 71.5, humidity_percent: 44.0 },
+    },
+  ]);
+  assert.deepEqual(pickedBaseline, { temperature_f: 71.5, humidity_percent: 44.0 });
 
   // High indoor CO2 + clean outdoor + high energy tax -> open_brief_purge
   const purgeDelta = computeIndoorOutdoorDelta(SAMPLE_READING, {
@@ -776,6 +835,7 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
     },
   });
 
+  let batchCommits = 0;
   const mockDb = {
     collection(colName: string) {
       return {
@@ -799,6 +859,24 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
             },
           }),
         }),
+      };
+    },
+    batch() {
+      const ops: Array<() => Promise<void>> = [];
+      return {
+        set(
+          ref: ReturnType<typeof makeDocRef>,
+          data: Record<string, unknown>,
+          opts?: { merge?: boolean }
+        ) {
+          ops.push(() => ref.set(data, opts));
+        },
+        async commit() {
+          batchCommits += 1;
+          for (const op of ops) {
+            await op();
+          }
+        },
       };
     },
     async runTransaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
@@ -926,6 +1004,23 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
     1,
     "Expected only 1 Firestore read (site_configs/home) when includeReading=false"
   );
+  assert.equal(batchCommits, 2, "Expected 2 atomic batch commits across the 2 syncs");
+
+  // Verify updateSiteLocationConfig resets sync timestamps so moved coordinates re-sync
+  await updateSiteLocationConfig(
+    {
+      label: "New City",
+      latitude: 40.7128,
+      longitude: -74.006,
+      outdoor_poll_interval_minutes: 15,
+    },
+    "owner@example.com",
+    mockDb
+  );
+  const updatedSiteDoc = store.get(SITE_CONFIGS_COLLECTION)?.get(HOME_SITE_CONFIG_ID);
+  assert.equal(updatedSiteDoc?.outdoor_last_synced_at, null);
+  assert.equal(updatedSiteDoc?.outdoor_last_sync_attempt_at, null);
+
   console.log("[PASS] 5. Concurrent outdoor sync coalesces via lease while force=true refreshes");
 }
 

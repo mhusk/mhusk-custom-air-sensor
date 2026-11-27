@@ -31,7 +31,17 @@ import { resolveProjectId } from "./projectId.js";
 const DEFAULT_BACKFILL_DAYS = 30;
 const MAX_BACKFILL_DAYS = 365;
 const QUERY_PAGE_SIZE = 1000;
-const WRITE_BATCH_SIZE = 100;
+const WRITE_BATCH_SIZE = 15;
+const MAX_BATCH_BYTES = 4 * 1024 * 1024;
+
+export function computeBackfillCutoffDate(
+  days: number,
+  nowMs: number = Date.now()
+): Date {
+  const cutoff = new Date(nowMs - days * 24 * 60 * 60 * 1000);
+  cutoff.setUTCHours(0, 0, 0, 0);
+  return cutoff;
+}
 
 export interface BackfillCliArgs {
   days: number;
@@ -271,20 +281,36 @@ async function commitRollupBatches(
   writes: Array<{ collection: string; docId: string; payload: Record<string, unknown> }>
 ): Promise<void> {
   const nowTs = Timestamp.now();
-  for (let i = 0; i < writes.length; i += WRITE_BATCH_SIZE) {
-    const chunk = writes.slice(i, i + WRITE_BATCH_SIZE);
-    const batch = db.batch();
-    for (const item of chunk) {
-      const ref = db.collection(item.collection).doc(item.docId);
-      batch.set(
-        ref,
-        {
-          ...item.payload,
-          updated_at: nowTs,
-        },
-        { merge: true }
-      );
+  let batch = db.batch();
+  let batchCount = 0;
+  let batchBytes = 0;
+
+  for (const item of writes) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item.payload), "utf8");
+    if (
+      batchCount > 0 &&
+      (batchCount >= WRITE_BATCH_SIZE || batchBytes + itemBytes > MAX_BATCH_BYTES)
+    ) {
+      await batch.commit();
+      batch = db.batch();
+      batchCount = 0;
+      batchBytes = 0;
     }
+
+    const ref = db.collection(item.collection).doc(item.docId);
+    batch.set(
+      ref,
+      {
+        ...item.payload,
+        updated_at: nowTs,
+      },
+      { merge: true }
+    );
+    batchCount += 1;
+    batchBytes += itemBytes;
+  }
+
+  if (batchCount > 0) {
     await batch.commit();
   }
 }
@@ -312,7 +338,7 @@ export async function runBackfill(
       return getBackfillFirestore(projectId);
     })();
 
-  const cutoff = new Date(Date.now() - args.days * 24 * 60 * 60 * 1000);
+  const cutoff = computeBackfillCutoffDate(args.days);
 
   const [indoorScan, outdoorScan] = await Promise.all([
     scanCollectionInWindow(resolvedDb, READINGS_COLLECTION, cutoff, mapRawIndoorDoc),

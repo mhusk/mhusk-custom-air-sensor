@@ -1,6 +1,6 @@
 # Custom ESP32-S3 Air Quality Sensor + Firebase + Remote MCP Server
 
-![CircuitPython](https://img.shields.io/badge/Firmware-CircuitPython%20v1.3.3-purple?style=flat-square)
+![CircuitPython](https://img.shields.io/badge/Firmware-CircuitPython%20v1.3.4-purple?style=flat-square)
 ![Firebase](https://img.shields.io/badge/Cloud-Firebase%20%2B%20Firestore-orange?style=flat-square)
 ![MCP](https://img.shields.io/badge/AI-Remote%20MCP%20Server-0ea5e9?style=flat-square)
 ![WorkOS](https://img.shields.io/badge/Auth-WorkOS%20AuthKit%20OAuth%202.1-6366f1?style=flat-square)
@@ -63,7 +63,7 @@ Because this repository is **public on GitHub** and designed as a step-by-step l
 
 | Phase / Layer | Status | Summary |
 | :--- | :---: | :--- |
-| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.3` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
+| **Phase 1 — Sensor Node & Firmware** | `Live` | ESP32-S3 Feather + SCD-40 + PMSA003I via STEMMA QT running CircuitPython `v1.3.4` (`boot.py` + immutable `code.py` auto-rollback bootloader + `app.py` + `ota_updater.py` with on-device US EPA AQI, remote config polling, RAM SCD-40 calibration, SHA-256 pull-based OTA, muteable NeoPixel, watchdog) |
 | **Phase 1 — Cloud & Remote MCP** | `Live` | Hardened write-only Firestore rules, composite indexes, Cloud Functions (2nd Gen) MCP server, and WorkOS AuthKit OAuth 2.1 + owner allowlist |
 | **Enclosure — 3D-Printed Hub** | `Live` | Screwless, support-free, thermally baffled bedroom enclosure — printed, thermally calibrated, and inaudible ([`docs/08-enclosure-hardware-plan.md`](./docs/08-enclosure-hardware-plan.md)) |
 | **Phase 2 — Web Dashboard & Remote Config** *(Layer 1)* | `Live` | Zero-build Firebase Hosting dashboard (WorkOS AuthKit PKCE login, live °F cards, 6h/24h/7d interactive SVG charts, Device Settings drawer) + Firestore-backed `device_configs` remote tuning ([`docs/09-remote-config-and-dashboard.md`](./docs/09-remote-config-and-dashboard.md)) |
@@ -149,7 +149,7 @@ Each guide in `docs/` explains how the underlying technology works, walks throug
 10. [**`docs/10-cloud-ota-and-rollback.md`**](./docs/10-cloud-ota-and-rollback.md) — USB-aware `boot.py` NVM handoff, minimal immutable `code.py` auto-rollback bootloader, SHA-256 `firmware_releases` manifest/publish CLI, and on-device pull-based OTA updater (`ota_updater.py`).
 11. [**`docs/11-outdoor-weather-and-aqi.md`**](./docs/11-outdoor-weather-and-aqi.md) — Keyless Open-Meteo outdoor weather & US EPA AQI sync on incoming sensor readings, private `site_configs/home` location setup, indoor-vs-outdoor deltas, dashed chart overlays, and `get_outdoor_air_quality` MCP integration.
 12. [**`docs/12-showcase-and-hype-video.md`**](./docs/12-showcase-and-hype-video.md) — Hardware & UI shot list, EXIF/GPS-stripping media pipeline (`scripts/prepare_media.sh`), and 5-scene Google Flow (Veo) hype video storyboard & copy-paste prompt pack.
-12. [**`docs/13-firestore-read-optimization-and-rollups.md`**](./docs/13-firestore-read-optimization-and-rollups.md) — Cutting Firestore reads by >99% using UTC-day `daily_rollups` / `outdoor_daily_rollups`, unindexed `fieldOverrides`, multi-layer browser & Cloud Function caching, and historical backfill.
+13. [**`docs/13-firestore-read-optimization-and-rollups.md`**](./docs/13-firestore-read-optimization-and-rollups.md) — Cutting Firestore reads by >99% using UTC-day `daily_rollups` / `outdoor_daily_rollups`, unindexed `fieldOverrides`, multi-layer browser & Cloud Function caching, and historical backfill.
 
 ---
 
@@ -172,7 +172,7 @@ Every layer can be validated independently before deploying or flashing hardware
 python3 scripts/test_firmware_local.py
 python3 scripts/verify_device_configs_rules.py
 
-# 3. Cloud Functions TypeScript typecheck + build + all 7 offline backend suites (also run in GitHub Actions Backend CI)
+# 3. Cloud Functions TypeScript typecheck + build + all 8 offline backend suites (GitHub Actions CI also runs web, firmware, and media checks)
 npm --prefix functions test
 
 # Or run individual backend verification suites:

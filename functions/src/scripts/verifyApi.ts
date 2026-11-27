@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import http from "node:http";
+import { EventEmitter } from "node:events";
+import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 
-import type { DashboardDataService } from "../api/dashboard.js";
+import { handleDashboardApiRequest, type DashboardDataService } from "../api/dashboard.js";
 import type {
   AuthKitSessionResult,
   ResolvedWorkosUser,
@@ -766,6 +767,39 @@ async function main(): Promise<void> {
     console.log(
       "[PASS] 12. Server-side TTL cache serves warm hits, honors ?refresh=1, sets Cache-Control, and invalidates on writes"
     );
+
+    // 13. Malformed req.url returns 400 invalid_request JSON instead of unhandled rejection
+    const badUrlBearer = "bad-url-test-bearer";
+    const badReq = new EventEmitter() as IncomingMessage & { path?: string };
+    badReq.method = "GET";
+    badReq.url = "http://[::1";
+    badReq.path = "/api/dashboard/overview";
+    badReq.headers = { authorization: `Bearer ${badUrlBearer}` };
+    let badResStatus = 200;
+    let badResBody = "";
+    const badRes = new EventEmitter() as unknown as ServerResponse;
+    Object.defineProperty(badRes, "statusCode", {
+      get: () => badResStatus,
+      set: (v: number) => {
+        badResStatus = v;
+      },
+    });
+    badRes.hasHeader = () => false;
+    badRes.setHeader = (() => badRes) as ServerResponse["setHeader"];
+    badRes.end = ((chunk?: unknown) => {
+      badResBody = typeof chunk === "string" ? chunk : "";
+      return badRes;
+    }) as ServerResponse["end"];
+
+    await handleDashboardApiRequest(badReq, badRes, {
+      pathname: "/api/dashboard/overview",
+      origin: baseUrl,
+      authConfig: { bearerFallbackSecret: badUrlBearer },
+      dashboardService: mockDashboard.service,
+    });
+    assert.equal(badResStatus, 400);
+    assert.equal((JSON.parse(badResBody) as { error?: string }).error, "invalid_request");
+    console.log("[PASS] 13. Malformed req.url returns 400 invalid_request JSON envelope");
 
     console.log("\nAll Dashboard API & WorkOS Auth verification checks passed!");
   } finally {

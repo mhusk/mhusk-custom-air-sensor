@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getApps, initializeApp, type Credential } from "firebase-admin/app";
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 
+import { DEVICE_ID_REGEX } from "../api/schemas.js";
 import {
   FIRMWARE_RELEASE_FILES_SUBCOLLECTION,
   FIRMWARE_RELEASES_COLLECTION,
@@ -246,6 +247,16 @@ export function buildReleaseBundle(
     if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
       throw new Error(`Firmware file not found: ${fullPath}`);
     }
+    const realFirmwareDir = fs.realpathSync(firmwareDir);
+    const realFullPath = fs.realpathSync(fullPath);
+    if (
+      path.dirname(realFullPath) !== realFirmwareDir ||
+      path.basename(realFullPath) !== filename
+    ) {
+      throw new Error(
+        `Refusing to package '${filename}': symlink resolves outside ${firmwareDir}.`
+      );
+    }
 
     const rawBytes = fs.readFileSync(fullPath);
     if (rawBytes.length === 0) {
@@ -368,6 +379,11 @@ export async function publishReleaseToFirestore(
   overwritten: boolean;
   targetUpdatedForDevice: string | null;
 }> {
+  if (options.setTargetDeviceId && !DEVICE_ID_REGEX.test(options.setTargetDeviceId)) {
+    throw new Error(
+      `Invalid target device ID '${options.setTargetDeviceId}'. Must match ${DEVICE_ID_REGEX.source}.`
+    );
+  }
   const releaseRef = db
     .collection(FIRMWARE_RELEASES_COLLECTION)
     .doc(bundle.version);

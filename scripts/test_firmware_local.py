@@ -973,6 +973,216 @@ def run_ota_updater_tests():
     print("[PASS] OTA updater tests passed (manifest guards, SHA-256 verification, atomic swap, hash-mismatch rejection, rollback-loop prevention).")
 
 
+def run_hardening_tests():
+    """Verify F1-F3 firmware timeouts, TLS close-before-fallback, monotonic_ns timing, and slug/NaN guards."""
+    import importlib.util
+    import types
+
+    # 1. NaN / Infinity / invalid default slug guards in normalize_device_config
+    bad_defaults = {
+        "location": "../bad location",
+        "reporting_interval_seconds": 300,
+        "temperature_offset_c": 4.0,
+        "altitude_m": 100,
+        "led_enabled": True,
+    }
+    norm_bad_default = firestore_client.normalize_device_config(None, bad_defaults)
+    assert norm_bad_default["location"] == "home-office"
+
+    nan_cfg = firestore_client.normalize_device_config(
+        {
+            "reporting_interval_seconds": float("nan"),
+            "temperature_offset_c": float("inf"),
+            "altitude_m": float("-inf"),
+            "config_version": 5,
+        },
+        {"location": "bedroom"},
+    )
+    assert nan_cfg["reporting_interval_seconds"] == 300
+    assert nan_cfg["temperature_offset_c"] == 4.0
+    assert nan_cfg["altitude_m"] == 0
+
+    # 2. FirestoreClient timeout= forwarding + close-before-sign_in on refresh_id_token + slug/doc-id guards
+    class _TrackedResponse:
+        def __init__(self, status_code, body, tracker):
+            self.status_code = status_code
+            self._body = body
+            self._tracker = tracker
+            self.closed = False
+            self._tracker["open"] += 1
+            self._tracker["max_open"] = max(self._tracker["max_open"], self._tracker["open"])
+
+        @property
+        def text(self):
+            return json.dumps(self._body)
+
+        def json(self):
+            return self._body
+
+        def close(self):
+            if not self.closed:
+                self.closed = True
+                self._tracker["open"] -= 1
+
+    class _TrackedSession:
+        def __init__(self):
+            self.tracker = {"open": 0, "max_open": 0}
+            self.calls = []
+            self.refresh_calls = 0
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            self.calls.append(("POST", url, timeout))
+            if "securetoken" in url:
+                self.refresh_calls += 1
+                # First refresh fails with 400 -> must close BEFORE calling sign_in()
+                return _TrackedResponse(400, {"error": "TOKEN_EXPIRED"}, self.tracker)
+            return _TrackedResponse(
+                200,
+                {
+                    "idToken": "tok_new",
+                    "refreshToken": "ref_new",
+                    "localId": "uid_1",
+                    "expiresIn": "3600",
+                },
+                self.tracker,
+            )
+
+        def get(self, url, headers=None, timeout=None):
+            self.calls.append(("GET", url, timeout))
+            return _TrackedResponse(404, {}, self.tracker)
+
+        def patch(self, url, json=None, headers=None, timeout=None):
+            self.calls.append(("PATCH", url, timeout))
+            return _TrackedResponse(200, {"name": "ok"}, self.tracker)
+
+    session = _TrackedSession()
+    client = firestore_client.FirestoreClient(
+        project_id="demo-proj",
+        web_api_key="demo-key",
+        device_email="sensor@example.com",
+        device_password="demo-password",
+        session=session,
+        request_timeout=12,
+    )
+    client._refresh_token = "ref_old"
+    client._id_token = "tok_old"
+    new_tok = client.refresh_id_token()
+    assert new_tok == "tok_new"
+    assert session.refresh_calls == 1
+    assert session.tracker["max_open"] == 1, f"Expected <=1 concurrent response, got {session.tracker['max_open']}"
+    assert session.tracker["open"] == 0
+    assert all(timeout == 12 for _, _, timeout in session.calls)
+
+    # Slug & document_id URL interpolation guards
+    for bad_id in ("../secret", "has space", "a/b", ""):
+        for fn in (
+            lambda: client.fetch_device_config(bad_id),
+            lambda: client.update_device_status({"device_id": bad_id, "location": "room"}),
+        ):
+            try:
+                fn()
+                raise AssertionError(f"Expected ValueError for bad slug {bad_id!r}")
+            except ValueError:
+                pass
+    try:
+        client.publish_reading({"co2_ppm": 500}, document_id="../escape")
+        raise AssertionError("Expected ValueError for bad document_id")
+    except ValueError:
+        pass
+
+    assert client.fetch_device_config("feather-s3-01") is None
+    assert session.calls[-1][2] == 12
+
+    # 3. app.py monotonic_ns timing, load_config slug validation & _read_scd40 RuntimeError handling
+    stub_names = (
+        "adafruit_connection_manager",
+        "adafruit_ntp",
+        "adafruit_requests",
+        "adafruit_scd4x",
+        "board",
+        "microcontroller",
+        "neopixel",
+        "rtc",
+        "wifi",
+        "adafruit_pm25",
+        "adafruit_pm25.i2c",
+        "watchdog",
+    )
+    saved = {name: sys.modules.get(name) for name in stub_names}
+    try:
+        for name in stub_names:
+            sys.modules[name] = types.ModuleType(name)
+        sys.modules["adafruit_pm25.i2c"].PM25_I2C = object
+        wdt_stub = types.SimpleNamespace(mode=None, timeout=None, feed=lambda: None)
+        sys.modules["microcontroller"].watchdog = wdt_stub
+        sys.modules["watchdog"].WatchDogMode = types.SimpleNamespace(RESET="RESET")
+
+        spec = importlib.util.spec_from_file_location(
+            "_test_app_hardening", os.path.join(FIRMWARE_DIR, "app.py")
+        )
+        app_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(app_mod)
+
+        # _monotonic_ms uses monotonic_ns even when float monotonic() has coarse resolution
+        orig_time = app_mod.time
+        try:
+            ns_vals = iter(
+                [1_700_000_000_000_000, 1_700_000_000_000_000, 1_700_000_600_000_000]
+            )
+            sleeps = []
+            app_mod.time = types.SimpleNamespace(
+                monotonic_ns=lambda: next(ns_vals, 1_700_000_600_000_000),
+                monotonic=lambda: 2_097_152.0,  # coarse float where +0.5 == 2_097_152.0
+                sleep=lambda s: sleeps.append(s),
+            )
+            app_mod.sleep_with_watchdog(0.5)
+            assert sleeps and abs(sleeps[0] - 0.5) < 0.01
+        finally:
+            app_mod.time = orig_time
+
+        # load_config rejects invalid SENSOR_DEVICE_ID / SENSOR_LOCATION
+        orig_getenv = app_mod.os.getenv
+        try:
+            env_map = {
+                "CIRCUITPY_WIFI_SSID": "ssid",
+                "CIRCUITPY_WIFI_PASSWORD": "pw",
+                "FIREBASE_PROJECT_ID": "proj",
+                "FIREBASE_WEB_API_KEY": "key",
+                "FIREBASE_DEVICE_EMAIL": "a@b.com",
+                "FIREBASE_DEVICE_PASSWORD": "pw",
+                "SENSOR_DEVICE_ID": "bad/device",
+                "SENSOR_LOCATION": "office",
+            }
+            app_mod.os.getenv = lambda k, d=None: env_map.get(k, d)
+            try:
+                app_mod.load_config()
+                raise AssertionError("Expected ValueError for invalid SENSOR_DEVICE_ID")
+            except ValueError as err:
+                assert "SENSOR_DEVICE_ID" in str(err)
+        finally:
+            app_mod.os.getenv = orig_getenv
+
+        # _read_scd40 catches RuntimeError CRC errors as HardwareError
+        class _CrcScd40:
+            @property
+            def data_ready(self):
+                raise RuntimeError("CRC check failed")
+
+        try:
+            app_mod._read_scd40(_CrcScd40(), timeout_seconds=1.0)
+            raise AssertionError("Expected HardwareError on SCD-40 RuntimeError")
+        except app_mod.HardwareError as err:
+            assert "CRC check failed" in str(err)
+    finally:
+        for name, old in saved.items():
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
+
+    print("[PASS] Firmware hardening tests passed (timeouts, TLS close order, monotonic_ns, slug/NaN/CRC guards).")
+
+
 def run_live_fetch_config(settings_path):
     """Sign in as the sensor device and fetch/normalize live `device_configs/{device_id}`."""
     if not os.path.exists(settings_path):
@@ -1128,6 +1338,7 @@ def main():
     run_remote_config_tests()
     run_bootloader_tests()
     run_ota_updater_tests()
+    run_hardening_tests()
 
     if args.fetch_config:
         run_live_fetch_config(args.settings)

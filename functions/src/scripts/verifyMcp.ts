@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { createMcpHttpHandler } from "../index.js";
 import { THRESHOLDS_RESOURCE_URI } from "../mcp/prompts.js";
 import { handleStatelessMcpHttpRequest } from "../mcp/server.js";
 import {
@@ -260,6 +261,27 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
       `   [PASS] tools/call get_ventilation_forecast -> found=${forecastPayload.found}`
     );
 
+    // 7c. Invalid device_id/location slug rejected by MCP tool schema
+    const badSlugRes = await postMcp(
+      baseUrl,
+      {
+        jsonrpc: "2.0",
+        id: 62,
+        method: "tools/call",
+        params: {
+          name: "get_latest_reading",
+          arguments: { device_id: "../authorized_devices/uid" },
+        },
+      },
+      bearerSecret
+    );
+    assert.equal(badSlugRes.status, 200);
+    assert.ok(
+      badSlugRes.body.error || (badSlugRes.body.result as { isError?: boolean } | undefined)?.isError,
+      "Expected schema validation error for slash-containing device_id"
+    );
+    console.log("   [PASS] tools/call rejects slash-containing device_id slug");
+
     // 8. prompts/list & prompts/get
     const promptsList = await postMcp(
       baseUrl,
@@ -381,6 +403,42 @@ async function runSanitizedErrorCheck(): Promise<void> {
   assert.equal(body.error?.message, "Internal server error");
   assert.equal(capturedBody.includes("SECRET_INTERNAL_STACK_LEAK"), false);
   console.log("   [PASS] Unhandled MCP error returns sanitized -32603 without leaking internal details");
+
+  // Also verify tool-level unexpected exceptions are sanitized
+  const baseService = createMockAirQualityService();
+  const handler = createMcpHttpHandler({
+    getAuthConfig: () => ({ bearerFallbackSecret: "test-bearer-secret" }),
+    service: {
+      ...baseService,
+      getLatestReading: async () => {
+        throw new Error("FIRESTORE_INTERNAL_PATH_SECRET");
+      },
+    },
+  });
+  const server = http.createServer((req, res) => {
+    void handler(req, res);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const toolErrRes = await postMcp(
+      `http://127.0.0.1:${port}`,
+      {
+        jsonrpc: "2.0",
+        id: 99,
+        method: "tools/call",
+        params: { name: "get_latest_reading", arguments: {} },
+      },
+      "test-bearer-secret"
+    );
+    assert.equal(toolErrRes.status, 200);
+    const toolPayloadText = JSON.stringify(toolErrRes.body);
+    assert.equal(toolPayloadText.includes("FIRESTORE_INTERNAL_PATH_SECRET"), false);
+    assert.ok(toolPayloadText.includes("Internal server error while executing tool."));
+    console.log("   [PASS] Tool-level unexpected error returns sanitized message");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
 }
 
 async function main(): Promise<void> {

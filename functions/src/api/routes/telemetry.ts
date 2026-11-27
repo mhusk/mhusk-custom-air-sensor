@@ -13,6 +13,7 @@ import {
 import {
   computeIndoorOutdoorDelta,
   findBestVentilationWindows,
+  selectIndoorBaseline,
   type OutdoorReading,
 } from "../../services/outdoor.js";
 import {
@@ -146,13 +147,7 @@ export async function handleOverviewRoute(
     };
   });
 
-  const baselineDevice = statusResult.devices.find((d) => d.latest_reading !== null);
-  const indoorBaseline = baselineDevice?.latest_reading
-    ? {
-        temperature_f: baselineDevice.latest_reading.temperature_f,
-        humidity_percent: baselineDevice.latest_reading.humidity_percent,
-      }
-    : { temperature_f: 70.0, humidity_percent: 45.0 };
+  const indoorBaseline = selectIndoorBaseline(statusResult.devices);
 
   let ventilationForecast: {
     fetched_at: string;
@@ -192,9 +187,13 @@ export async function handleReadingsHistoryRoute(
   req: IncomingApiRequest,
   res: ServerResponse,
   service: DashboardDataService,
-  cacheOpts: { cache?: DashboardResponseCache; bypassCache?: boolean } = {}
+  cacheOpts: {
+    cache?: DashboardResponseCache;
+    bypassCache?: boolean;
+    queryParams?: URLSearchParams;
+  } = {}
 ): Promise<void> {
-  const params = parseQueryParams(req);
+  const params = cacheOpts.queryParams ?? parseQueryParams(req);
   const rawHours = params.get("hours");
   const rawLimit = params.get("limit");
   const rawPeriod = params.get("period");

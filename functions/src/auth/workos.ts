@@ -23,6 +23,7 @@ export interface WorkosAuthConfig {
   allowedUserEmails?: string;
   bearerFallbackSecret?: string;
   allowedDashboardOrigins?: string;
+  publicOrigin?: string;
 }
 
 export interface ParsedAllowlist {
@@ -101,8 +102,12 @@ export type AuthVerificationResult =
     }
   | {
       ok: false;
-      status: 401 | 403;
-      error: "invalid_token" | "insufficient_scope" | "access_denied";
+      status: 401 | 403 | 503;
+      error:
+        | "invalid_token"
+        | "insufficient_scope"
+        | "access_denied"
+        | "auth_service_unavailable";
       message: string;
       /** True when the client omitted the Authorization header completely. */
       missingToken?: boolean;
@@ -435,6 +440,23 @@ function parseScopes(scopeClaim: unknown): string[] {
   return [];
 }
 
+function peekUnverifiedJwtIssuer(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8")
+    ) as Record<string, unknown>;
+    return typeof decoded.iss === "string" && decoded.iss.trim().length > 0
+      ? decoded.iss.trim().replace(/\/+$/, "")
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildExpectedAudiences(origin: string, clientId?: string): string[] {
   const cleanOrigin = origin.replace(/\/+$/, "");
   const candidates = [
@@ -502,47 +524,76 @@ export async function authenticateMcpRequest(
 
   const getKey = deps.getKey ?? getRemoteJwksForAuthKit(authkitDomain);
   const expectedAudiences = buildExpectedAudiences(origin, config.workosClientId);
+  const apiKey = config.workosApiKey?.trim();
+  const clientIdVal = config.workosClientId?.trim();
+  const canVerifyUserManagement = Boolean(
+    deps.verifyUserAccessToken || (apiKey && clientIdVal)
+  );
 
-  let payload: JWTPayload | null = null;
-  try {
-    const verified = await jwtVerify(token, getKey, {
-      issuer: authkitDomain,
-      audience: expectedAudiences.length > 0 ? expectedAudiences : undefined,
-    });
-    payload = verified.payload;
-  } catch (connectErr) {
-    // Fallback for WorkOS AuthKit UserManagement browser session access tokens
-    // (issued by authenticateWithCode / authenticateWithRefreshToken).
-    const apiKey = config.workosApiKey?.trim();
-    const clientIdVal = config.workosClientId?.trim();
+  const verifyConnectJwt = async (): Promise<{ payload: JWTPayload | null; error: unknown }> => {
+    try {
+      const verified = await jwtVerify(token, getKey, {
+        issuer: authkitDomain,
+        audience: expectedAudiences.length > 0 ? expectedAudiences : undefined,
+      });
+      return { payload: verified.payload, error: null };
+    } catch (err) {
+      return { payload: null, error: err };
+    }
+  };
+
+  const verifyUserManagementJwt = async (): Promise<JWTPayload | null> => {
+    if (!canVerifyUserManagement) {
+      return null;
+    }
     try {
       if (deps.verifyUserAccessToken) {
         const claims = await deps.verifyUserAccessToken(token);
-        if (claims) {
-          payload = claims as JWTPayload;
-        }
-      } else if (apiKey && clientIdVal) {
+        return claims ? (claims as JWTPayload) : null;
+      }
+      if (apiKey && clientIdVal) {
         const workos = getWorkosClient(apiKey, clientIdVal);
         const claims = await workos.userManagement.verifyAccessToken(token);
-        if (claims) {
-          payload = claims as unknown as JWTPayload;
-        }
+        return claims ? (claims as unknown as JWTPayload) : null;
       }
     } catch (umErr) {
       const reason = umErr instanceof Error ? umErr.name : "UserManagementVerifyError";
       console.warn(`[auth] WorkOS UserManagement token verification failed (${reason}).`);
     }
+    return null;
+  };
 
+  let payload: JWTPayload | null = null;
+  let connectErr: unknown = null;
+  const unverifiedIssuer = peekUnverifiedJwtIssuer(token);
+  const preferUserManagementFirst =
+    canVerifyUserManagement && unverifiedIssuer !== null && unverifiedIssuer !== authkitDomain;
+
+  if (preferUserManagementFirst) {
+    payload = await verifyUserManagementJwt();
     if (!payload) {
-      const reason = connectErr instanceof Error ? connectErr.name : "JWTVerificationError";
-      console.warn(`[auth] WorkOS JWT verification failed (${reason}).`);
-      return {
-        ok: false,
-        status: 401,
-        error: "invalid_token",
-        message: "Unauthorized: invalid or expired WorkOS access token.",
-      };
+      const connectResult = await verifyConnectJwt();
+      payload = connectResult.payload;
+      connectErr = connectResult.error;
     }
+  } else {
+    const connectResult = await verifyConnectJwt();
+    payload = connectResult.payload;
+    connectErr = connectResult.error;
+    if (!payload) {
+      payload = await verifyUserManagementJwt();
+    }
+  }
+
+  if (!payload) {
+    const reason = connectErr instanceof Error ? connectErr.name : "JWTVerificationError";
+    console.warn(`[auth] WorkOS JWT verification failed (${reason}).`);
+    return {
+      ok: false,
+      status: 401,
+      error: "invalid_token",
+      message: "Unauthorized: invalid or expired WorkOS access token.",
+    };
   }
 
   const userId = typeof payload.sub === "string" ? payload.sub.trim() : "";
@@ -609,9 +660,9 @@ export async function authenticateMcpRequest(
     );
     return {
       ok: false,
-      status: 403,
-      error: "access_denied",
-      message: "Forbidden: unable to verify user authorization.",
+      status: 503,
+      error: "auth_service_unavailable",
+      message: "Temporarily unable to verify user authorization. Please retry.",
     };
   }
 

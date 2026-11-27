@@ -12,12 +12,27 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildReadingsHistoryPath, fetchOutdoorForecast } from "../web/api.js";
-import { buildAuthorizeUrl, computeCodeChallenge, toBase64Url } from "../web/auth.js";
+import {
+  ApiError,
+  buildReadingsHistoryPath,
+  fetchDashboardOverview,
+  fetchOutdoorForecast,
+} from "../web/api.js";
+import {
+  buildAuthorizeUrl,
+  clearSession,
+  computeCodeChallenge,
+  handleAuthCallbackIfPresent,
+  loadSession,
+  refreshSessionDetailed,
+  saveSession,
+  toBase64Url,
+} from "../web/auth.js";
 import {
   buildSeriesSegments,
   computeNiceDomain,
   findNearestPointIndex,
+  toFiniteNumberOrNaN,
 } from "../web/charts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -174,6 +189,178 @@ await runCheck("app.js implements 5m chartsCache, lazy Fleet loading, and target
   assert.match(appJs, /function describeEnergyTax\(/);
   assert.match(appJs, /open_brief_purge/);
   assert.match(appJs, /forecast-strip/);
+});
+
+function createMemoryStorage() {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => {
+      map.set(k, String(v));
+    },
+    removeItem: (k) => {
+      map.delete(k);
+    },
+  };
+}
+
+await runCheck("toFiniteNumberOrNaN prevents null/undefined/blank from coercing to 0", () => {
+  assert.ok(Number.isNaN(toFiniteNumberOrNaN(null)));
+  assert.ok(Number.isNaN(toFiniteNumberOrNaN(undefined)));
+  assert.ok(Number.isNaN(toFiniteNumberOrNaN("")));
+  assert.ok(Number.isNaN(toFiniteNumberOrNaN("not-a-num")));
+  assert.equal(toFiniteNumberOrNaN(0), 0);
+  assert.equal(toFiniteNumberOrNaN(42.5), 42.5);
+});
+
+await runCheck("buildAuthorizeUrl rejects non-HTTPS or untrusted authorize endpoints", () => {
+  assert.throws(
+    () =>
+      buildAuthorizeUrl({
+        authorizeEndpoint: "http://api.workos.com/user_management/authorize",
+        clientId: "client_123",
+        redirectUri: "https://example.web.app/auth/callback",
+        codeChallenge: "abc",
+        state: "xyz",
+      }),
+    /Untrusted WorkOS authorize endpoint/
+  );
+  assert.throws(
+    () =>
+      buildAuthorizeUrl({
+        authorizeEndpoint: "https://evil.example.com/authorize",
+        clientId: "client_123",
+        redirectUri: "https://example.web.app/auth/callback",
+        codeChallenge: "abc",
+        state: "xyz",
+      }),
+    /Untrusted WorkOS authorize endpoint/
+  );
+  const authkitUrl = buildAuthorizeUrl({
+    authorizeEndpoint: "https://demo.authkit.app/oauth2/authorize",
+    clientId: "client_123",
+    redirectUri: "https://example.web.app/auth/callback",
+    codeChallenge: "abc",
+    state: "xyz",
+  });
+  assert.ok(authkitUrl.startsWith("https://demo.authkit.app/"));
+});
+
+await runCheck(
+  "Auth callback ignores spoofed error_description without PKCE state, keeps bearer_fallback in sessionStorage, and preserves refreshToken on 503",
+  async () => {
+    const origWindow = globalThis.window;
+    const origDocument = globalThis.document;
+    const origFetch = globalThis.fetch;
+
+    const localStorage = createMemoryStorage();
+    const sessionStorage = createMemoryStorage();
+    let currentSearch = "?error=access_denied&error_description=Phishing+Message";
+    let currentPathname = "/auth/callback";
+
+    globalThis.document = { title: "Air Quality" };
+    globalThis.window = {
+      localStorage,
+      sessionStorage,
+      location: {
+        origin: "https://example.web.app",
+        get search() {
+          return currentSearch;
+        },
+        get pathname() {
+          return currentPathname;
+        },
+      },
+      history: {
+        replaceState: (_state, _title, nextUrl) => {
+          currentPathname = nextUrl;
+          currentSearch = "";
+        },
+      },
+    };
+
+    try {
+      // 1. Spoofed error_description without matching PKCE state must return static message
+      const spoofed = await handleAuthCallbackIfPresent();
+      assert.equal(spoofed.handled, true);
+      assert.equal(spoofed.ok, false);
+      assert.equal(spoofed.error.includes("Phishing"), false);
+
+      // 2. Network error during /api/auth/exchange is caught cleanly without rejecting
+      currentSearch = "?code=abc&state=expected-state";
+      currentPathname = "/auth/callback";
+      sessionStorage.setItem(
+        "iaq_dashboard_pkce_v1",
+        JSON.stringify({ state: "expected-state", codeVerifier: "ver", createdAt: Date.now() })
+      );
+      globalThis.fetch = async () => {
+        throw new Error("Offline");
+      };
+      const netErr = await handleAuthCallbackIfPresent();
+      assert.equal(netErr.handled, true);
+      assert.equal(netErr.ok, false);
+      assert.match(netErr.error, /Network error/);
+
+      // 3. bearer_fallback is stored in sessionStorage (not localStorage)
+      saveSession({ accessToken: "bearer-secret", authMethod: "bearer_fallback" });
+      assert.equal(localStorage.getItem("iaq_dashboard_session_v1"), null);
+      assert.ok(sessionStorage.getItem("iaq_dashboard_session_v1"));
+      assert.equal(loadSession()?.accessToken, "bearer-secret");
+      clearSession();
+      assert.equal(loadSession(), null);
+
+      // 4. Transient 503 during refresh preserves refreshToken in localStorage
+      saveSession({
+        accessToken: "expired-jwt",
+        refreshToken: "valid-refresh-tok",
+        authMethod: "workos_oauth",
+      });
+      globalThis.fetch = async (url) => {
+        if (String(url) === "/api/auth/refresh") {
+          return new Response(JSON.stringify({ error: "upstream" }), { status: 503 });
+        }
+        return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+      };
+      await assert.rejects(
+        () => fetchDashboardOverview(),
+        (err) => err instanceof ApiError && err.status === 503 && err.code === "refresh_unavailable"
+      );
+      assert.equal(loadSession()?.refreshToken, "valid-refresh-tok");
+
+      // 5. Terminal 401 on refresh clears session
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ error: "invalid_grant" }), { status: 401 });
+      const invalidRefresh = await refreshSessionDetailed();
+      assert.equal(invalidRefresh.status, "invalid");
+      assert.equal(loadSession(), null);
+    } finally {
+      globalThis.window = origWindow;
+      globalThis.document = origDocument;
+      globalThis.fetch = origFetch;
+    }
+  }
+);
+
+await runCheck("index.html, styles.css, and firebase.json enforce hardened form, container, and CSP rules", () => {
+  const html = fs.readFileSync(path.join(repoRoot, "web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(repoRoot, "web/styles.css"), "utf8");
+  const cfg = JSON.parse(fs.readFileSync(path.join(repoRoot, "firebase.json"), "utf8"));
+
+  assert.match(html, /id="cfg-temp-offset"[\s\S]*?step="0\.01"/);
+  assert.match(html, /id="site-label"[\s\S]*?pattern="\.\*\\S\.\*"/);
+  assert.equal((html.match(/for="site-latitude"/g) ?? []).length, 1);
+
+  const containerStart = css.indexOf("@container (width < 720px)");
+  assert.ok(containerStart >= 0);
+  const afterContainer = css.slice(containerStart);
+  assert.equal(/\.table-wrapper\s*\{/.test(afterContainer), false);
+
+  const globalHeaders = cfg.hosting?.headers?.find((h) => h.source === "**")?.headers ?? [];
+  const csp = globalHeaders.find((h) => h.key === "Content-Security-Policy")?.value ?? "";
+  const perms = globalHeaders.find((h) => h.key === "Permissions-Policy")?.value ?? "";
+  assert.match(csp, /object-src 'none'/);
+  assert.match(csp, /form-action 'self'/);
+  assert.match(perms, /geolocation=\(self\)/);
 });
 
 console.log(`\nAll ${passed} Step 15 offline checks passed!`);

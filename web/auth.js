@@ -73,6 +73,15 @@ export async function computeCodeChallenge(verifier) {
  * }} params
  * @returns {string}
  */
+const AUTH_FETCH_TIMEOUT_MS = 15_000;
+
+function createTimeoutSignal(timeoutMs = AUTH_FETCH_TIMEOUT_MS) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  return undefined;
+}
+
 export function buildAuthorizeUrl({
   authorizeEndpoint,
   clientId,
@@ -81,6 +90,12 @@ export function buildAuthorizeUrl({
   state,
 }) {
   const url = new URL(authorizeEndpoint);
+  if (
+    url.protocol !== "https:" ||
+    (url.hostname !== "api.workos.com" && !url.hostname.endsWith(".authkit.app"))
+  ) {
+    throw new Error("Untrusted WorkOS authorize endpoint.");
+  }
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
@@ -110,25 +125,36 @@ export function getRedirectUri() {
  *   authMethod: string,
  * } | null}
  */
+function parseStoredSession(raw) {
+  if (!raw) return null;
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed.accessToken !== "string" || !parsed.accessToken.trim()) {
+    return null;
+  }
+  return {
+    accessToken: parsed.accessToken,
+    refreshToken: typeof parsed.refreshToken === "string" ? parsed.refreshToken : null,
+    user: {
+      id: parsed.user?.id ?? null,
+      email: parsed.user?.email ?? null,
+      firstName: parsed.user?.firstName ?? null,
+      lastName: parsed.user?.lastName ?? null,
+    },
+    authMethod: typeof parsed.authMethod === "string" ? parsed.authMethod : "workos_oauth",
+  };
+}
+
 export function loadSession() {
   try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.accessToken !== "string" || !parsed.accessToken.trim()) {
-      return null;
-    }
-    return {
-      accessToken: parsed.accessToken,
-      refreshToken: typeof parsed.refreshToken === "string" ? parsed.refreshToken : null,
-      user: {
-        id: parsed.user?.id ?? null,
-        email: parsed.user?.email ?? null,
-        firstName: parsed.user?.firstName ?? null,
-        lastName: parsed.user?.lastName ?? null,
-      },
-      authMethod: typeof parsed.authMethod === "string" ? parsed.authMethod : "workos_oauth",
-    };
+    const sessionRaw = window.sessionStorage?.getItem(SESSION_STORAGE_KEY);
+    const fromSession = parseStoredSession(sessionRaw);
+    if (fromSession) return fromSession;
+  } catch {
+    // Ignore sessionStorage read errors
+  }
+  try {
+    const localRaw = window.localStorage?.getItem(SESSION_STORAGE_KEY);
+    return parseStoredSession(localRaw);
   } catch {
     return null;
   }
@@ -136,6 +162,7 @@ export function loadSession() {
 
 /**
  * Persists a verified dashboard session.
+ * Static bearer fallback tokens are kept in `sessionStorage` so they clear on tab close.
  *
  * @param {{
  *   accessToken: string,
@@ -156,7 +183,30 @@ export function saveSession(session) {
     },
     authMethod: session.authMethod ?? "workos_oauth",
   };
-  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(normalized));
+  const serialized = JSON.stringify(normalized);
+  if (normalized.authMethod === "bearer_fallback") {
+    try {
+      window.sessionStorage?.setItem(SESSION_STORAGE_KEY, serialized);
+    } catch {
+      // Ignore storage access failures in private/restricted modes.
+    }
+    try {
+      window.localStorage?.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      // Ignore storage access failures.
+    }
+  } else {
+    try {
+      window.localStorage?.setItem(SESSION_STORAGE_KEY, serialized);
+    } catch {
+      // Ignore storage access failures in private/restricted modes.
+    }
+    try {
+      window.sessionStorage?.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      // Ignore storage access failures.
+    }
+  }
   return normalized;
 }
 
@@ -165,12 +215,17 @@ export function saveSession(session) {
  */
 export function clearSession() {
   try {
-    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    window.localStorage?.removeItem(SESSION_STORAGE_KEY);
   } catch {
     // Ignore storage access failures in private/restricted modes.
   }
   try {
-    window.sessionStorage.removeItem(PKCE_STORAGE_KEY);
+    window.sessionStorage?.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage access failures.
+  }
+  try {
+    window.sessionStorage?.removeItem(PKCE_STORAGE_KEY);
   } catch {
     // Ignore storage access failures.
   }
@@ -194,14 +249,18 @@ export async function startWorkosLogin(authConfig) {
   const state = randomUrlSafeString(24);
   const codeChallenge = await computeCodeChallenge(codeVerifier);
 
-  window.sessionStorage.setItem(
-    PKCE_STORAGE_KEY,
-    JSON.stringify({
-      state,
-      codeVerifier,
-      createdAt: Date.now(),
-    })
-  );
+  try {
+    window.sessionStorage.setItem(
+      PKCE_STORAGE_KEY,
+      JSON.stringify({
+        state,
+        codeVerifier,
+        createdAt: Date.now(),
+      })
+    );
+  } catch {
+    throw new Error("Browser session storage is unavailable; unable to start sign-in.");
+  }
 
   const authorizeUrl = buildAuthorizeUrl({
     authorizeEndpoint: authConfig.authorize_endpoint,
@@ -250,11 +309,19 @@ export async function handleAuthCallbackIfPresent() {
     pkce = null;
   }
 
+  const isExpired =
+    !pkce ||
+    typeof pkce.createdAt !== "number" ||
+    Date.now() - pkce.createdAt > PKCE_MAX_AGE_MS;
+  const stateValid = !isExpired && Boolean(pkce?.state) && returnedState === pkce.state;
+
   if (error) {
     return {
       handled: true,
       ok: false,
-      error: errorDescription || `WorkOS sign-in returned an error: ${error}`,
+      error: stateValid
+        ? errorDescription || `WorkOS sign-in returned an error: ${error}`
+        : "Sign-in was cancelled or could not be verified. Please try again.",
     };
   }
 
@@ -266,11 +333,7 @@ export async function handleAuthCallbackIfPresent() {
     };
   }
 
-  const isExpired =
-    !pkce ||
-    typeof pkce.createdAt !== "number" ||
-    Date.now() - pkce.createdAt > PKCE_MAX_AGE_MS;
-  if (isExpired || !pkce.state || returnedState !== pkce.state) {
+  if (!stateValid) {
     return {
       handled: true,
       ok: false,
@@ -278,17 +341,27 @@ export async function handleAuthCallbackIfPresent() {
     };
   }
 
-  const response = await fetch("/api/auth/exchange", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      code,
-      code_verifier: pkce.codeVerifier,
-    }),
-  });
+  let response;
+  try {
+    response = await fetch("/api/auth/exchange", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        code,
+        code_verifier: pkce.codeVerifier,
+      }),
+      signal: createTimeoutSignal(),
+    });
+  } catch {
+    return {
+      handled: true,
+      ok: false,
+      error: "Network error while completing sign-in. Please try again.",
+    };
+  }
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -301,6 +374,15 @@ export async function handleAuthCallbackIfPresent() {
       handled: true,
       ok: false,
       error: message,
+    };
+  }
+
+  if (typeof payload?.access_token !== "string" || !payload.access_token.trim()) {
+    clearSession();
+    return {
+      handled: true,
+      ok: false,
+      error: "Sign-in response did not include an access token.",
     };
   }
 
@@ -320,19 +402,19 @@ export async function handleAuthCallbackIfPresent() {
 }
 
 /**
- * Refreshes an expired WorkOS AuthKit session using a single-flight lock so
- * concurrent 401 responses never race on rotating refresh tokens.
+ * Refreshes an expired WorkOS AuthKit session using a single-flight lock and
+ * distinguishes terminal auth rejection (`invalid`) from transient failures (`transient_error`).
  *
- * @returns {Promise<ReturnType<typeof saveSession> | null>}
+ * @returns {Promise<{ status: "ok" | "invalid" | "transient_error", session: ReturnType<typeof saveSession> | null }>}
  */
-export async function refreshSession() {
+export async function refreshSessionDetailed() {
   if (inFlightRefresh) {
     return inFlightRefresh;
   }
 
   const current = loadSession();
   if (!current?.refreshToken) {
-    return null;
+    return { status: "invalid", session: null };
   }
 
   inFlightRefresh = (async () => {
@@ -344,20 +426,25 @@ export async function refreshSession() {
           Accept: "application/json",
         },
         body: JSON.stringify({ refresh_token: current.refreshToken }),
+        signal: createTimeoutSignal(),
       });
 
-      if (!response.ok) {
+      if (response.status === 400 || response.status === 401 || response.status === 403) {
         clearSession();
-        return null;
+        return { status: "invalid", session: null };
+      }
+
+      if (!response.ok) {
+        return { status: "transient_error", session: null };
       }
 
       const payload = await response.json();
-      if (!payload?.access_token) {
+      if (typeof payload?.access_token !== "string" || !payload.access_token.trim()) {
         clearSession();
-        return null;
+        return { status: "invalid", session: null };
       }
 
-      return saveSession({
+      const saved = saveSession({
         accessToken: payload.access_token,
         refreshToken: payload.refresh_token ?? current.refreshToken,
         user: {
@@ -368,14 +455,26 @@ export async function refreshSession() {
         },
         authMethod: "workos_oauth",
       });
+      return { status: "ok", session: saved };
     } catch {
-      return null;
+      return { status: "transient_error", session: null };
     } finally {
       inFlightRefresh = null;
     }
   })();
 
   return inFlightRefresh;
+}
+
+/**
+ * Refreshes an expired WorkOS AuthKit session using a single-flight lock so
+ * concurrent 401 responses never race on rotating refresh tokens.
+ *
+ * @returns {Promise<ReturnType<typeof saveSession> | null>}
+ */
+export async function refreshSession() {
+  const result = await refreshSessionDetailed();
+  return result.status === "ok" ? result.session : null;
 }
 
 /**
@@ -396,6 +495,7 @@ export async function signInWithBearerToken(rawToken) {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
+    signal: createTimeoutSignal(),
   });
 
   const payload = await response.json().catch(() => ({}));

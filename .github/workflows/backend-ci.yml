@@ -32,3 +32,9 @@ jobs:
 
       - name: Run Web Dashboard Offline Checks
         run: node scripts/verify_web_dashboard.mjs
+
+      - name: Run Firmware Offline Checks
+        run: python3 scripts/test_firmware_local.py
+
+      - name: Verify Showcase Media Privacy & Size Budget
+        run: ./scripts/prepare_media.sh --verify

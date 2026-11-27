@@ -3,7 +3,19 @@
  * Automatically attaches Bearer tokens and performs single-flight refresh on 401.
  */
 
-import { clearSession, loadSession, refreshSession } from "./auth.js";
+import { clearSession, loadSession, refreshSessionDetailed } from "./auth.js";
+
+const DEFAULT_API_TIMEOUT_MS = 15_000;
+
+function createFetchSignal(externalSignal, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
+  const hasTimeout =
+    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function";
+  const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
+  if (externalSignal && timeoutSignal && typeof AbortSignal.any === "function") {
+    return AbortSignal.any([externalSignal, timeoutSignal]);
+  }
+  return externalSignal ?? timeoutSignal;
+}
 
 export class ApiError extends Error {
   /**
@@ -28,6 +40,7 @@ export async function fetchAuthConfig() {
   const response = await fetch("/api/auth/config", {
     method: "GET",
     headers: { Accept: "application/json" },
+    signal: createFetchSignal(undefined),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -67,12 +80,20 @@ async function authenticatedJsonFetch(path, options = {}, retried = false) {
     method: options.method || "GET",
     headers,
     body,
+    signal: createFetchSignal(options.signal),
   });
 
   if (response.status === 401 && !retried && session.refreshToken) {
-    const refreshed = await refreshSession();
-    if (refreshed?.accessToken) {
+    const refreshed = await refreshSessionDetailed();
+    if (refreshed.status === "ok" && refreshed.session?.accessToken) {
       return authenticatedJsonFetch(path, options, true);
+    }
+    if (refreshed.status === "transient_error") {
+      throw new ApiError(
+        503,
+        "refresh_unavailable",
+        "Unable to refresh your session right now. Please try again."
+      );
     }
   }
 
@@ -141,7 +162,7 @@ export function buildReadingsHistoryPath(params = {}) {
  * }} params
  */
 export function fetchReadingsHistory(params = {}) {
-  return authenticatedJsonFetch(buildReadingsHistoryPath(params));
+  return authenticatedJsonFetch(buildReadingsHistoryPath(params), { signal: params.signal });
 }
 
 /**

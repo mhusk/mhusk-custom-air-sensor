@@ -108,6 +108,23 @@ async function runOfflineUnitChecks(): Promise<void> {
   assert.equal(pmSpike.peak_timestamp, "2026-11-22T10:15:00Z");
   assert.equal(pmSpike.reading_count, 2);
   assert.equal(pmSpike.severity, "elevated");
+
+  // Interleaved multi-room readings must NOT shatter an ongoing spike for device-a
+  const interleavedSeries: AirQualityReading[] = [
+    makeReading({ device_id: "device-a", location: "office", timestamp: "2026-11-22T10:00:00Z", co2_ppm: 1120 }),
+    makeReading({ device_id: "device-b", location: "bedroom", timestamp: "2026-11-22T10:01:00Z", co2_ppm: 480 }),
+    makeReading({ device_id: "device-a", location: "office", timestamp: "2026-11-22T10:05:00Z", co2_ppm: 1280 }),
+    makeReading({ device_id: "device-b", location: "bedroom", timestamp: "2026-11-22T10:06:00Z", co2_ppm: 510 }),
+    makeReading({ device_id: "device-a", location: "office", timestamp: "2026-11-22T10:10:00Z", co2_ppm: 1150 }),
+    makeReading({ device_id: "device-a", location: "office", timestamp: "2026-11-22T10:15:00Z", co2_ppm: 700 }),
+  ];
+  const multiRoomSpikes = detectNotableSpikes(interleavedSeries).filter(
+    (s) => s.metric === "co2_ppm"
+  );
+  assert.equal(multiRoomSpikes.length, 1);
+  assert.equal(multiRoomSpikes[0].device_id, "device-a");
+  assert.equal(multiRoomSpikes[0].reading_count, 3);
+  assert.equal(multiRoomSpikes[0].peak_value, 1280);
   console.log("   [PASS] detectNotableSpikes() contiguous episode grouping & peaks");
 
   // Pure summary computation (empty + populated)

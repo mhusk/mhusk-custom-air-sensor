@@ -37,7 +37,10 @@ import {
   getOutdoorReadingsHistory,
   type OutdoorReading,
 } from "../services/outdoor.js";
-import { parseBackfillCliArgs } from "./backfillRollups.js";
+import {
+  computeBackfillCutoffDate,
+  parseBackfillCliArgs,
+} from "./backfillRollups.js";
 
 function deepMergeMaps(
   target: Record<string, unknown>,
@@ -325,6 +328,40 @@ async function runTests(): Promise<void> {
   );
   assert.deepEqual(fleetResult.missingDates, []);
   assert.equal(fleetResult.readings.length, 2);
+
+  // Location-filtered rollup query must mark date missing when only another room has a rollup doc
+  const bedroomMiss = await readIndoorReadingsFromRollups(
+    {
+      startDate: new Date("2026-11-24T00:00:00.000Z"),
+      endDate: new Date("2026-11-24T23:59:59.000Z"),
+      location: "bedroom",
+    },
+    db
+  );
+  assert.deepEqual(bedroomMiss.missingDates, ["2026-11-24"]);
+
+  // Multi-room mid-range gap: device-b has Nov 22 and Nov 24 while device-a has Nov 23 -> Nov 23 missing
+  const multiHarness = createMockRollupFirestore();
+  await appendIndoorRollupSample(
+    makeSampleReading({ id: "a23", device_id: "device-a", location: "office", timestamp: "2026-11-23T12:00:00.000Z" }),
+    multiHarness.db
+  );
+  await appendIndoorRollupSample(
+    makeSampleReading({ id: "b22", device_id: "device-b", location: "bedroom", timestamp: "2026-11-22T12:00:00.000Z" }),
+    multiHarness.db
+  );
+  await appendIndoorRollupSample(
+    makeSampleReading({ id: "b24", device_id: "device-b", location: "bedroom", timestamp: "2026-11-24T12:00:00.000Z" }),
+    multiHarness.db
+  );
+  const multiFleet = await readIndoorReadingsFromRollups(
+    {
+      startDate: new Date("2026-11-22T00:00:00.000Z"),
+      endDate: new Date("2026-11-24T23:59:59.000Z"),
+    },
+    multiHarness.db
+  );
+  assert.deepEqual(multiFleet.missingDates, ["2026-11-23"]);
   console.log("   [PASS] 0-read merge writers, batch getAll, and missingDates detection");
 
   // 4. Outdoor rollup writer & reader
@@ -478,6 +515,8 @@ async function runTests(): Promise<void> {
   ]);
   assert.equal(groupedIndoor.length, 2);
   assert.equal(Object.keys(groupedIndoor[1].samples).length, 2);
+  const cutoff = computeBackfillCutoffDate(7, Date.parse("2026-11-27T18:45:12.345Z"));
+  assert.equal(cutoff.toISOString(), "2026-11-20T00:00:00.000Z");
 
   const groupedOutdoor = groupOutdoorReadingsIntoRollupDocs([
     makeSampleOutdoor({ id: "o1", timestamp: "2026-11-24T01:00:00.000Z" }),

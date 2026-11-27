@@ -156,6 +156,43 @@ function svgEl(tag, attrs = {}) {
   return el;
 }
 
+const AXIS_TIME_SHORT_FMT = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
+const AXIS_TIME_LONG_FMT = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+});
+const HOVER_TIME_SHORT_FMT = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+  month: "short",
+  day: "numeric",
+});
+const HOVER_TIME_LONG_FMT = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+/**
+ * Converts a telemetry field to a finite number, returning NaN for null/undefined/blank
+ * so missing sensor samples create gaps instead of coercing `null` to `0`.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function toFiniteNumberOrNaN(value) {
+  if (value === null || value === undefined || value === "") {
+    return Number.NaN;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : Number.NaN;
+}
+
 /**
  * Formats an axis timestamp according to the selected time window.
  *
@@ -165,16 +202,7 @@ function svgEl(tag, attrs = {}) {
  */
 function formatAxisTime(timeMs, hours) {
   const date = new Date(timeMs);
-  if (hours <= 24) {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    }).format(date);
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-  }).format(date);
+  return hours <= 24 ? AXIS_TIME_SHORT_FMT.format(date) : AXIS_TIME_LONG_FMT.format(date);
 }
 
 /**
@@ -186,21 +214,7 @@ function formatAxisTime(timeMs, hours) {
  */
 function formatHoverTime(timeMs, hours) {
   const date = new Date(timeMs);
-  if (hours <= 24) {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-      month: "short",
-      day: "numeric",
-    }).format(date);
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return hours <= 24 ? HOVER_TIME_SHORT_FMT.format(date) : HOVER_TIME_LONG_FMT.format(date);
 }
 
 /**
@@ -234,7 +248,7 @@ export function renderTrendChartCard(container, spec) {
   const points = (spec.readings || [])
     .map((r) => ({
       timeMs: Date.parse(String(r.timestamp)),
-      value: Number(r[spec.field]),
+      value: toFiniteNumberOrNaN(r[spec.field]),
     }))
     .filter((p) => Number.isFinite(p.timeMs) && Number.isFinite(p.value))
     .sort((a, b) => a.timeMs - b.timeMs);
@@ -243,9 +257,7 @@ export function renderTrendChartCard(container, spec) {
     ? (spec.overlay.readings || [])
         .map((r) => ({
           timeMs: Date.parse(String(r.timestamp)),
-          value: r[spec.overlay.field] === null || r[spec.overlay.field] === undefined
-            ? Number.NaN
-            : Number(r[spec.overlay.field]),
+          value: toFiniteNumberOrNaN(r[spec.overlay.field]),
         }))
         .filter((p) => Number.isFinite(p.timeMs) && Number.isFinite(p.value))
         .sort((a, b) => a.timeMs - b.timeMs)
@@ -290,25 +302,45 @@ export function renderTrendChartCard(container, spec) {
   const latestPoint = points[points.length - 1] ?? null;
   const latestOverlay = overlayPoints[overlayPoints.length - 1] ?? null;
 
+  const readoutValSpan = document.createElement("strong");
+  const readoutOutSpan = document.createElement("span");
+  readoutOutSpan.className = "chart-card__outdoor-val";
+  const readoutTimeSpan = document.createElement("span");
+  readoutTimeSpan.className = "chart-card__time";
+  let readoutShowingDefaultEmpty = false;
+
+  const applyReadout = (valText, outText, timeText) => {
+    if (readoutShowingDefaultEmpty || readoutEl.childElementCount === 0) {
+      readoutEl.replaceChildren(readoutValSpan, readoutOutSpan, readoutTimeSpan);
+      readoutShowingDefaultEmpty = false;
+    }
+    readoutValSpan.textContent = valText;
+    if (outText) {
+      readoutOutSpan.textContent = outText;
+      readoutOutSpan.hidden = false;
+    } else {
+      readoutOutSpan.textContent = "";
+      readoutOutSpan.hidden = true;
+    }
+    readoutTimeSpan.textContent = timeText;
+  };
+
   const setDefaultReadout = () => {
-    readoutEl.replaceChildren();
     if (!latestPoint) {
+      readoutEl.replaceChildren();
       readoutEl.textContent = "No samples";
+      readoutShowingDefaultEmpty = true;
       return;
     }
-    const valSpan = document.createElement("strong");
-    valSpan.textContent = `${formatVal(latestPoint.value)} ${spec.unit}`;
-    readoutEl.append(valSpan);
-    if (latestOverlay && spec.overlay) {
-      const outSpan = document.createElement("span");
-      outSpan.className = "chart-card__outdoor-val";
-      outSpan.textContent = `Out ${formatVal(latestOverlay.value)} ${spec.unit}`;
-      readoutEl.append(outSpan);
-    }
-    const timeSpan = document.createElement("span");
-    timeSpan.className = "chart-card__time";
-    timeSpan.textContent = `Latest · ${formatHoverTime(latestPoint.timeMs, spec.hours)}`;
-    readoutEl.append(timeSpan);
+    const outText =
+      latestOverlay && spec.overlay
+        ? `Out ${formatVal(latestOverlay.value)} ${spec.unit}`
+        : "";
+    applyReadout(
+      `${formatVal(latestPoint.value)} ${spec.unit}`,
+      outText,
+      `Latest · ${formatHoverTime(latestPoint.timeMs, spec.hours)}`
+    );
   };
   setDefaultReadout();
 
@@ -572,41 +604,45 @@ export function renderTrendChartCard(container, spec) {
     activeDot.setAttribute("cy", cy.toFixed(2));
     activeDot.setAttribute("visibility", "visible");
 
-    readoutEl.replaceChildren();
-    const valSpan = document.createElement("strong");
-    valSpan.textContent = `${formatVal(point.value)} ${spec.unit}`;
-    readoutEl.append(valSpan);
-
+    let outText = "";
     if (overlayPoints.length > 0) {
       const oIdx = findNearestPointIndex(overlayPoints, point.timeMs);
       if (oIdx >= 0 && Math.abs(overlayPoints[oIdx].timeMs - point.timeMs) <= 2 * 60 * 60_000) {
-        const outSpan = document.createElement("span");
-        outSpan.className = "chart-card__outdoor-val";
-        outSpan.textContent = `Out ${formatVal(overlayPoints[oIdx].value)} ${spec.unit}`;
-        readoutEl.append(outSpan);
+        outText = `Out ${formatVal(overlayPoints[oIdx].value)} ${spec.unit}`;
       }
     }
-
-    const timeSpan = document.createElement("span");
-    timeSpan.className = "chart-card__time";
-    timeSpan.textContent = formatHoverTime(point.timeMs, spec.hours);
-    readoutEl.append(timeSpan);
+    applyReadout(
+      `${formatVal(point.value)} ${spec.unit}`,
+      outText,
+      formatHoverTime(point.timeMs, spec.hours)
+    );
   };
 
+  let cachedRect = null;
+  let lastHighlightedIdx = -1;
+
   const clearHighlight = () => {
+    cachedRect = null;
+    lastHighlightedIdx = -1;
     crosshair.setAttribute("visibility", "hidden");
     activeDot.setAttribute("visibility", "hidden");
     setDefaultReadout();
   };
 
+  hitRect.addEventListener("pointerenter", () => {
+    cachedRect = svg.getBoundingClientRect();
+  });
+
   hitRect.addEventListener("pointermove", (event) => {
-    const rect = svg.getBoundingClientRect();
+    const rect = cachedRect && cachedRect.width ? cachedRect : svg.getBoundingClientRect();
     if (!rect.width) return;
+    cachedRect = rect;
     const svgX = ((event.clientX - rect.left) / rect.width) * CHART_WIDTH;
     const clampedRatio = Math.min(1, Math.max(0, (svgX - PAD_LEFT) / plotWidth));
     const targetTimeMs = minTime + clampedRatio * (maxTime - minTime);
     const idx = findNearestPointIndex(points, targetTimeMs);
-    if (idx >= 0) {
+    if (idx >= 0 && idx !== lastHighlightedIdx) {
+      lastHighlightedIdx = idx;
       highlightPoint(points[idx]);
     }
   });
@@ -617,13 +653,15 @@ export function renderTrendChartCard(container, spec) {
 
   // Footer summary stats bar (Min / Avg / P95 / Max)
   if (spec.stats) {
+    const formatStat = (raw) =>
+      typeof raw === "number" && Number.isFinite(raw) ? `${formatVal(raw)} ${spec.unit}` : "—";
     const footer = document.createElement("dl");
     footer.className = "chart-stats";
     const items = [
-      ["Min", `${formatVal(spec.stats.min)} ${spec.unit}`],
-      ["Avg", `${formatVal(spec.stats.avg)} ${spec.unit}`],
-      ["P95", `${formatVal(spec.stats.p95)} ${spec.unit}`],
-      ["Max", `${formatVal(spec.stats.max)} ${spec.unit}`],
+      ["Min", formatStat(spec.stats.min)],
+      ["Avg", formatStat(spec.stats.avg)],
+      ["P95", formatStat(spec.stats.p95)],
+      ["Max", formatStat(spec.stats.max)],
     ];
     for (const [label, value] of items) {
       const wrap = document.createElement("div");

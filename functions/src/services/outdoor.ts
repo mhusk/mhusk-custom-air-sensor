@@ -6,6 +6,7 @@ import {
 } from "firebase-admin/firestore";
 
 import {
+  OUTDOOR_DAILY_ROLLUPS_COLLECTION,
   appendOutdoorRollupSample,
   downsampleReadings,
   formatUtcDateString,
@@ -19,6 +20,7 @@ import {
   type AqiCategory,
   type DeviceLatestReadingSnapshot,
 } from "./firestore.js";
+import { buildOutdoorRollupWrite } from "./firestore/rollups.js";
 
 export const SITE_CONFIGS_COLLECTION = "site_configs";
 export const HOME_SITE_CONFIG_ID = "home";
@@ -739,7 +741,7 @@ export async function fetchOpenMeteoSnapshotWithForecast(
   airUrl.searchParams.set("forecast_hours", "24");
   airUrl.searchParams.set("timezone", "UTC");
 
-  const [weatherRes, airRes] = await Promise.all([
+  const [weatherSettled, airSettled] = await Promise.allSettled([
     fetchImpl(weatherUrl.toString(), {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(OPEN_METEO_TIMEOUT_MS),
@@ -750,6 +752,10 @@ export async function fetchOpenMeteoSnapshotWithForecast(
     }),
   ]);
 
+  if (weatherSettled.status === "rejected") {
+    throw weatherSettled.reason;
+  }
+  const weatherRes = weatherSettled.value;
   if (!weatherRes.ok) {
     throw new Error(`Open-Meteo weather request failed with HTTP ${weatherRes.status}`);
   }
@@ -782,25 +788,37 @@ export async function fetchOpenMeteoSnapshotWithForecast(
   let no2: number | null = null;
   let airHourly: Record<string, unknown> | undefined;
 
-  if (airRes.ok) {
-    const airJson = (await airRes.json()) as {
-      current?: Record<string, unknown>;
-      hourly?: Record<string, unknown>;
-    };
-    airHourly = airJson.hourly;
-    const airCurrent = airJson.current;
-    if (airCurrent) {
-      const rawPm25 = toNumberOrNull(airCurrent.pm2_5);
-      const rawPm10 = toNumberOrNull(airCurrent.pm10);
-      const rawAqi = toNumberOrNull(airCurrent.us_aqi);
-      const rawOzone = toNumberOrNull(airCurrent.ozone);
-      const rawNo2 = toNumberOrNull(airCurrent.nitrogen_dioxide);
+  if (airSettled.status === "rejected") {
+    console.warn(
+      "[outdoor] Open-Meteo air quality request failed; continuing with weather only:",
+      airSettled.reason instanceof Error ? airSettled.reason.message : String(airSettled.reason)
+    );
+  } else if (airSettled.value.ok) {
+    try {
+      const airJson = (await airSettled.value.json()) as {
+        current?: Record<string, unknown>;
+        hourly?: Record<string, unknown>;
+      };
+      airHourly = airJson.hourly;
+      const airCurrent = airJson.current;
+      if (airCurrent) {
+        const rawPm25 = toNumberOrNull(airCurrent.pm2_5);
+        const rawPm10 = toNumberOrNull(airCurrent.pm10);
+        const rawAqi = toNumberOrNull(airCurrent.us_aqi);
+        const rawOzone = toNumberOrNull(airCurrent.ozone);
+        const rawNo2 = toNumberOrNull(airCurrent.nitrogen_dioxide);
 
-      pm25 = rawPm25 !== null ? roundTo(rawPm25, 1) : null;
-      pm10 = rawPm10 !== null ? roundTo(rawPm10, 1) : null;
-      usAqi = rawAqi !== null ? Math.round(rawAqi) : null;
-      ozone = rawOzone !== null ? roundTo(rawOzone, 1) : null;
-      no2 = rawNo2 !== null ? roundTo(rawNo2, 1) : null;
+        pm25 = rawPm25 !== null ? roundTo(rawPm25, 1) : null;
+        pm10 = rawPm10 !== null ? roundTo(rawPm10, 1) : null;
+        usAqi = rawAqi !== null ? Math.round(rawAqi) : null;
+        ozone = rawOzone !== null ? roundTo(rawOzone, 1) : null;
+        no2 = rawNo2 !== null ? roundTo(rawNo2, 1) : null;
+      }
+    } catch (aqParseErr) {
+      console.warn(
+        "[outdoor] Failed to parse Open-Meteo air quality JSON; continuing with weather only:",
+        aqParseErr instanceof Error ? aqParseErr.message : String(aqParseErr)
+      );
     }
   }
 
@@ -846,6 +864,52 @@ export async function fetchOpenMeteoSnapshot(
   return reading;
 }
 
+export interface IndoorBaselineCandidate {
+  is_online: boolean;
+  last_seen_at: string;
+  latest_reading: {
+    temperature_f: number;
+    humidity_percent: number;
+  } | null;
+}
+
+/**
+ * Selects the best indoor temp/RH baseline across a fleet, prioritizing online
+ * sensors and most recently seen readings over alphabetically sorted offline ones.
+ */
+export function selectIndoorBaseline(
+  devices: ReadonlyArray<IndoorBaselineCandidate>
+): { temperature_f: number; humidity_percent: number } {
+  let bestOnline: IndoorBaselineCandidate | null = null;
+  let bestOnlineMs = -Infinity;
+  let bestAny: IndoorBaselineCandidate | null = null;
+  let bestAnyMs = -Infinity;
+
+  for (const d of devices) {
+    if (!d.latest_reading) {
+      continue;
+    }
+    const parsedMs = Date.parse(d.last_seen_at);
+    const seenMs = Number.isFinite(parsedMs) ? parsedMs : -Infinity;
+    if (d.is_online && (bestOnline === null || seenMs > bestOnlineMs)) {
+      bestOnline = d;
+      bestOnlineMs = seenMs;
+    }
+    if (bestAny === null || seenMs > bestAnyMs) {
+      bestAny = d;
+      bestAnyMs = seenMs;
+    }
+  }
+
+  const chosen = bestOnline ?? bestAny;
+  return chosen?.latest_reading
+    ? {
+        temperature_f: chosen.latest_reading.temperature_f,
+        humidity_percent: chosen.latest_reading.humidity_percent,
+      }
+    : { temperature_f: 70.0, humidity_percent: 45.0 };
+}
+
 export async function getSiteLocationConfig(
   db: Firestore = getDb()
 ): Promise<SiteLocationConfig | null> {
@@ -871,6 +935,8 @@ export async function updateSiteLocationConfig(
       MIN_OUTDOOR_POLL_INTERVAL_MINUTES,
       Math.min(MAX_OUTDOOR_POLL_INTERVAL_MINUTES, Math.round(input.outdoor_poll_interval_minutes))
     ),
+    outdoor_last_synced_at: null,
+    outdoor_last_sync_attempt_at: null,
     updated_at: Timestamp.fromDate(now),
     updated_by: updatedBy,
   };
@@ -1175,25 +1241,44 @@ export async function syncOutdoorReadingIfStale(
     ...snapshot,
   };
 
-  const writes: Array<Promise<unknown>> = [
-    db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData),
-    siteRef.set({ outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true }),
-    appendOutdoorRollupSample(fullReading, db),
-  ];
-
-  if (forecast && forecast.hours.length > 0) {
-    writes.push(
-      db
-        .collection(OUTDOOR_FORECASTS_COLLECTION)
-        .doc(HOME_OUTDOOR_FORECAST_ID)
-        .set({
-          ...forecast,
-          fetched_at: Timestamp.fromDate(new Date(forecast.fetched_at)),
-        })
+  if (typeof db.batch === "function") {
+    const batch = db.batch();
+    batch.set(db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId), writeData);
+    batch.set(siteRef, { outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true });
+    const rollupWrite = buildOutdoorRollupWrite(fullReading);
+    batch.set(
+      db.collection(OUTDOOR_DAILY_ROLLUPS_COLLECTION).doc(rollupWrite.docId),
+      rollupWrite.payload,
+      { merge: true }
     );
-  }
+    if (forecast && forecast.hours.length > 0) {
+      batch.set(db.collection(OUTDOOR_FORECASTS_COLLECTION).doc(HOME_OUTDOOR_FORECAST_ID), {
+        ...forecast,
+        fetched_at: Timestamp.fromDate(new Date(forecast.fetched_at)),
+      });
+    }
+    await batch.commit();
+  } else {
+    const writes: Array<Promise<unknown>> = [
+      db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData),
+      siteRef.set({ outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true }),
+      appendOutdoorRollupSample(fullReading, db),
+    ];
 
-  await Promise.all(writes);
+    if (forecast && forecast.hours.length > 0) {
+      writes.push(
+        db
+          .collection(OUTDOOR_FORECASTS_COLLECTION)
+          .doc(HOME_OUTDOOR_FORECAST_ID)
+          .set({
+            ...forecast,
+            fetched_at: Timestamp.fromDate(new Date(forecast.fetched_at)),
+          })
+      );
+    }
+
+    await Promise.all(writes);
+  }
 
   return {
     synced: true,

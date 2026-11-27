@@ -10,6 +10,7 @@ import {
   DEVICE_CONFIGS_COLLECTION,
   DEVICES_COLLECTION,
   EXPERIMENTS_COLLECTION,
+  EXPERIMENT_DETECTOR_STATE_COLLECTION,
   HOUSE_PLAYBOOK_COLLECTION,
   HOUSE_PLAYBOOK_SUMMARY_DOC_ID,
   MAX_HISTORY_LIMIT,
@@ -1281,5 +1282,373 @@ export async function getHousePlaybook(
       Math.round(asNumber(data.evaluated_experiment_count, entries.length))
     ),
     entries,
+  };
+}
+
+export const AUTO_DETECT_CO2_DELTA_PPM = 150;
+export const AUTO_DETECT_PM2_5_DELTA_UG_M3 = 15;
+export const AUTO_DETECT_MAX_WINDOW_MINUTES = 15;
+export const AUTO_DETECT_COOLDOWN_MINUTES = 30;
+export const AUTO_DETECT_OVERLAP_BUFFER_MINUTES = 15;
+
+export interface ReadingStepInput {
+  device_id: string;
+  location: string;
+  timestamp: string;
+  co2_ppm: number;
+  pm2_5_ug_m3: number;
+}
+
+export interface DetectorDeviceState {
+  device_id: string;
+  last_timestamp: string;
+  last_co2_ppm: number;
+  last_pm2_5_ug_m3: number;
+  last_detected_at: string | null;
+}
+
+export interface StepChangeEvaluation {
+  triggered: boolean;
+  reason: string;
+  co2_delta_ppm?: number;
+  pm2_5_delta_ug_m3?: number;
+  note?: string;
+}
+
+export interface StepDetectionResult {
+  detected: boolean;
+  reason: string;
+  experiment?: ExperimentRecord | null;
+  co2_delta_ppm?: number;
+  pm2_5_delta_ug_m3?: number;
+}
+
+export interface ProcessReadingForExperimentsResult {
+  detection: StepDetectionResult;
+  finalized_ids: string[];
+}
+
+export function evaluateStepChange(
+  prior: DetectorDeviceState,
+  current: ReadingStepInput
+): StepChangeEvaluation {
+  const priorMs = Date.parse(prior.last_timestamp);
+  const currentMs = Date.parse(current.timestamp);
+  if (!Number.isFinite(priorMs) || !Number.isFinite(currentMs)) {
+    return { triggered: false, reason: "out_of_order_or_duplicate" };
+  }
+
+  const elapsedMin = (currentMs - priorMs) / 60_000;
+  if (elapsedMin <= 0) {
+    return { triggered: false, reason: "out_of_order_or_duplicate" };
+  }
+  if (elapsedMin > AUTO_DETECT_MAX_WINDOW_MINUTES) {
+    return { triggered: false, reason: "gap_too_large" };
+  }
+
+  const co2Delta = roundTo(current.co2_ppm - prior.last_co2_ppm, 1);
+  const pm25Delta = roundTo(current.pm2_5_ug_m3 - prior.last_pm2_5_ug_m3, 1);
+
+  const co2Triggered = Math.abs(co2Delta) >= AUTO_DETECT_CO2_DELTA_PPM;
+  const pm25Triggered = Math.abs(pm25Delta) >= AUTO_DETECT_PM2_5_DELTA_UG_M3;
+
+  if (!co2Triggered && !pm25Triggered) {
+    return {
+      triggered: false,
+      reason: "below_threshold",
+      co2_delta_ppm: co2Delta,
+      pm2_5_delta_ug_m3: pm25Delta,
+    };
+  }
+
+  const elapsedLabel = `${Math.max(1, Math.round(elapsedMin))} min`;
+  const parts: string[] = [];
+  if (co2Triggered) {
+    const dir = co2Delta < 0 ? "drop" : "spike";
+    const signed = `${co2Delta > 0 ? "+" : ""}${Math.round(co2Delta)} ppm`;
+    parts.push(
+      `CO₂ ${dir} of ${signed} (${Math.round(prior.last_co2_ppm)} → ${Math.round(current.co2_ppm)} ppm)`
+    );
+  }
+  if (pm25Triggered) {
+    const dir = pm25Delta < 0 ? "drop" : "spike";
+    const signed = `${pm25Delta > 0 ? "+" : ""}${pm25Delta.toFixed(1)} µg/m³`;
+    parts.push(
+      `PM2.5 ${dir} of ${signed} (${prior.last_pm2_5_ug_m3.toFixed(1)} → ${current.pm2_5_ug_m3.toFixed(1)} µg/m³)`
+    );
+  }
+
+  return {
+    triggered: true,
+    reason: "threshold_exceeded",
+    co2_delta_ppm: co2Delta,
+    pm2_5_delta_ug_m3: pm25Delta,
+    note: `Auto-detected ${parts.join(" and ")} over ${elapsedLabel}.`,
+  };
+}
+
+function mapDetectorState(docId: string, data: DocumentData): DetectorDeviceState | null {
+  const lastTs = parseTimestampToDateOrNull(data.last_timestamp);
+  const co2 = toFiniteNumberOrNull(data.last_co2_ppm);
+  const pm25 = toFiniteNumberOrNull(data.last_pm2_5_ug_m3);
+  if (!lastTs || co2 === null || pm25 === null) {
+    return null;
+  }
+  const lastDetected = parseTimestampToDateOrNull(data.last_detected_at);
+  return {
+    device_id: asString(data.device_id, docId),
+    last_timestamp: lastTs.toISOString(),
+    last_co2_ppm: co2,
+    last_pm2_5_ug_m3: pm25,
+    last_detected_at: lastDetected ? lastDetected.toISOString() : null,
+  };
+}
+
+async function saveDetectorState(
+  state: DetectorDeviceState,
+  db: Firestore
+): Promise<void> {
+  await db
+    .collection(EXPERIMENT_DETECTOR_STATE_COLLECTION)
+    .doc(state.device_id)
+    .set({
+      device_id: state.device_id,
+      last_timestamp: Timestamp.fromDate(new Date(state.last_timestamp)),
+      last_co2_ppm: state.last_co2_ppm,
+      last_pm2_5_ug_m3: state.last_pm2_5_ug_m3,
+      last_detected_at: state.last_detected_at
+        ? Timestamp.fromDate(new Date(state.last_detected_at))
+        : null,
+    });
+}
+
+export async function detectUnlabeledEventCandidate(
+  reading: ReadingStepInput,
+  options: { db?: Firestore; now?: Date } = {}
+): Promise<StepDetectionResult> {
+  const db = options.db ?? getDb();
+  const now = options.now ?? new Date();
+  const deviceId = reading.device_id.trim();
+  const currentMs = Date.parse(reading.timestamp);
+  if (!deviceId || !Number.isFinite(currentMs)) {
+    return { detected: false, reason: "invalid_reading_payload" };
+  }
+
+  const normalizedCurrent: ReadingStepInput = {
+    ...reading,
+    device_id: deviceId,
+    timestamp: new Date(currentMs).toISOString(),
+  };
+
+  const stateSnap = await db
+    .collection(EXPERIMENT_DETECTOR_STATE_COLLECTION)
+    .doc(deviceId)
+    .get();
+
+  const priorState =
+    stateSnap.exists && stateSnap.data()
+      ? mapDetectorState(stateSnap.id, stateSnap.data()!)
+      : null;
+
+  if (!priorState) {
+    await saveDetectorState(
+      {
+        device_id: deviceId,
+        last_timestamp: normalizedCurrent.timestamp,
+        last_co2_ppm: normalizedCurrent.co2_ppm,
+        last_pm2_5_ug_m3: normalizedCurrent.pm2_5_ug_m3,
+        last_detected_at: null,
+      },
+      db
+    );
+    return { detected: false, reason: "initialized_baseline" };
+  }
+
+  const stepEval = evaluateStepChange(priorState, normalizedCurrent);
+  if (stepEval.reason === "out_of_order_or_duplicate") {
+    // Keep the newer stored state intact; never regress last_timestamp.
+    return { detected: false, reason: "out_of_order_or_duplicate" };
+  }
+
+  const nextBaseState: DetectorDeviceState = {
+    device_id: deviceId,
+    last_timestamp: normalizedCurrent.timestamp,
+    last_co2_ppm: normalizedCurrent.co2_ppm,
+    last_pm2_5_ug_m3: normalizedCurrent.pm2_5_ug_m3,
+    last_detected_at: priorState.last_detected_at,
+  };
+
+  if (!stepEval.triggered) {
+    await saveDetectorState(nextBaseState, db);
+    return {
+      detected: false,
+      reason: stepEval.reason,
+      ...(stepEval.co2_delta_ppm !== undefined ? { co2_delta_ppm: stepEval.co2_delta_ppm } : {}),
+      ...(stepEval.pm2_5_delta_ug_m3 !== undefined ? { pm2_5_delta_ug_m3: stepEval.pm2_5_delta_ug_m3 } : {}),
+    };
+  }
+
+  if (priorState.last_detected_at) {
+    const lastDetectedMs = Date.parse(priorState.last_detected_at);
+    if (
+      Number.isFinite(lastDetectedMs) &&
+      currentMs - lastDetectedMs < AUTO_DETECT_COOLDOWN_MINUTES * 60_000
+    ) {
+      await saveDetectorState(nextBaseState, db);
+      return {
+        detected: false,
+        reason: "cooldown_active",
+        co2_delta_ppm: stepEval.co2_delta_ppm,
+        pm2_5_delta_ug_m3: stepEval.pm2_5_delta_ug_m3,
+      };
+    }
+  }
+
+  const priorMs = Date.parse(priorState.last_timestamp);
+  const bufferMs = AUTO_DETECT_OVERLAP_BUFFER_MINUTES * 60_000;
+  const windowStartMs = priorMs - bufferMs;
+  const windowEndMs = currentMs + bufferMs;
+
+  const recentExperiments = await listExperiments({ device_id: deviceId, limit: 15 }, db);
+  const hasOverlap = recentExperiments.some((exp) => {
+    if (exp.status === "dismissed") {
+      return false;
+    }
+    if (exp.status === "active") {
+      return true;
+    }
+    const expStartMs = Date.parse(exp.started_at);
+    const expEndMs = exp.ended_at ? Date.parse(exp.ended_at) : expStartMs;
+    if (!Number.isFinite(expStartMs) || !Number.isFinite(expEndMs)) {
+      return false;
+    }
+    return expStartMs <= windowEndMs && expEndMs >= windowStartMs;
+  });
+
+  if (hasOverlap) {
+    await saveDetectorState(nextBaseState, db);
+    return {
+      detected: false,
+      reason: "overlapping_experiment",
+      co2_delta_ppm: stepEval.co2_delta_ppm,
+      pm2_5_delta_ug_m3: stepEval.pm2_5_delta_ug_m3,
+    };
+  }
+
+  const candidate = await createExperiment(
+    {
+      action_type: "custom",
+      device_id: deviceId,
+      location: normalizedCurrent.location || undefined,
+      started_at: priorState.last_timestamp,
+      ended_at: normalizedCurrent.timestamp,
+      notes: stepEval.note ?? null,
+      status: "unlabeled",
+      source: "auto_detected",
+      created_by: "auto-detector",
+      evaluate_if_ready: false,
+      now,
+    },
+    db
+  );
+
+  await saveDetectorState(
+    {
+      ...nextBaseState,
+      last_detected_at: normalizedCurrent.timestamp,
+    },
+    db
+  );
+
+  return {
+    detected: true,
+    reason: "candidate_created",
+    experiment: candidate,
+    co2_delta_ppm: stepEval.co2_delta_ppm,
+    pm2_5_delta_ug_m3: stepEval.pm2_5_delta_ug_m3,
+  };
+}
+
+export async function finalizeDuePendingExperiments(
+  options: { db?: Firestore; now?: Date } = {}
+): Promise<string[]> {
+  const db = options.db ?? getDb();
+  const now = options.now ?? new Date();
+  const settleLeadMs = POST_SETTLE_WINDOW_MINUTES * 60_000;
+
+  const snap = await db
+    .collection(EXPERIMENTS_COLLECTION)
+    .where("status", "==", "pending_evaluation")
+    .get();
+
+  const finalizedIds: string[] = [];
+  for (const doc of snap.docs) {
+    const exp = mapExperimentDoc(doc.id, doc.data());
+    if (!exp.ended_at) {
+      continue;
+    }
+    const endedMs = Date.parse(exp.ended_at);
+    if (!Number.isFinite(endedMs) || endedMs + settleLeadMs > now.getTime()) {
+      continue;
+    }
+
+    const updated = await evaluateExperimentOutcome(exp.id, {
+      db,
+      now,
+      rebuildPlaybook: false,
+    });
+    if (updated && updated.status === "evaluated") {
+      finalizedIds.push(updated.id);
+    }
+  }
+
+  if (finalizedIds.length > 0) {
+    await rebuildHousePlaybook(db, now);
+  }
+
+  return finalizedIds;
+}
+
+export async function processReadingForExperiments(
+  rawData: DocumentData,
+  options: { db?: Firestore; now?: Date } = {}
+): Promise<ProcessReadingForExperimentsResult> {
+  const db = options.db ?? getDb();
+  const now = options.now ?? new Date();
+
+  const finalizedIds = await finalizeDuePendingExperiments({ db, now });
+
+  const deviceId =
+    typeof rawData.device_id === "string" ? rawData.device_id.trim() : "";
+  const tsDate = parseTimestampToDateOrNull(rawData.timestamp);
+  const co2 = toFiniteNumberOrNull(rawData.co2_ppm);
+  const pm25 = toFiniteNumberOrNull(rawData.pm2_5_ug_m3);
+
+  if (!deviceId || !tsDate || co2 === null) {
+    return {
+      detection: { detected: false, reason: "invalid_reading_payload" },
+      finalized_ids: finalizedIds,
+    };
+  }
+
+  const location =
+    typeof rawData.location === "string" && rawData.location.trim().length > 0
+      ? rawData.location.trim()
+      : "unknown";
+
+  const detection = await detectUnlabeledEventCandidate(
+    {
+      device_id: deviceId,
+      location,
+      timestamp: tsDate.toISOString(),
+      co2_ppm: co2,
+      pm2_5_ug_m3: pm25 ?? 0,
+    },
+    { db, now }
+  );
+
+  return {
+    detection,
+    finalized_ids: finalizedIds,
   };
 }

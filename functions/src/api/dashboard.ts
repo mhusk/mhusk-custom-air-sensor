@@ -29,7 +29,7 @@ import {
   syncOutdoorReadingIfStale,
   updateSiteLocationConfig,
 } from "../services/outdoor.js";
-import { parseQueryParams, sendJson } from "./http.js";
+import { BodyReadError, parseQueryParams, sendJson } from "./http.js";
 import { handleMeRoute, handlePublicAuthRoutes, resolveActorLabel } from "./routes/auth.js";
 import { handleDeviceActionRoute, matchDeviceConfigRoute } from "./routes/devices.js";
 import { handleFirmwareReleasesRoute, handleFirmwareRolloutRoute } from "./routes/firmware.js";
@@ -180,18 +180,23 @@ export async function handleDashboardApiRequest(
   const service =
     options.dashboardService ?? createFirestoreDashboardService(options.db ?? getDb());
   const cache = options.cache;
-  const queryParams = parseQueryParams(req);
-  const refreshParam = queryParams.get("refresh")?.trim().toLowerCase();
-  const bypassCache = refreshParam === "1" || refreshParam === "true";
 
   try {
+    const queryParams = parseQueryParams(req);
+    const refreshParam = queryParams.get("refresh")?.trim().toLowerCase();
+    const bypassCache = refreshParam === "1" || refreshParam === "true";
+
     if (pathname === "/api/dashboard/overview" && method === "GET") {
       await handleOverviewRoute(res, service, { cache, bypassCache });
       return;
     }
 
     if (pathname === "/api/readings/history" && method === "GET") {
-      await handleReadingsHistoryRoute(req, res, service, { cache, bypassCache });
+      await handleReadingsHistoryRoute(req, res, service, {
+        cache,
+        bypassCache,
+        queryParams,
+      });
       return;
     }
 
@@ -256,6 +261,13 @@ export async function handleDashboardApiRequest(
       message: `Unknown dashboard API route: ${method} ${pathname}`,
     });
   } catch (error) {
+    if (error instanceof BodyReadError) {
+      sendJson(res, error.statusCode, {
+        error: error.code,
+        message: error.message,
+      });
+      return;
+    }
     console.error(
       `[api] Unhandled error on ${method} ${pathname}:`,
       error instanceof Error ? error.message : String(error)
