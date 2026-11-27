@@ -246,3 +246,13 @@ export function triggerOutdoorRefresh() {
     method: "POST",
   });
 }
+
+/**
+ * Fetches the cached 24-hour Open-Meteo forecast and scored free/low-energy-tax
+ * ventilation windows for the configured home location.
+ *
+ * @param {{ refresh?: boolean }} [options]
+ */
+export function fetchOutdoorForecast({ refresh = false } = {}) {
+  return authenticatedJsonFetch(`/api/outdoor/forecast${refresh ? "?refresh=1" : ""}`);
+}

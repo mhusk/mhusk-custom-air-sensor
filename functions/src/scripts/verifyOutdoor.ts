@@ -22,16 +22,25 @@ import {
   type DeviceStatus,
 } from "../services/firestore.js";
 import {
+  HOME_OUTDOOR_FORECAST_ID,
   HOME_SITE_CONFIG_ID,
+  OUTDOOR_FORECASTS_COLLECTION,
   OUTDOOR_READINGS_COLLECTION,
   SITE_CONFIGS_COLLECTION,
   buildOutdoorReadingDocId,
+  computeDewPointF,
   computeIndoorOutdoorDelta,
+  computeMoistAirEnthalpyKjKg,
+  computeVentilationEnergyTax,
   describeWmoWeatherCode,
   fetchOpenMeteoSnapshot,
+  fetchOpenMeteoSnapshotWithForecast,
+  findBestVentilationWindows,
   mapUsAqiCategory,
   syncOutdoorReadingIfStale,
+  type LatestOutdoorForecastResult,
   type LatestOutdoorReadingResult,
+  type OutdoorForecast,
   type OutdoorReading,
   type SiteLocationConfig,
 } from "../services/outdoor.js";
@@ -185,17 +194,132 @@ async function testOpenMeteoParsing(): Promise<void> {
   assert.equal(fallbackSnap.pm2_5_ug_m3, null);
   assert.equal(fallbackSnap.us_aqi, null);
 
-  console.log("[PASS] 1. Open-Meteo parsing, WMO/AQI mapping, and AQ-down fallback");
+  // 24h hourly forecast parsing
+  const mockFetchForecast: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("api.open-meteo.com/v1/forecast")) {
+      return new Response(
+        JSON.stringify({
+          current: {
+            temperature_2m: 20.0,
+            relative_humidity_2m: 45,
+            apparent_temperature: 19.5,
+            weather_code: 1,
+            wind_speed_10m: 5.0,
+          },
+          hourly: {
+            time: ["2026-11-24T17:00", "2026-11-24T18:00", "2026-11-24T19:00"],
+            temperature_2m: [25.0, 17.5, 17.0],
+            relative_humidity_2m: [78, 48, 50],
+            wind_speed_10m: [6.0, 5.0, 4.5],
+            weather_code: [2, 1, 0],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        current: { pm2_5: 6.0, pm10: 10.0, us_aqi: 25, ozone: 40, nitrogen_dioxide: 8 },
+        hourly: {
+          time: ["2026-11-24T17:00", "2026-11-24T18:00", "2026-11-24T19:00"],
+          pm2_5: [8.0, 5.2, 4.9],
+          us_aqi: [33, 22, 20],
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const withForecast = await fetchOpenMeteoSnapshotWithForecast(
+    { label: "Home Outdoor", latitude: 37.7749, longitude: -122.4194 },
+    { fetchImpl: mockFetchForecast, now: () => new Date("2026-11-24T17:00:00.000Z") }
+  );
+  assert.ok(withForecast.forecast);
+  assert.equal(withForecast.forecast.hours.length, 3);
+  assert.equal(withForecast.forecast.hours[1].timestamp, "2026-11-24T18:00:00.000Z");
+  assert.equal(withForecast.forecast.hours[1].us_aqi, 22);
+
+  console.log("[PASS] 1. Open-Meteo parsing, WMO/AQI mapping, 24h forecast, and AQ-down fallback");
 }
 
 function testIndoorOutdoorDelta(): void {
-  // High indoor CO2 + clean outdoor -> open_recommended
+  // Psychrometrics sanity checks
+  const dpIndoor = computeDewPointF(71.0, 45.0);
+  assert.ok(dpIndoor > 47 && dpIndoor < 50, `Unexpected indoor dew point ${dpIndoor}`);
+  const enthalpyMild = computeMoistAirEnthalpyKjKg(20.0, 50.0);
+  assert.ok(enthalpyMild > 37 && enthalpyMild < 41, `Unexpected moist air enthalpy ${enthalpyMild}`);
+
+  // Mild fall -> free
+  const freeTax = computeVentilationEnergyTax(
+    { temperature_f: 70.0, humidity_percent: 45.0 },
+    { temperature_f: 65.0, humidity_percent: 48.0 }
+  );
+  assert.equal(freeTax.tier, "free");
+  assert.equal(freeTax.primary_penalty, "none");
+
+  // Cool fall -> low heating tax
+  const lowTax = computeVentilationEnergyTax(
+    { temperature_f: 70.0, humidity_percent: 45.0 },
+    { temperature_f: 58.1, humidity_percent: 62.0 }
+  );
+  assert.equal(lowTax.tier, "low");
+  assert.equal(lowTax.primary_penalty, "heating");
+
+  // Muggy 72F/82% RH latent trap -> high dehumidification tax
+  const humidTrap = computeVentilationEnergyTax(
+    { temperature_f: 71.0, humidity_percent: 45.0 },
+    { temperature_f: 72.0, humidity_percent: 82.0 }
+  );
+  assert.equal(humidTrap.tier, "high");
+  assert.equal(humidTrap.primary_penalty, "dehumidification");
+
+  // Hot humid summer -> high cooling + dehumidification tax
+  const summerTax = computeVentilationEnergyTax(
+    { temperature_f: 71.0, humidity_percent: 45.0 },
+    { temperature_f: 88.0, humidity_percent: 70.0 }
+  );
+  assert.equal(summerTax.tier, "high");
+  assert.equal(summerTax.primary_penalty, "cooling_and_dehumidification");
+
+  // Freezing winter -> high heating tax
+  const winterTax = computeVentilationEnergyTax(
+    { temperature_f: 70.0, humidity_percent: 40.0 },
+    { temperature_f: 28.0, humidity_percent: 55.0 }
+  );
+  assert.equal(winterTax.tier, "high");
+  assert.equal(winterTax.primary_penalty, "heating");
+
+  // High indoor CO2 + clean outdoor (low tax) -> open_recommended
   const openDelta = computeIndoorOutdoorDelta(SAMPLE_READING, SAMPLE_OUTDOOR);
   assert.equal(openDelta.temperature_diff_f, 13.0);
   assert.equal(openDelta.humidity_diff_percent, -18.0);
   assert.equal(openDelta.pm2_5_diff_ug_m3, -2.7);
   assert.equal(openDelta.aqi_diff, -9);
   assert.equal(openDelta.window_recommendation, "open_recommended");
+  assert.equal(openDelta.energy_tax.tier, "low");
+
+  // High indoor CO2 + clean outdoor + high energy tax -> open_brief_purge
+  const purgeDelta = computeIndoorOutdoorDelta(SAMPLE_READING, {
+    ...SAMPLE_OUTDOOR,
+    temperature_c: 31.1,
+    temperature_f: 88.0,
+    humidity_percent: 70.0,
+  });
+  assert.equal(purgeDelta.window_recommendation, "open_brief_purge");
+  assert.equal(purgeDelta.energy_tax.tier, "high");
+
+  // Elevated indoor PM2.5 + clean outdoor + high energy tax -> keep_closed (use HEPA)
+  const hepaDelta = computeIndoorOutdoorDelta(
+    { ...SAMPLE_READING, co2_ppm: 650, pm2_5_ug_m3: 24.0 },
+    {
+      ...SAMPLE_OUTDOOR,
+      temperature_c: 31.1,
+      temperature_f: 88.0,
+      humidity_percent: 70.0,
+      pm2_5_ug_m3: 5.0,
+    }
+  );
+  assert.equal(hepaDelta.window_recommendation, "keep_closed");
 
   // Unhealthy outdoor smoke -> keep_closed even with high indoor CO2
   const smokeDelta = computeIndoorOutdoorDelta(SAMPLE_READING, {
@@ -213,12 +337,74 @@ function testIndoorOutdoorDelta(): void {
   );
   assert.equal(neutralDelta.window_recommendation, "neutral");
 
-  console.log("[PASS] 2. Indoor-vs-outdoor delta math & window recommendation logic");
+  // Forecast window finder selects clean contiguous free/low window
+  const sampleForecast: OutdoorForecast = {
+    fetched_at: "2026-11-24T17:00:00.000Z",
+    location_label: "Home Outdoor",
+    latitude: 37.7749,
+    longitude: -122.4194,
+    source: "open-meteo",
+    hours: [
+      {
+        timestamp: "2026-11-24T17:00:00.000Z",
+        temperature_c: 29.5,
+        temperature_f: 85.1,
+        humidity_percent: 72,
+        dew_point_f: 75.0,
+        wind_speed_mph: 4,
+        weather_code: 2,
+        weather_description: "Partly cloudy",
+        pm2_5_ug_m3: 6.0,
+        us_aqi: 25,
+        us_aqi_category: "Good",
+      },
+      {
+        timestamp: "2026-11-24T18:00:00.000Z",
+        temperature_c: 18.5,
+        temperature_f: 65.3,
+        humidity_percent: 48,
+        dew_point_f: 45.1,
+        wind_speed_mph: 6,
+        weather_code: 1,
+        weather_description: "Mainly clear",
+        pm2_5_ug_m3: 5.0,
+        us_aqi: 21,
+        us_aqi_category: "Good",
+      },
+      {
+        timestamp: "2026-11-24T19:00:00.000Z",
+        temperature_c: 17.8,
+        temperature_f: 64.0,
+        humidity_percent: 49,
+        dew_point_f: 44.5,
+        wind_speed_mph: 5,
+        weather_code: 0,
+        weather_description: "Clear sky",
+        pm2_5_ug_m3: 4.8,
+        us_aqi: 20,
+        us_aqi_category: "Good",
+      },
+    ],
+  };
+  const winAnalysis = findBestVentilationWindows(
+    { temperature_f: 71.0, humidity_percent: 45.0 },
+    sampleForecast,
+    { now: new Date("2026-11-24T17:00:00.000Z") }
+  );
+  assert.ok(winAnalysis.next_best_window);
+  assert.equal(winAnalysis.next_best_window.best_tax_tier, "free");
+  assert.equal(winAnalysis.next_best_window.duration_hours, 2);
+  assert.equal(winAnalysis.next_best_window.start_time, "2026-11-24T18:00:00.000Z");
+
+  console.log("[PASS] 2. Indoor-vs-outdoor delta, psychrometric energy tax & forecast window finder");
 }
 
 async function testApiAndMcpIntegration(): Promise<void> {
   let siteConfig: SiteLocationConfig | null = null;
   let latestOutdoor: LatestOutdoorReadingResult | null = null;
+  const futureHour1 = new Date(Date.now() + 60 * 60_000).toISOString();
+  const futureHour2 = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+  let latestForecast: LatestOutdoorForecastResult | null = null;
   const outdoorHistory: OutdoorReading[] = [SAMPLE_OUTDOOR];
 
   const dashboardService: DashboardDataService = {
@@ -289,6 +475,7 @@ async function testApiAndMcpIntegration(): Promise<void> {
       return siteConfig;
     },
     getLatestOutdoorReading: async () => latestOutdoor,
+    getLatestOutdoorForecast: async () => latestForecast,
     getOutdoorReadingsHistory: async () => outdoorHistory,
     syncOutdoorReadingIfStale: async () => {
       if (!siteConfig) {
@@ -304,6 +491,45 @@ async function testApiAndMcpIntegration(): Promise<void> {
         minutes_ago: 0,
         is_stale: false,
       };
+      latestForecast = {
+        forecast: {
+          fetched_at: new Date().toISOString(),
+          location_label: siteConfig.label,
+          latitude: siteConfig.latitude,
+          longitude: siteConfig.longitude,
+          source: "open-meteo",
+          hours: [
+            {
+              timestamp: futureHour1,
+              temperature_c: 18.0,
+              temperature_f: 64.4,
+              humidity_percent: 48,
+              dew_point_f: 44.3,
+              wind_speed_mph: 5,
+              weather_code: 1,
+              weather_description: "Mainly clear",
+              pm2_5_ug_m3: 5.0,
+              us_aqi: 22,
+              us_aqi_category: "Good",
+            },
+            {
+              timestamp: futureHour2,
+              temperature_c: 17.5,
+              temperature_f: 63.5,
+              humidity_percent: 50,
+              dew_point_f: 44.6,
+              wind_speed_mph: 4.5,
+              weather_code: 0,
+              weather_description: "Clear sky",
+              pm2_5_ug_m3: 4.8,
+              us_aqi: 20,
+              us_aqi_category: "Good",
+            },
+          ],
+        },
+        minutes_ago: 0,
+        is_stale: false,
+      };
       return { synced: true, reason: "forced_refresh", reading: latestOutdoor.reading };
     },
   };
@@ -314,6 +540,7 @@ async function testApiAndMcpIntegration(): Promise<void> {
     getAirQualitySummary: dashboardService.getAirQualitySummary,
     getSensorStatus: dashboardService.getSensorStatus,
     getLatestOutdoorReading: dashboardService.getLatestOutdoorReading,
+    getLatestOutdoorForecast: dashboardService.getLatestOutdoorForecast,
     getOutdoorReadingsHistory: dashboardService.getOutdoorReadingsHistory,
     syncOutdoorReadingIfStale: dashboardService.syncOutdoorReadingIfStale,
   };
@@ -378,11 +605,28 @@ async function testApiAndMcpIntegration(): Promise<void> {
     const overviewJson = (await overviewRes.json()) as {
       site_config: SiteLocationConfig;
       outdoor_latest: LatestOutdoorReadingResult;
-      devices: Array<{ outdoor_delta: { window_recommendation: string } }>;
+      ventilation_forecast: { next_best_window: { best_tax_tier: string } | null } | null;
+      devices: Array<{ outdoor_delta: { window_recommendation: string; energy_tax: { tier: string } } }>;
     };
     assert.equal(overviewJson.site_config.label, "Home Outdoor");
     assert.equal(overviewJson.outdoor_latest.reading.us_aqi, 34);
     assert.equal(overviewJson.devices[0].outdoor_delta.window_recommendation, "open_recommended");
+    assert.equal(overviewJson.devices[0].outdoor_delta.energy_tax.tier, "low");
+    assert.equal(overviewJson.ventilation_forecast?.next_best_window?.best_tax_tier, "free");
+
+    // 3c-ii. GET /api/outdoor/forecast returns scored 24h forecast & windows
+    const forecastRes = await fetch(`${baseUrl}/api/outdoor/forecast`, {
+      headers: authHeaders,
+    });
+    assert.equal(forecastRes.status, 200);
+    const forecastJson = (await forecastRes.json()) as {
+      configured: boolean;
+      next_best_window: { duration_hours: number; best_tax_tier: string } | null;
+      hours: unknown[];
+    };
+    assert.equal(forecastJson.configured, true);
+    assert.equal(forecastJson.next_best_window?.best_tax_tier, "free");
+    assert.equal(forecastJson.hours.length, 2);
 
     // 3d. History includes outdoor_history
     const histRes = await fetch(`${baseUrl}/api/readings/history?hours=24`, {
@@ -392,9 +636,9 @@ async function testApiAndMcpIntegration(): Promise<void> {
     const histJson = (await histRes.json()) as { outdoor_history: OutdoorReading[] };
     assert.equal(histJson.outdoor_history.length, 1);
 
-    console.log("[PASS] 3. Dashboard API (/api/site/config, overview deltas, outdoor_history)");
+    console.log("[PASS] 3. Dashboard API (/api/site/config, /api/outdoor/forecast, overview deltas, outdoor_history)");
 
-    // 4a. MCP tools/list includes get_outdoor_air_quality
+    // 4a. MCP tools/list includes get_outdoor_air_quality and get_ventilation_forecast
     const listRes = await fetch(`${baseUrl}/mcp`, {
       method: "POST",
       headers: authHeaders,
@@ -403,6 +647,7 @@ async function testApiAndMcpIntegration(): Promise<void> {
     assert.equal(listRes.status, 200);
     const listText = await listRes.text();
     assert.ok(listText.includes("get_outdoor_air_quality"), "tools/list should include get_outdoor_air_quality");
+    assert.ok(listText.includes("get_ventilation_forecast"), "tools/list should include get_ventilation_forecast");
 
     // 4b. MCP get_latest_reading includes outdoor + outdoor_comparison
     const latestRes = await fetch(`${baseUrl}/mcp`, {
@@ -436,7 +681,23 @@ async function testApiAndMcpIntegration(): Promise<void> {
     assert.ok(outdoorToolText.includes("Partly cloudy"), "get_outdoor_air_quality should return weather_description");
     assert.ok(outdoorToolText.includes("history_count"), "get_outdoor_air_quality should include history_count");
 
-    console.log("[PASS] 4. MCP get_outdoor_air_quality tool & get_latest_reading outdoor_comparison");
+    // 4d. MCP get_ventilation_forecast returns energy tax & next_best_window
+    const forecastToolRes = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "get_ventilation_forecast", arguments: {} },
+      }),
+    });
+    assert.equal(forecastToolRes.status, 200);
+    const forecastToolText = await forecastToolRes.text();
+    assert.ok(forecastToolText.includes("next_best_window"), "get_ventilation_forecast should include next_best_window");
+    assert.ok(forecastToolText.includes("current_energy_tax"), "get_ventilation_forecast should include current_energy_tax");
+
+    console.log("[PASS] 4. MCP get_outdoor_air_quality, get_ventilation_forecast & get_latest_reading outdoor_comparison");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -471,6 +732,7 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
       ]),
     ],
     [OUTDOOR_READINGS_COLLECTION, new Map()],
+    [OUTDOOR_FORECASTS_COLLECTION, new Map()],
   ]);
 
   let readCount = 0;
@@ -581,6 +843,13 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
             weather_code: 2,
             wind_speed_10m: 7.4,
           },
+          hourly: {
+            time: ["2026-11-24T18:00", "2026-11-24T19:00"],
+            temperature_2m: [17.0, 16.5],
+            relative_humidity_2m: [50, 52],
+            wind_speed_10m: [6.0, 5.0],
+            weather_code: [1, 0],
+          },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -588,6 +857,11 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
     return new Response(
       JSON.stringify({
         current: { pm2_5: 7.2, pm10: 14.0, us_aqi: 34, ozone: 48.0, nitrogen_dioxide: 9.5 },
+        hourly: {
+          time: ["2026-11-24T18:00", "2026-11-24T19:00"],
+          pm2_5: [5.5, 5.0],
+          us_aqi: [24, 21],
+        },
       }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -628,11 +902,15 @@ async function testConcurrentOutdoorSyncCoalescing(): Promise<void> {
   assert.equal(fetchCalls, 4);
   assert.equal(store.get(OUTDOOR_READINGS_COLLECTION)?.size, 2);
 
-  // Verify outdoor_daily_rollups received both synced snapshots
+  // Verify outdoor_daily_rollups and outdoor_forecasts/home received synced snapshots
   const rollupDoc = store.get(OUTDOOR_DAILY_ROLLUPS_COLLECTION)?.get("2026-11-24");
   assert.ok(rollupDoc, "Expected outdoor_daily_rollups/2026-11-24 to be populated");
   const decodedRollups = decodeOutdoorRollupDoc(rollupDoc);
   assert.equal(decodedRollups.length, 2);
+
+  const forecastDoc = store.get(OUTDOOR_FORECASTS_COLLECTION)?.get(HOME_OUTDOOR_FORECAST_ID);
+  assert.ok(forecastDoc, "Expected outdoor_forecasts/home to be populated");
+  assert.equal((forecastDoc.hours as unknown[]).length, 2);
 
   // Verify includeReading: false performs only 1 Firestore read on cached_fresh trigger hit
   const readsBeforeCached = readCount;

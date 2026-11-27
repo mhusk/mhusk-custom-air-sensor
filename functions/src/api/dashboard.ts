@@ -22,6 +22,7 @@ import {
   updateDeviceConfig,
 } from "../services/firestore.js";
 import {
+  getLatestOutdoorForecast,
   getLatestOutdoorReading,
   getOutdoorReadingsHistory,
   getSiteLocationConfig,
@@ -32,7 +33,11 @@ import { parseQueryParams, sendJson } from "./http.js";
 import { handleMeRoute, handlePublicAuthRoutes, resolveActorLabel } from "./routes/auth.js";
 import { handleDeviceActionRoute, matchDeviceConfigRoute } from "./routes/devices.js";
 import { handleFirmwareReleasesRoute, handleFirmwareRolloutRoute } from "./routes/firmware.js";
-import { handleOutdoorRefreshRoute, handleSiteConfigRoute } from "./routes/outdoor.js";
+import {
+  handleOutdoorForecastRoute,
+  handleOutdoorRefreshRoute,
+  handleSiteConfigRoute,
+} from "./routes/outdoor.js";
 import {
   computeOtaRolloutStatus,
   handleOverviewRoute,
@@ -92,6 +97,7 @@ export function createFirestoreDashboardService(
     updateSiteLocationConfig: (input, updatedBy) =>
       updateSiteLocationConfig(input, updatedBy, db),
     getLatestOutdoorReading: () => getLatestOutdoorReading(db),
+    getLatestOutdoorForecast: () => getLatestOutdoorForecast(db),
     getOutdoorReadingsHistory: (hours, limit, opts) =>
       getOutdoorReadingsHistory(hours, limit, db, new Date(), opts),
     syncOutdoorReadingIfStale: (opts) => syncOutdoorReadingIfStale({ ...opts, db }),
@@ -196,6 +202,17 @@ export async function handleDashboardApiRequest(
 
     if (pathname === "/api/outdoor/refresh") {
       await handleOutdoorRefreshRoute(res, { pathname, method, service, cache });
+      return;
+    }
+
+    if (pathname === "/api/outdoor/forecast") {
+      await handleOutdoorForecastRoute(res, {
+        pathname,
+        method,
+        service,
+        cache,
+        bypassCache,
+      });
       return;
     }
 

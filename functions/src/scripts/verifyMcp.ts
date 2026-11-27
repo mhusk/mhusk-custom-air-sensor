@@ -120,6 +120,7 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
       "get_outdoor_air_quality",
       "get_readings_history",
       "get_sensor_status",
+      "get_ventilation_forecast",
     ]);
     console.log(`   [PASS] tools/list -> ${toolNames.join(", ")}`);
 
@@ -227,6 +228,36 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
     assert.ok(statusPayload.device_count >= 1);
     console.log(
       `   [PASS] tools/call get_sensor_status -> devices=${statusPayload.device_count} (${statusPayload.devices[0].device_id}: ${statusPayload.devices[0].status})`
+    );
+
+    // 7b. tools/call: get_ventilation_forecast
+    const forecastRes = await postMcp(
+      baseUrl,
+      {
+        jsonrpc: "2.0",
+        id: 61,
+        method: "tools/call",
+        params: {
+          name: "get_ventilation_forecast",
+          arguments: {},
+        },
+      },
+      bearerSecret
+    );
+    assert.equal(forecastRes.status, 200);
+    const forecastContent = (forecastRes.body.result?.content as Array<{ text: string }>) ?? [];
+    const forecastPayload = JSON.parse(forecastContent[0].text) as {
+      found: boolean;
+      current_energy_tax?: { tier: string } | null;
+      next_best_window?: { best_tax_tier: string } | null;
+    };
+    if (!isLive) {
+      assert.equal(forecastPayload.found, true);
+      assert.ok(forecastPayload.current_energy_tax?.tier);
+      assert.ok(forecastPayload.next_best_window?.best_tax_tier);
+    }
+    console.log(
+      `   [PASS] tools/call get_ventilation_forecast -> found=${forecastPayload.found}`
     );
 
     // 8. prompts/list & prompts/get

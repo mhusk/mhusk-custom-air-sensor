@@ -12,6 +12,10 @@ import {
   type AirQualityReading,
   type DeviceStatus,
 } from "../services/firestore.js";
+import {
+  computeDewPointF,
+  type OutdoorForecastHour,
+} from "../services/outdoor.js";
 import { handleStatelessMcpHttpRequest } from "../mcp/server.js";
 import type { AirQualityDataService } from "../mcp/tools.js";
 import { resolveProjectId } from "./projectId.js";
@@ -212,6 +216,66 @@ export function createMockAirQualityService(): AirQualityDataService {
         online_count: devices.length,
         stale_or_offline_count: 0,
         devices,
+      };
+    },
+    async getLatestOutdoorReading() {
+      return {
+        reading: {
+          id: "mock_outdoor_latest",
+          timestamp: now.toISOString(),
+          location_label: "Home Outdoor",
+          latitude: 37.7749,
+          longitude: -122.4194,
+          source: "open-meteo",
+          temperature_c: 18.0,
+          temperature_f: 64.4,
+          apparent_temperature_f: 63.0,
+          humidity_percent: 52.0,
+          wind_speed_mph: 6.2,
+          weather_code: 1,
+          weather_description: "Mainly clear",
+          pm2_5_ug_m3: 6.4,
+          pm10_0_ug_m3: 11.2,
+          us_aqi: 29,
+          us_aqi_category: "Good",
+          ozone_ug_m3: 44.0,
+          nitrogen_dioxide_ug_m3: 8.1,
+        },
+        minutes_ago: 4.0,
+        is_stale: false,
+      };
+    },
+    async getLatestOutdoorForecast() {
+      const hours: OutdoorForecastHour[] = Array.from({ length: 6 }, (_, idx) => {
+        const ts = new Date(now.getTime() + (idx + 1) * 3600 * 1000).toISOString();
+        const tempC = 17.5 + idx * 0.5;
+        const tempF = Math.round(((tempC * 9) / 5 + 32) * 10) / 10;
+        const rh = 50 + idx;
+        return {
+          timestamp: ts,
+          temperature_c: tempC,
+          temperature_f: tempF,
+          humidity_percent: rh,
+          dew_point_f: computeDewPointF(tempF, rh),
+          wind_speed_mph: 5.5,
+          weather_code: 1,
+          weather_description: "Mainly clear",
+          pm2_5_ug_m3: 6.0,
+          us_aqi: 26,
+          us_aqi_category: "Good",
+        };
+      });
+      return {
+        forecast: {
+          fetched_at: now.toISOString(),
+          location_label: "Home Outdoor",
+          latitude: 37.7749,
+          longitude: -122.4194,
+          source: "open-meteo",
+          hours,
+        },
+        minutes_ago: 4.0,
+        is_stale: false,
       };
     },
   };

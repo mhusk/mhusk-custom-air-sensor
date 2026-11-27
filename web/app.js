@@ -623,10 +623,55 @@ function describeWindowRecommendation(rec) {
   if (rec === "open_recommended") {
     return { label: "Open window recommended", tone: "good" };
   }
+  if (rec === "open_brief_purge") {
+    return { label: "Brief purge only", tone: "warn" };
+  }
   if (rec === "keep_closed") {
     return { label: "Keep windows closed", tone: "warn" };
   }
   return { label: "Ventilation neutral", tone: "neutral" };
+}
+
+function describeEnergyTax(tax) {
+  if (!tax || !tax.tier) return null;
+  if (tax.tier === "free") {
+    return { label: "Free ventilation", tone: "good" };
+  }
+  if (tax.tier === "low") {
+    return { label: "Low energy tax", tone: "info" };
+  }
+  if (tax.tier === "moderate") {
+    return { label: "Moderate energy tax", tone: "warn" };
+  }
+  return { label: "High energy tax", tone: "danger" };
+}
+
+function computeOutdoorDewPointF(tempF, humidityPercent) {
+  if (!Number.isFinite(tempF) || !Number.isFinite(humidityPercent)) return null;
+  const tempC = ((tempF - 32) * 5) / 9;
+  const rh = Math.max(1, Math.min(100, humidityPercent));
+  const a = 17.625;
+  const b = 243.04;
+  const gamma = Math.log(rh / 100) + (a * tempC) / (b + tempC);
+  const dpC = (b * gamma) / (a - gamma);
+  return Math.round(((dpC * 9) / 5 + 32) * 10) / 10;
+}
+
+function formatLocalHourRange(startIso, endIso) {
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "—";
+  const sameDay =
+    start.getFullYear() === end.getFullYear() &&
+    start.getMonth() === end.getMonth() &&
+    start.getDate() === end.getDate();
+  const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  const dayTimeFmt = new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${dayTimeFmt.format(start)} – ${sameDay ? timeFmt.format(end) : dayTimeFmt.format(end)}`;
 }
 
 function renderOutdoorCard() {
@@ -772,10 +817,45 @@ function renderOutdoorCard() {
         "Outdoor RH",
         `${Math.round(r.humidity_percent)}%`,
         "RH",
-        r.wind_speed_mph !== null ? `Wind ${Number(r.wind_speed_mph).toFixed(1)} mph` : r.weather_description
+        (() => {
+          const dpF = computeOutdoorDewPointF(Number(r.temperature_f), Number(r.humidity_percent));
+          const dpText = dpF !== null ? `Dew pt ${dpF.toFixed(1)}°F` : null;
+          const windText =
+            r.wind_speed_mph !== null ? `Wind ${Number(r.wind_speed_mph).toFixed(1)} mph` : null;
+          return [dpText, windText].filter(Boolean).join(" · ") || r.weather_description;
+        })()
       )
     );
     card.append(grid);
+  }
+
+  const forecast = overview.ventilation_forecast ?? null;
+  if (forecast && (forecast.next_best_window || forecast.lowest_tax_fallback_hour)) {
+    const strip = document.createElement("div");
+    strip.className = "forecast-strip";
+
+    if (forecast.next_best_window) {
+      const win = forecast.next_best_window;
+      const tierLabel = win.best_tax_tier === "free" ? "Free" : "Low-tax";
+      strip.append(
+        createPill(`Next ${tierLabel} Window`, win.best_tax_tier === "free" ? "good" : "info")
+      );
+      const copy = document.createElement("span");
+      copy.className = "forecast-strip__text";
+      const aqiPart = win.max_us_aqi !== null ? `, AQI ${win.max_us_aqi}` : "";
+      copy.textContent = `${formatLocalHourRange(win.start_time, win.end_time)} (${win.duration_hours}h) · ~${Number(win.avg_temp_f).toFixed(1)}°F, Dew pt ${Number(win.avg_dew_point_f).toFixed(1)}°F${aqiPart}`;
+      strip.append(copy);
+    } else if (forecast.lowest_tax_fallback_hour) {
+      const fb = forecast.lowest_tax_fallback_hour;
+      strip.append(createPill("No free window (24h)", "warn"));
+      const copy = document.createElement("span");
+      copy.className = "forecast-strip__text";
+      const fbTime = formatLocalTimestamp(fb.timestamp);
+      copy.textContent = `Lowest-tax hour: ${fbTime} · ${Number(fb.temperature_f).toFixed(1)}°F, Dew pt ${Number(fb.dew_point_f).toFixed(1)}°F (${fb.energy_tax.tier} tax)`;
+      strip.append(copy);
+    }
+
+    card.append(strip);
   }
 
   els.outdoorCardSlot.append(card);
@@ -950,6 +1030,9 @@ function renderDeviceCards() {
         formatSignedDelta(d.humidity_diff_percent, "% RH", 0)
           ? `RH ${formatSignedDelta(d.humidity_diff_percent, "%", 0)}`
           : null,
+        d.energy_tax && formatSignedDelta(d.energy_tax.dew_point_delta_f, "°F", 1)
+          ? `Dew pt ${formatSignedDelta(d.energy_tax.dew_point_delta_f, "°F", 1)}`
+          : null,
         d.pm2_5_diff_ug_m3 !== null
           ? `PM2.5 ${formatSignedDelta(d.pm2_5_diff_ug_m3, " µg/m³", 1)}`
           : null,
@@ -965,8 +1048,15 @@ function renderDeviceCards() {
         metricsWrap.append(span);
       }
 
+      const pillsWrap = document.createElement("div");
+      pillsWrap.className = "delta-strip__pills";
+      const taxMeta = describeEnergyTax(d.energy_tax);
+      if (taxMeta) {
+        pillsWrap.append(createPill(taxMeta.label, taxMeta.tone));
+      }
       const recMeta = describeWindowRecommendation(d.window_recommendation);
-      row.append(metricsWrap, createPill(recMeta.label, recMeta.tone));
+      pillsWrap.append(createPill(recMeta.label, recMeta.tone));
+      row.append(metricsWrap, pillsWrap);
       strip.append(row);
 
       if (d.window_reason) {

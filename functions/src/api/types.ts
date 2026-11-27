@@ -27,6 +27,7 @@ import type {
 } from "../services/firestore.js";
 import type {
   IndoorOutdoorDelta,
+  LatestOutdoorForecastResult,
   LatestOutdoorReadingResult,
   OutdoorReading,
   SiteLocationConfig,
@@ -68,6 +69,7 @@ export interface DashboardDataService {
     updatedBy: string
   ) => Promise<SiteLocationConfig>;
   getLatestOutdoorReading?: () => Promise<LatestOutdoorReadingResult | null>;
+  getLatestOutdoorForecast?: () => Promise<LatestOutdoorForecastResult | null>;
   getOutdoorReadingsHistory?: (
     hours?: number,
     limit?: number,

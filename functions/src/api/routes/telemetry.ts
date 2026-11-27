@@ -10,7 +10,11 @@ import {
   type ReadingsHistoryResult,
   type SummaryPeriod,
 } from "../../services/firestore.js";
-import { computeIndoorOutdoorDelta, type OutdoorReading } from "../../services/outdoor.js";
+import {
+  computeIndoorOutdoorDelta,
+  findBestVentilationWindows,
+  type OutdoorReading,
+} from "../../services/outdoor.js";
 import {
   HISTORY_CACHE_TTL_MS,
   OVERVIEW_CACHE_TTL_MS,
@@ -114,12 +118,15 @@ export async function handleOverviewRoute(
     }
   }
 
-  const [statusResult, configMap, siteConfig, outdoorLatest] = await Promise.all([
+  const [statusResult, configMap, siteConfig, outdoorLatest, outdoorForecast] = await Promise.all([
     service.getSensorStatus(),
     service.listDeviceConfigs(),
     service.getSiteLocationConfig ? service.getSiteLocationConfig() : Promise.resolve(null),
     service.getLatestOutdoorReading
       ? service.getLatestOutdoorReading()
+      : Promise.resolve(null),
+    service.getLatestOutdoorForecast
+      ? service.getLatestOutdoorForecast()
       : Promise.resolve(null),
   ]);
 
@@ -139,6 +146,33 @@ export async function handleOverviewRoute(
     };
   });
 
+  const baselineDevice = statusResult.devices.find((d) => d.latest_reading !== null);
+  const indoorBaseline = baselineDevice?.latest_reading
+    ? {
+        temperature_f: baselineDevice.latest_reading.temperature_f,
+        humidity_percent: baselineDevice.latest_reading.humidity_percent,
+      }
+    : { temperature_f: 70.0, humidity_percent: 45.0 };
+
+  let ventilationForecast: {
+    fetched_at: string;
+    is_stale: boolean;
+    next_best_window: ReturnType<typeof findBestVentilationWindows>["next_best_window"];
+    lowest_tax_fallback_hour: ReturnType<
+      typeof findBestVentilationWindows
+    >["lowest_tax_fallback_hour"];
+  } | null = null;
+
+  if (outdoorForecast) {
+    const analysis = findBestVentilationWindows(indoorBaseline, outdoorForecast.forecast);
+    ventilationForecast = {
+      fetched_at: outdoorForecast.forecast.fetched_at,
+      is_stale: outdoorForecast.is_stale,
+      next_best_window: analysis.next_best_window,
+      lowest_tax_fallback_hour: analysis.lowest_tax_fallback_hour,
+    };
+  }
+
   const payload = {
     checked_at: statusResult.checked_at,
     stale_threshold_minutes: statusResult.stale_threshold_minutes,
@@ -148,6 +182,7 @@ export async function handleOverviewRoute(
     devices: items,
     site_config: siteConfig,
     outdoor_latest: outdoorLatest,
+    ventilation_forecast: ventilationForecast,
   };
   cacheOpts.cache?.set(cacheKey, payload, OVERVIEW_CACHE_TTL_MS);
   sendJson(res, 200, payload);

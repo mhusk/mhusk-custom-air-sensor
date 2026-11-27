@@ -24,9 +24,13 @@ import {
 } from "../services/firestore.js";
 import {
   computeIndoorOutdoorDelta,
+  computeVentilationEnergyTax,
+  findBestVentilationWindows,
+  getLatestOutdoorForecast,
   getLatestOutdoorReading,
   getOutdoorReadingsHistory,
   syncOutdoorReadingIfStale,
+  type LatestOutdoorForecastResult,
   type LatestOutdoorReadingResult,
   type OutdoorReading,
 } from "../services/outdoor.js";
@@ -41,6 +45,7 @@ export interface AirQualityDataService {
   getAirQualitySummary(options: AirQualitySummaryOptions): Promise<AirQualitySummaryResult>;
   getSensorStatus(options?: SensorStatusOptions): Promise<SensorStatusResult>;
   getLatestOutdoorReading?: () => Promise<LatestOutdoorReadingResult | null>;
+  getLatestOutdoorForecast?: () => Promise<LatestOutdoorForecastResult | null>;
   getOutdoorReadingsHistory?: (hours?: number, limit?: number) => Promise<OutdoorReading[]>;
   syncOutdoorReadingIfStale?: (options?: { force?: boolean }) => Promise<{
     synced: boolean;
@@ -60,6 +65,7 @@ export function createFirestoreDataService(db?: Firestore): AirQualityDataServic
     getAirQualitySummary: (options) => getAirQualitySummary(options, resolveDb()),
     getSensorStatus: (options) => getSensorStatus(options, resolveDb()),
     getLatestOutdoorReading: () => getLatestOutdoorReading(resolveDb()),
+    getLatestOutdoorForecast: () => getLatestOutdoorForecast(resolveDb()),
     getOutdoorReadingsHistory: (hours, limit) =>
       getOutdoorReadingsHistory(hours, limit, resolveDb()),
     syncOutdoorReadingIfStale: (options) =>
@@ -366,6 +372,95 @@ export function registerAirQualityTools(
         });
       } catch (error) {
         return errorToolResult("get_outdoor_air_quality", error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "get_ventilation_forecast",
+    {
+      title: "Get Energy-Aware Ventilation Forecast",
+      description:
+        "Evaluates the current heating/cooling/dehumidification energy tax of opening a window (using dew point and moist-air enthalpy) and scans the cached 24-hour Open-Meteo hourly weather + AQI forecast to find the next clean, low-energy-tax ventilation window.",
+      inputSchema: {
+        device_id: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Optional indoor sensor device ID to use as the indoor temp/RH baseline."),
+        location: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Optional room/location slug to use as the indoor temp/RH baseline."),
+        refresh: z
+          .boolean()
+          .optional()
+          .describe("Optional flag to force a fresh Open-Meteo forecast sync if configured."),
+      },
+      annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    },
+    async ({ device_id, location, refresh }) => {
+      try {
+        if (service.syncOutdoorReadingIfStale && refresh) {
+          await service.syncOutdoorReadingIfStale({ force: true });
+        }
+
+        const [latestIndoor, latestOutdoor, forecastResult] = await Promise.all([
+          service.getLatestReading({ device_id, location }),
+          service.getLatestOutdoorReading
+            ? service.getLatestOutdoorReading().catch(() => null)
+            : Promise.resolve(null),
+          service.getLatestOutdoorForecast
+            ? service.getLatestOutdoorForecast().catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
+        const indoorBaseline = latestIndoor?.reading
+          ? {
+              device_id: latestIndoor.reading.device_id,
+              location: latestIndoor.reading.location,
+              temperature_f: latestIndoor.reading.temperature_f,
+              humidity_percent: latestIndoor.reading.humidity_percent,
+            }
+          : {
+              device_id: null,
+              location: null,
+              temperature_f: 70.0,
+              humidity_percent: 45.0,
+            };
+
+        const currentEnergyTax = latestOutdoor?.reading
+          ? computeVentilationEnergyTax(indoorBaseline, latestOutdoor.reading)
+          : null;
+
+        if (!forecastResult) {
+          return jsonToolResult({
+            found: false,
+            indoor_baseline: indoorBaseline,
+            current_energy_tax: currentEnergyTax,
+            message:
+              "No 24-hour Open-Meteo forecast cached yet. Configure Home Location in the Web Dashboard or trigger an outdoor refresh.",
+          });
+        }
+
+        const analysis = findBestVentilationWindows(indoorBaseline, forecastResult.forecast);
+        return jsonToolResult({
+          found: true,
+          forecast_fetched_at: forecastResult.forecast.fetched_at,
+          minutes_ago: forecastResult.minutes_ago,
+          is_stale: forecastResult.is_stale,
+          indoor_baseline: indoorBaseline,
+          current_energy_tax: currentEnergyTax,
+          next_best_window: analysis.next_best_window,
+          lowest_tax_fallback_hour: analysis.lowest_tax_fallback_hour,
+          windows: analysis.windows,
+          scored_hours: analysis.scored_hours,
+        });
+      } catch (error) {
+        return errorToolResult("get_ventilation_forecast", error);
       }
     }
   );

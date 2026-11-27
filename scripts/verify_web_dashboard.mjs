@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildReadingsHistoryPath } from "../web/api.js";
+import { buildReadingsHistoryPath, fetchOutdoorForecast } from "../web/api.js";
 import { buildAuthorizeUrl, computeCodeChallenge, toBase64Url } from "../web/auth.js";
 import {
   buildSeriesSegments,
@@ -170,6 +170,10 @@ await runCheck("app.js implements 5m chartsCache, lazy Fleet loading, and target
   assert.match(appJs, /async function loadFirmwareReleases\(/);
   assert.match(appJs, /async function refreshOverviewOnly\(/);
   assert.match(appJs, /state\.activeTab === "fleet"[\s\S]*loadFirmwareReleases\(\)/);
+  assert.equal(typeof fetchOutdoorForecast, "function");
+  assert.match(appJs, /function describeEnergyTax\(/);
+  assert.match(appJs, /open_brief_purge/);
+  assert.match(appJs, /forecast-strip/);
 });
 
 console.log(`\nAll ${passed} Step 15 offline checks passed!`);

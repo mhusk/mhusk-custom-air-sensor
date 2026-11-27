@@ -23,11 +23,14 @@ import {
 export const SITE_CONFIGS_COLLECTION = "site_configs";
 export const HOME_SITE_CONFIG_ID = "home";
 export const OUTDOOR_READINGS_COLLECTION = "outdoor_readings";
+export const OUTDOOR_FORECASTS_COLLECTION = "outdoor_forecasts";
+export const HOME_OUTDOOR_FORECAST_ID = "home";
 
 export const DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES = 15;
 export const MIN_OUTDOOR_POLL_INTERVAL_MINUTES = 5;
 export const MAX_OUTDOOR_POLL_INTERVAL_MINUTES = 60;
 export const OUTDOOR_STALE_THRESHOLD_MINUTES = 45;
+export const OUTDOOR_FORECAST_STALE_THRESHOLD_MINUTES = 120;
 export const OUTDOOR_SYNC_LEASE_MS = 60_000;
 export const OPEN_METEO_TIMEOUT_MS = 8000;
 
@@ -76,7 +79,33 @@ export interface LatestOutdoorReadingResult {
   is_stale: boolean;
 }
 
-export type WindowRecommendation = "open_recommended" | "neutral" | "keep_closed";
+export type WindowRecommendation =
+  | "open_recommended"
+  | "open_brief_purge"
+  | "neutral"
+  | "keep_closed";
+
+export type EnergyTaxTier = "free" | "low" | "moderate" | "high";
+
+export type EnergyPenaltyType =
+  | "none"
+  | "cooling"
+  | "heating"
+  | "dehumidification"
+  | "cooling_and_dehumidification";
+
+export interface VentilationEnergyTax {
+  tier: EnergyTaxTier;
+  sensible_delta_f: number;
+  dew_point_indoor_f: number;
+  dew_point_outdoor_f: number;
+  dew_point_delta_f: number;
+  indoor_enthalpy_kj_kg: number;
+  outdoor_enthalpy_kj_kg: number;
+  enthalpy_delta_kj_kg: number;
+  primary_penalty: EnergyPenaltyType;
+  summary: string;
+}
 
 export interface IndoorOutdoorDelta {
   temperature_diff_f: number;
@@ -86,6 +115,59 @@ export interface IndoorOutdoorDelta {
   aqi_diff: number | null;
   window_recommendation: WindowRecommendation;
   window_reason: string;
+  energy_tax: VentilationEnergyTax;
+}
+
+export interface OutdoorForecastHour {
+  timestamp: string;
+  temperature_c: number;
+  temperature_f: number;
+  humidity_percent: number;
+  dew_point_f: number;
+  wind_speed_mph: number | null;
+  weather_code: number | null;
+  weather_description: string;
+  pm2_5_ug_m3: number | null;
+  us_aqi: number | null;
+  us_aqi_category: AqiCategory | null;
+}
+
+export interface OutdoorForecast {
+  fetched_at: string;
+  location_label: string;
+  latitude: number;
+  longitude: number;
+  source: "open-meteo";
+  hours: OutdoorForecastHour[];
+}
+
+export interface LatestOutdoorForecastResult {
+  forecast: OutdoorForecast;
+  minutes_ago: number;
+  is_stale: boolean;
+}
+
+export interface ScoredForecastHour extends OutdoorForecastHour {
+  is_clean_air: boolean;
+  energy_tax: VentilationEnergyTax;
+}
+
+export interface VentilationWindow {
+  start_time: string;
+  end_time: string;
+  duration_hours: number;
+  best_tax_tier: "free" | "low";
+  avg_temp_f: number;
+  avg_dew_point_f: number;
+  max_us_aqi: number | null;
+  reason: string;
+}
+
+export interface VentilationForecastAnalysis {
+  next_best_window: VentilationWindow | null;
+  lowest_tax_fallback_hour: ScoredForecastHour | null;
+  windows: VentilationWindow[];
+  scored_hours: ScoredForecastHour[];
 }
 
 export interface OpenMeteoFetchDependencies {
@@ -164,9 +246,157 @@ export function describeWmoWeatherCode(code: number | null): string {
 }
 
 /**
- * Computes indoor-minus-outdoor deltas and an actionable window ventilation
- * recommendation. Positive temperature/humidity deltas mean indoors is warmer
- * or more humid; negative PM2.5/AQI deltas mean indoors is cleaner.
+ * Computes dew point (°C) via the Magnus-Tetens approximation (Alduchov & Eskridge).
+ */
+export function computeDewPointC(
+  tempC: number,
+  relativeHumidityPercent: number
+): number {
+  const rh = Math.max(1, Math.min(100, relativeHumidityPercent));
+  const a = 17.625;
+  const b = 243.04;
+  const gamma = Math.log(rh / 100) + (a * tempC) / (b + tempC);
+  return (b * gamma) / (a - gamma);
+}
+
+/**
+ * Computes dew point (°F) rounded to 1 decimal place.
+ */
+export function computeDewPointF(
+  tempF: number,
+  relativeHumidityPercent: number
+): number {
+  const tempC = ((tempF - 32) * 5) / 9;
+  const dpC = computeDewPointC(tempC, relativeHumidityPercent);
+  return roundTo((dpC * 9) / 5 + 32, 1);
+}
+
+/**
+ * Computes moist-air specific enthalpy (kJ/kg dry air) per ASHRAE standard psychrometrics.
+ */
+export function computeMoistAirEnthalpyKjKg(
+  tempC: number,
+  relativeHumidityPercent: number,
+  pressureKpa = 101.325
+): number {
+  const rh = Math.max(0, Math.min(100, relativeHumidityPercent));
+  const pSatKpa = 0.61094 * Math.exp((17.625 * tempC) / (tempC + 243.04));
+  const pVapKpa = Math.min(pressureKpa * 0.99, (rh / 100) * pSatKpa);
+  const humidityRatio = (0.62198 * pVapKpa) / Math.max(0.1, pressureKpa - pVapKpa);
+  const enthalpy = 1.006 * tempC + humidityRatio * (2501 + 1.86 * tempC);
+  return roundTo(enthalpy, 1);
+}
+
+/**
+ * Quantifies the sensible (temperature) and latent (moisture/dew-point) HVAC energy
+ * penalty of exchanging indoor air with outdoor air.
+ */
+export function computeVentilationEnergyTax(
+  indoor: { temperature_f: number; humidity_percent: number },
+  outdoor: { temperature_f: number; humidity_percent: number }
+): VentilationEnergyTax {
+  const sensibleDeltaF = roundTo(outdoor.temperature_f - indoor.temperature_f, 1);
+  const indoorTempC = ((indoor.temperature_f - 32) * 5) / 9;
+  const outdoorTempC = ((outdoor.temperature_f - 32) * 5) / 9;
+
+  const dewPointIndoorF = computeDewPointF(indoor.temperature_f, indoor.humidity_percent);
+  const dewPointOutdoorF = computeDewPointF(outdoor.temperature_f, outdoor.humidity_percent);
+  const dewPointDeltaF = roundTo(dewPointOutdoorF - dewPointIndoorF, 1);
+
+  const indoorEnthalpy = computeMoistAirEnthalpyKjKg(indoorTempC, indoor.humidity_percent);
+  const outdoorEnthalpy = computeMoistAirEnthalpyKjKg(outdoorTempC, outdoor.humidity_percent);
+  const enthalpyDelta = roundTo(outdoorEnthalpy - indoorEnthalpy, 1);
+
+  let coolingPenalty = 0;
+  if (sensibleDeltaF > 12 || outdoor.temperature_f >= 84) {
+    coolingPenalty = 3;
+  } else if (sensibleDeltaF > 7 || outdoor.temperature_f >= 80) {
+    coolingPenalty = 2;
+  } else if (sensibleDeltaF > 3 || outdoor.temperature_f >= 77) {
+    coolingPenalty = 1;
+  }
+
+  let heatingPenalty = 0;
+  if (sensibleDeltaF < -28 || outdoor.temperature_f < 40) {
+    heatingPenalty = 3;
+  } else if (sensibleDeltaF < -18 || outdoor.temperature_f < 52) {
+    heatingPenalty = 2;
+  } else if (sensibleDeltaF < -10 || outdoor.temperature_f < 60) {
+    heatingPenalty = 1;
+  }
+
+  let latentPenalty = 0;
+  if (dewPointOutdoorF >= 66 && dewPointDeltaF > 3) {
+    latentPenalty = 3;
+  } else if (dewPointOutdoorF >= 62 && dewPointDeltaF > 3) {
+    latentPenalty = 2;
+  } else if (dewPointOutdoorF >= 58 && dewPointDeltaF > 2) {
+    latentPenalty = 1;
+  }
+
+  let maxPenalty = Math.max(coolingPenalty, heatingPenalty, latentPenalty);
+  if (coolingPenalty >= 1 && latentPenalty >= 2) {
+    maxPenalty = 3;
+  }
+
+  const tier: EnergyTaxTier =
+    maxPenalty === 0
+      ? "free"
+      : maxPenalty === 1
+        ? "low"
+        : maxPenalty === 2
+          ? "moderate"
+          : "high";
+
+  let primaryPenalty: EnergyPenaltyType = "none";
+  if (maxPenalty > 0) {
+    if (coolingPenalty >= 1 && latentPenalty >= 1) {
+      primaryPenalty = "cooling_and_dehumidification";
+    } else if (
+      latentPenalty >= coolingPenalty &&
+      latentPenalty >= heatingPenalty &&
+      latentPenalty > 0
+    ) {
+      primaryPenalty = "dehumidification";
+    } else if (coolingPenalty >= heatingPenalty && coolingPenalty > 0) {
+      primaryPenalty = "cooling";
+    } else {
+      primaryPenalty = "heating";
+    }
+  }
+
+  let summary: string;
+  if (tier === "free") {
+    summary = `Near-free ventilation: outdoor ${outdoor.temperature_f.toFixed(1)}°F (dew pt ${dewPointOutdoorF.toFixed(1)}°F) adds minimal thermal or humidity load.`;
+  } else if (primaryPenalty === "cooling_and_dehumidification") {
+    summary = `${tier} AC + dehumidification tax: outdoor air is ${outdoor.temperature_f.toFixed(1)}°F with ${dewPointOutdoorF.toFixed(1)}°F dew point (${sensibleDeltaF >= 0 ? "+" : ""}${sensibleDeltaF.toFixed(1)}°F, ${dewPointDeltaF >= 0 ? "+" : ""}${dewPointDeltaF.toFixed(1)}°F dew pt).`;
+  } else if (primaryPenalty === "dehumidification") {
+    summary = `${tier} dehumidification tax: outdoor dew point (${dewPointOutdoorF.toFixed(1)}°F) is ${dewPointDeltaF.toFixed(1)}°F higher than indoors (${dewPointIndoorF.toFixed(1)}°F).`;
+  } else if (primaryPenalty === "cooling") {
+    summary = `${tier} cooling tax: outdoor air (${outdoor.temperature_f.toFixed(1)}°F) is ${sensibleDeltaF.toFixed(1)}°F warmer than indoors.`;
+  } else {
+    summary = `${tier} heating tax: outdoor air (${outdoor.temperature_f.toFixed(1)}°F) is ${Math.abs(sensibleDeltaF).toFixed(1)}°F colder than indoors.`;
+  }
+
+  return {
+    tier,
+    sensible_delta_f: sensibleDeltaF,
+    dew_point_indoor_f: dewPointIndoorF,
+    dew_point_outdoor_f: dewPointOutdoorF,
+    dew_point_delta_f: dewPointDeltaF,
+    indoor_enthalpy_kj_kg: indoorEnthalpy,
+    outdoor_enthalpy_kj_kg: outdoorEnthalpy,
+    enthalpy_delta_kj_kg: enthalpyDelta,
+    primary_penalty: primaryPenalty,
+    summary,
+  };
+}
+
+/**
+ * Computes indoor-minus-outdoor deltas, psychrometric ventilation energy tax,
+ * and an actionable window ventilation recommendation. Positive temperature/humidity
+ * deltas mean indoors is warmer or more humid; negative PM2.5/AQI deltas mean
+ * indoors is cleaner.
  */
 export function computeIndoorOutdoorDelta(
   indoor: Pick<
@@ -188,6 +418,7 @@ export function computeIndoorOutdoorDelta(
       : null;
   const aqiDiff =
     outdoor.us_aqi !== null ? Math.round(indoor.aqi_us - outdoor.us_aqi) : null;
+  const energyTax = computeVentilationEnergyTax(indoor, outdoor);
 
   let windowRecommendation: WindowRecommendation = "neutral";
   let windowReason =
@@ -206,15 +437,25 @@ export function computeIndoorOutdoorDelta(
     windowReason =
       "Outdoor particulate air quality is elevated; keep windows closed and rely on indoor HEPA filtration.";
   } else if (indoor.co2_ppm > 1000 && outdoorAirClean) {
-    windowRecommendation = "open_recommended";
-    windowReason = `Indoor CO2 is elevated (${Math.round(indoor.co2_ppm)} ppm) while outdoor air is clean — cracking a window will refresh the room.`;
+    if (energyTax.tier === "high") {
+      windowRecommendation = "open_brief_purge";
+      windowReason = `Indoor CO2 is elevated (${Math.round(indoor.co2_ppm)} ppm) and outdoor air is clean, but ${energyTax.summary} Use a brief 3-5 min purge or wait for a lower-tax window.`;
+    } else {
+      windowRecommendation = "open_recommended";
+      windowReason = `Indoor CO2 is elevated (${Math.round(indoor.co2_ppm)} ppm) while outdoor air is clean (${energyTax.tier} energy tax) — cracking a window will refresh the room.`;
+    }
   } else if (
     indoor.pm2_5_ug_m3 > 12.0 &&
     outdoor.pm2_5_ug_m3 !== null &&
     outdoor.pm2_5_ug_m3 + 3.0 < indoor.pm2_5_ug_m3
   ) {
-    windowRecommendation = "open_recommended";
-    windowReason = `Outdoor PM2.5 (${outdoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is noticeably lower than indoors (${indoor.pm2_5_ug_m3.toFixed(1)} ug/m3) — ventilating will help clear indoor particles.`;
+    if (energyTax.tier === "high") {
+      windowRecommendation = "keep_closed";
+      windowReason = `Indoor PM2.5 (${indoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is elevated, but ${energyTax.summary} Run indoor HEPA filtration instead to avoid the energy penalty.`;
+    } else {
+      windowRecommendation = "open_recommended";
+      windowReason = `Outdoor PM2.5 (${outdoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is noticeably lower than indoors (${indoor.pm2_5_ug_m3.toFixed(1)} ug/m3) with ${energyTax.tier} energy tax — ventilating will help clear indoor particles.`;
+    }
   } else if (
     indoor.pm2_5_ug_m3 <= 9.0 &&
     outdoor.pm2_5_ug_m3 !== null &&
@@ -232,6 +473,7 @@ export function computeIndoorOutdoorDelta(
     aqi_diff: aqiDiff,
     window_recommendation: windowRecommendation,
     window_reason: windowReason,
+    energy_tax: energyTax,
   };
 }
 
@@ -353,13 +595,123 @@ function mapOutdoorReadingDoc(doc: QueryDocumentSnapshot<DocumentData>): Outdoor
   };
 }
 
+function normalizeOpenMeteoUtcTimestamp(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const isoCandidate =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(trimmed)
+      ? `${trimmed}:00.000Z`
+      : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(trimmed)
+        ? `${trimmed}.000Z`
+        : trimmed;
+  const parsedMs = Date.parse(isoCandidate);
+  if (!Number.isFinite(parsedMs)) {
+    return null;
+  }
+  return new Date(parsedMs).toISOString();
+}
+
+function parseOpenMeteoHourlyForecast(params: {
+  config: Pick<SiteLocationConfig, "label" | "latitude" | "longitude">;
+  now: Date;
+  weatherHourly?: Record<string, unknown>;
+  airHourly?: Record<string, unknown>;
+}): OutdoorForecast | null {
+  const { config, now, weatherHourly, airHourly } = params;
+  if (!weatherHourly || !Array.isArray(weatherHourly.time)) {
+    return null;
+  }
+
+  const times = weatherHourly.time as unknown[];
+  const temps = Array.isArray(weatherHourly.temperature_2m)
+    ? (weatherHourly.temperature_2m as unknown[])
+    : [];
+  const humidities = Array.isArray(weatherHourly.relative_humidity_2m)
+    ? (weatherHourly.relative_humidity_2m as unknown[])
+    : [];
+  const winds = Array.isArray(weatherHourly.wind_speed_10m)
+    ? (weatherHourly.wind_speed_10m as unknown[])
+    : [];
+  const codes = Array.isArray(weatherHourly.weather_code)
+    ? (weatherHourly.weather_code as unknown[])
+    : [];
+
+  const airByIso = new Map<string, { pm2_5: number | null; us_aqi: number | null }>();
+  if (airHourly && Array.isArray(airHourly.time)) {
+    const airTimes = airHourly.time as unknown[];
+    const airPm25 = Array.isArray(airHourly.pm2_5) ? (airHourly.pm2_5 as unknown[]) : [];
+    const airAqi = Array.isArray(airHourly.us_aqi) ? (airHourly.us_aqi as unknown[]) : [];
+    for (let i = 0; i < airTimes.length; i += 1) {
+      const iso = normalizeOpenMeteoUtcTimestamp(airTimes[i]);
+      if (!iso) continue;
+      const pm25Val = toNumberOrNull(airPm25[i]);
+      const aqiVal = toNumberOrNull(airAqi[i]);
+      airByIso.set(iso, {
+        pm2_5: pm25Val !== null ? roundTo(pm25Val, 1) : null,
+        us_aqi: aqiVal !== null ? Math.round(aqiVal) : null,
+      });
+    }
+  }
+
+  const hours: OutdoorForecastHour[] = [];
+  for (let i = 0; i < times.length && hours.length < 24; i += 1) {
+    const iso = normalizeOpenMeteoUtcTimestamp(times[i]);
+    const tempC = toNumberOrNull(temps[i]);
+    const rh = toNumberOrNull(humidities[i]);
+    if (!iso || tempC === null || rh === null) {
+      continue;
+    }
+    const tempF = roundTo((tempC * 9) / 5 + 32, 1);
+    const windMph = toNumberOrNull(winds[i]);
+    const wCode = toNumberOrNull(codes[i]);
+    const aq = airByIso.get(iso);
+    const usAqi = aq?.us_aqi ?? null;
+
+    hours.push({
+      timestamp: iso,
+      temperature_c: roundTo(tempC, 2),
+      temperature_f: tempF,
+      humidity_percent: roundTo(rh, 1),
+      dew_point_f: computeDewPointF(tempF, rh),
+      wind_speed_mph: windMph !== null ? roundTo(windMph, 1) : null,
+      weather_code: wCode !== null ? Math.round(wCode) : null,
+      weather_description: describeWmoWeatherCode(wCode),
+      pm2_5_ug_m3: aq?.pm2_5 ?? null,
+      us_aqi: usAqi,
+      us_aqi_category: mapUsAqiCategory(usAqi),
+    });
+  }
+
+  if (hours.length === 0) {
+    return null;
+  }
+
+  return {
+    fetched_at: now.toISOString(),
+    location_label: config.label,
+    latitude: roundTo(config.latitude, 5),
+    longitude: roundTo(config.longitude, 5),
+    source: "open-meteo",
+    hours,
+  };
+}
+
 /**
- * Fetches current weather and air quality conditions from Open-Meteo (free, no API key).
+ * Fetches current outdoor weather & air quality plus a 24-hour hourly forecast
+ * from Open-Meteo (free, no API key) in two parallel requests.
  */
-export async function fetchOpenMeteoSnapshot(
+export async function fetchOpenMeteoSnapshotWithForecast(
   config: Pick<SiteLocationConfig, "label" | "latitude" | "longitude">,
   deps: OpenMeteoFetchDependencies = {}
-): Promise<Omit<OutdoorReading, "id">> {
+): Promise<{
+  reading: Omit<OutdoorReading, "id">;
+  forecast: OutdoorForecast | null;
+}> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = deps.now ? deps.now() : new Date();
 
@@ -370,6 +722,11 @@ export async function fetchOpenMeteoSnapshot(
     "current",
     "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m"
   );
+  weatherUrl.searchParams.set(
+    "hourly",
+    "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code"
+  );
+  weatherUrl.searchParams.set("forecast_hours", "24");
   weatherUrl.searchParams.set("temperature_unit", "celsius");
   weatherUrl.searchParams.set("wind_speed_unit", "mph");
   weatherUrl.searchParams.set("timezone", "UTC");
@@ -378,6 +735,8 @@ export async function fetchOpenMeteoSnapshot(
   airUrl.searchParams.set("latitude", String(config.latitude));
   airUrl.searchParams.set("longitude", String(config.longitude));
   airUrl.searchParams.set("current", "pm2_5,pm10,us_aqi,ozone,nitrogen_dioxide");
+  airUrl.searchParams.set("hourly", "pm2_5,us_aqi");
+  airUrl.searchParams.set("forecast_hours", "24");
   airUrl.searchParams.set("timezone", "UTC");
 
   const [weatherRes, airRes] = await Promise.all([
@@ -396,6 +755,7 @@ export async function fetchOpenMeteoSnapshot(
   }
   const weatherJson = (await weatherRes.json()) as {
     current?: Record<string, unknown>;
+    hourly?: Record<string, unknown>;
   };
   const weatherCurrent = weatherJson.current;
   if (!weatherCurrent) {
@@ -420,11 +780,14 @@ export async function fetchOpenMeteoSnapshot(
   let usAqi: number | null = null;
   let ozone: number | null = null;
   let no2: number | null = null;
+  let airHourly: Record<string, unknown> | undefined;
 
   if (airRes.ok) {
     const airJson = (await airRes.json()) as {
       current?: Record<string, unknown>;
+      hourly?: Record<string, unknown>;
     };
+    airHourly = airJson.hourly;
     const airCurrent = airJson.current;
     if (airCurrent) {
       const rawPm25 = toNumberOrNull(airCurrent.pm2_5);
@@ -441,7 +804,7 @@ export async function fetchOpenMeteoSnapshot(
     }
   }
 
-  return {
+  const reading: Omit<OutdoorReading, "id"> = {
     timestamp: now.toISOString(),
     location_label: config.label,
     latitude: roundTo(config.latitude, 5),
@@ -461,6 +824,26 @@ export async function fetchOpenMeteoSnapshot(
     ozone_ug_m3: ozone,
     nitrogen_dioxide_ug_m3: no2,
   };
+
+  const forecast = parseOpenMeteoHourlyForecast({
+    config,
+    now,
+    weatherHourly: weatherJson.hourly,
+    airHourly,
+  });
+
+  return { reading, forecast };
+}
+
+/**
+ * Fetches current weather and air quality conditions from Open-Meteo (free, no API key).
+ */
+export async function fetchOpenMeteoSnapshot(
+  config: Pick<SiteLocationConfig, "label" | "latitude" | "longitude">,
+  deps: OpenMeteoFetchDependencies = {}
+): Promise<Omit<OutdoorReading, "id">> {
+  const { reading } = await fetchOpenMeteoSnapshotWithForecast(config, deps);
+  return reading;
 }
 
 export async function getSiteLocationConfig(
@@ -774,7 +1157,10 @@ export async function syncOutdoorReadingIfStale(
     }
   }
 
-  const snapshot = await fetchOpenMeteoSnapshot(siteConfig, options.deps);
+  const { reading: snapshot, forecast } = await fetchOpenMeteoSnapshotWithForecast(
+    siteConfig,
+    options.deps
+  );
   const docId = buildOutdoorReadingDocId(
     now,
     siteConfig.outdoor_poll_interval_minutes,
@@ -789,15 +1175,232 @@ export async function syncOutdoorReadingIfStale(
     ...snapshot,
   };
 
-  await Promise.all([
+  const writes: Array<Promise<unknown>> = [
     db.collection(OUTDOOR_READINGS_COLLECTION).doc(docId).set(writeData),
     siteRef.set({ outdoor_last_synced_at: Timestamp.fromDate(now) }, { merge: true }),
     appendOutdoorRollupSample(fullReading, db),
-  ]);
+  ];
+
+  if (forecast && forecast.hours.length > 0) {
+    writes.push(
+      db
+        .collection(OUTDOOR_FORECASTS_COLLECTION)
+        .doc(HOME_OUTDOOR_FORECAST_ID)
+        .set({
+          ...forecast,
+          fetched_at: Timestamp.fromDate(new Date(forecast.fetched_at)),
+        })
+    );
+  }
+
+  await Promise.all(writes);
 
   return {
     synced: true,
     reason: force ? "forced_refresh" : "cache_expired",
     reading: fullReading,
+  };
+}
+
+/**
+ * Reads the cached 24-hour Open-Meteo forecast document (`outdoor_forecasts/home`).
+ */
+export async function getLatestOutdoorForecast(
+  db: Firestore = getDb(),
+  now: Date = new Date()
+): Promise<LatestOutdoorForecastResult | null> {
+  const snap = await db
+    .collection(OUTDOOR_FORECASTS_COLLECTION)
+    .doc(HOME_OUTDOOR_FORECAST_ID)
+    .get();
+  if (!snap.exists) {
+    return null;
+  }
+  const data = snap.data();
+  if (!data || !Array.isArray(data.hours)) {
+    return null;
+  }
+
+  const fetchedAt = parseTimestampToDateOrNull(data.fetched_at);
+  const latitude = toNumberOrNull(data.latitude);
+  const longitude = toNumberOrNull(data.longitude);
+  if (!fetchedAt || latitude === null || longitude === null) {
+    return null;
+  }
+
+  const hours: OutdoorForecastHour[] = [];
+  for (const rawHour of data.hours as unknown[]) {
+    if (!rawHour || typeof rawHour !== "object") continue;
+    const h = rawHour as Record<string, unknown>;
+    const ts = normalizeOpenMeteoUtcTimestamp(h.timestamp);
+    const tempC = toNumberOrNull(h.temperature_c);
+    const tempF = toNumberOrNull(h.temperature_f);
+    const rh = toNumberOrNull(h.humidity_percent);
+    if (!ts || tempC === null || tempF === null || rh === null) {
+      continue;
+    }
+    const dpF = toNumberOrNull(h.dew_point_f);
+    const windMph = toNumberOrNull(h.wind_speed_mph);
+    const wCode = toNumberOrNull(h.weather_code);
+    const pm25 = toNumberOrNull(h.pm2_5_ug_m3);
+    const usAqi = toNumberOrNull(h.us_aqi);
+    const usAqiRounded = usAqi !== null ? Math.round(usAqi) : null;
+
+    hours.push({
+      timestamp: ts,
+      temperature_c: roundTo(tempC, 2),
+      temperature_f: roundTo(tempF, 1),
+      humidity_percent: roundTo(rh, 1),
+      dew_point_f: dpF !== null ? roundTo(dpF, 1) : computeDewPointF(tempF, rh),
+      wind_speed_mph: windMph !== null ? roundTo(windMph, 1) : null,
+      weather_code: wCode !== null ? Math.round(wCode) : null,
+      weather_description:
+        typeof h.weather_description === "string" && h.weather_description.trim().length > 0
+          ? h.weather_description.trim()
+          : describeWmoWeatherCode(wCode),
+      pm2_5_ug_m3: pm25 !== null ? roundTo(pm25, 1) : null,
+      us_aqi: usAqiRounded,
+      us_aqi_category: mapUsAqiCategory(usAqiRounded),
+    });
+  }
+
+  if (hours.length === 0) {
+    return null;
+  }
+
+  const minutesAgo = Math.max(
+    0,
+    roundTo((now.getTime() - fetchedAt.getTime()) / 60_000, 1)
+  );
+  return {
+    forecast: {
+      fetched_at: fetchedAt.toISOString(),
+      location_label:
+        typeof data.location_label === "string" && data.location_label.trim().length > 0
+          ? data.location_label.trim()
+          : "Home Outdoor",
+      latitude: roundTo(latitude, 5),
+      longitude: roundTo(longitude, 5),
+      source: "open-meteo",
+      hours,
+    },
+    minutes_ago: minutesAgo,
+    is_stale: minutesAgo > OUTDOOR_FORECAST_STALE_THRESHOLD_MINUTES,
+  };
+}
+
+function buildVentilationWindowFromSpan(
+  span: ScoredForecastHour[]
+): VentilationWindow {
+  const first = span[0];
+  const last = span[span.length - 1];
+  const endMs = Date.parse(last.timestamp) + 60 * 60_000;
+  const endTime = new Date(endMs).toISOString();
+  const hasFree = span.some((h) => h.energy_tax.tier === "free");
+  const bestTier: "free" | "low" = hasFree ? "free" : "low";
+
+  const avgTempF = roundTo(
+    span.reduce((acc, h) => acc + h.temperature_f, 0) / span.length,
+    1
+  );
+  const avgDewPointF = roundTo(
+    span.reduce((acc, h) => acc + h.dew_point_f, 0) / span.length,
+    1
+  );
+  const aqiValues = span
+    .map((h) => h.us_aqi)
+    .filter((v): v is number => v !== null);
+  const maxUsAqi = aqiValues.length > 0 ? Math.max(...aqiValues) : null;
+
+  const tierLabel = bestTier === "free" ? "Free ventilation" : "Low energy tax";
+  const aqiText = maxUsAqi !== null ? `, max AQI ${maxUsAqi}` : "";
+  const reason = `${tierLabel} window (${span.length}h): ~${avgTempF.toFixed(1)}°F, dew pt ${avgDewPointF.toFixed(1)}°F${aqiText}.`;
+
+  return {
+    start_time: first.timestamp,
+    end_time: endTime,
+    duration_hours: span.length,
+    best_tax_tier: bestTier,
+    avg_temp_f: avgTempF,
+    avg_dew_point_f: avgDewPointF,
+    max_us_aqi: maxUsAqi,
+    reason,
+  };
+}
+
+/**
+ * Scores a 24-hour forecast against the current indoor baseline to identify
+ * contiguous clean, free/low-energy-tax ventilation windows and the best fallback hour.
+ */
+export function findBestVentilationWindows(
+  indoorBaseline: { temperature_f: number; humidity_percent: number },
+  forecast: OutdoorForecast,
+  options: { now?: Date } = {}
+): VentilationForecastAnalysis {
+  const now = options.now ?? new Date();
+  const cutoffMs = now.getTime() - 30 * 60_000;
+
+  const scoredHours: ScoredForecastHour[] = [];
+  for (const hour of forecast.hours) {
+    const tsMs = Date.parse(hour.timestamp);
+    if (!Number.isFinite(tsMs) || tsMs < cutoffMs) {
+      continue;
+    }
+    const isCleanAir =
+      (hour.us_aqi === null || hour.us_aqi <= 80) &&
+      (hour.pm2_5_ug_m3 === null || hour.pm2_5_ug_m3 <= 20.0);
+    const energyTax = computeVentilationEnergyTax(indoorBaseline, hour);
+    scoredHours.push({
+      ...hour,
+      is_clean_air: isCleanAir,
+      energy_tax: energyTax,
+    });
+  }
+
+  const windows: VentilationWindow[] = [];
+  let activeSpan: ScoredForecastHour[] = [];
+  for (const hour of scoredHours) {
+    const qualifies =
+      hour.is_clean_air &&
+      (hour.energy_tax.tier === "free" || hour.energy_tax.tier === "low");
+    const isContiguous =
+      activeSpan.length === 0 ||
+      Date.parse(hour.timestamp) - Date.parse(activeSpan[activeSpan.length - 1].timestamp) <=
+        90 * 60_000;
+
+    if (qualifies && isContiguous) {
+      activeSpan.push(hour);
+    } else {
+      if (activeSpan.length > 0) {
+        windows.push(buildVentilationWindowFromSpan(activeSpan));
+        activeSpan = [];
+      }
+      if (qualifies) {
+        activeSpan.push(hour);
+      }
+    }
+  }
+  if (activeSpan.length > 0) {
+    windows.push(buildVentilationWindowFromSpan(activeSpan));
+  }
+
+  const cleanHours = scoredHours.filter((h) => h.is_clean_air);
+  const candidates = cleanHours.length > 0 ? cleanHours : scoredHours;
+  let lowestTaxFallback: ScoredForecastHour | null = null;
+  for (const h of candidates) {
+    if (
+      !lowestTaxFallback ||
+      Math.abs(h.energy_tax.enthalpy_delta_kj_kg) <
+        Math.abs(lowestTaxFallback.energy_tax.enthalpy_delta_kj_kg)
+    ) {
+      lowestTaxFallback = h;
+    }
+  }
+
+  return {
+    next_best_window: windows[0] ?? null,
+    lowest_tax_fallback_hour: lowestTaxFallback,
+    windows,
+    scored_hours: scoredHours,
   };
 }
