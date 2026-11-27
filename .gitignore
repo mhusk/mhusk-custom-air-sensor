@@ -76,3 +76,10 @@ local_media_raw/
 *.MOV
 *.mp4
 *.MP4
+
+# ============================================================================
+# 7. Local-Only Security & Audit Plans (NEVER COMMIT)
+# ============================================================================
+docs/plans/security/
+docs/plans/*security*.md
+docs/plans/*audit*.md

@@ -17,7 +17,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 3. **Capture Real-World "Good to Know" & Troubleshooting Notes**:
    - Any errors, subtle gotchas, CLI quirks, or insights discovered during validation are immediately documented in a **"Good to Know & Real-World Troubleshooting"** section inside that step's `docs/0X-*.md` file so future readers benefit.
 4. **Commit & Check Off**:
-   - Once validation passes and the docs reflect what we learned, update the checkbox (`[x]`) in this file and make a dedicated git commit for the step.
+   - Once validation passes and the docs reflect what we learned, update the checkbox (`[x]`) in both this file (`IMPLEMENTATION_PLAN.md`) and any active feature plan under `docs/plans/` (per `AGENTS.md`) and make a dedicated git commit for the step.
 
 ---
 
@@ -49,11 +49,26 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 18**: On-Device Pull-Based OTA Updater (Download, Verify, Atomic Swap & Health Check) *(live-verified on ESP32-S3 wall power: wireless `1.3.0` → `1.3.2` upgrade + live tampered SHA-256 rejection)*
 - [x] **Step 19**: Fleet & Firmware Rollout Panel in Web Dashboard *(live-verified on ESP32-S3 wall power: `1.3.2` → `1.3.3` promoted from the web dashboard)*
 
-### Phase 4: Future Horizons *(Multi-Room Fleet & Proactive Intelligence — In Progress)*
+### Phase 4: Multi-Room Fleet, Energy Awareness & Experiments *(In Progress)*
 - [x] **Step 20**: Outdoor Weather & AQI Feed (Open-Meteo Trigger, Dashboard Deltas & Chart Overlays, MCP `get_outdoor_air_quality` + `outdoor_comparison`)
-- [ ] **Multi-Room Sensor Network**: Per-device UID-to-`device_id` isolation in `firestore.rules`, `compare_rooms` MCP tool, optional CO₂-only (`SCD-40`) satellite nodes, and additional 3D-printed enclosures
-- [ ] **Proactive Alerts**: Firestore `onDocumentCreated` push alerts with cooldowns (CO₂ / PM₂.₅ / stale sensor)
-- [ ] **Optional Smart-Home Actuation & VOC/NOₓ Expansion**: Triggering a HEPA air purifier smart plug on PM₂.₅ spikes and adding a Sensirion `SGP41` VOC/NOₓ breakout on STEMMA QT
+- [x] **Step 21**: Firestore Read Optimization & Daily Rollups (`daily_rollups`, `outdoor_daily_rollups`, server/browser TTL caches, backfill CLI; see [docs/plans/2026-11-24-reduce-firestore-reads.md](docs/plans/2026-11-24-reduce-firestore-reads.md) and [docs/13-firestore-read-optimization-and-rollups.md](docs/13-firestore-read-optimization-and-rollups.md))
+- [x] **Step 22**: Visual Showcase, EXIF-Stripped Media Pipeline & Google Flow Hype Video Storyboard (see [docs/plans/2026-11-24-hype-video-and-readme-showcase.md](docs/plans/2026-11-24-hype-video-and-readme-showcase.md) and [docs/12-showcase-and-hype-video.md](docs/12-showcase-and-hype-video.md))
+- [x] **Step 23**: Reliability, Security & Multi-Room Hardening (`v1.3.4` firmware timeouts & 30-bit monotonic safety, Open-Meteo `WriteBatch`, CORS/WorkOS hardening, expanded GitHub Actions CI)
+- [x] **Step 24**: Psychrometric Energy Tax & 24h Open-Meteo Free-Ventilation Forecast (Phase 1 of [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md))
+- [ ] **Step 25** *(In Progress)*: Experiment Logger, Auto-Detected Events & House Physics Playbook (Phase 2 of [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md)):
+  - [x] **Step 25.1 (2.1)**: Core Experiments & House Physics Playbook Service (`b0aedbd`, deployed)
+  - [x] **Step 25.2 (2.2)**: Passive Auto-Detection & Opportunistic Finalizer (`02003bf`, deployed)
+  - [x] **Step 25.3 (2.3)**: Dashboard API Routes & Strict Zod Schemas (`27222e1`, deployed)
+  - [ ] **Step 25.4 (2.4)**: Remote MCP Read/Write Tools & `analyze_indoor_air` Prompt Update
+  - [ ] **Step 25.5 (2.5)**: Web Dashboard Experiments & Playbook UI
+  - [ ] **Step 25.6 (2.6)**: Live Cloud Deploy Gate & Validation Gate 2
+- [ ] **Step 26**: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` (Phase 3 — `SCD-40`-only satellite support + full hubs)
+- [ ] **Step 27**: Multi-Room Whole-House Intelligence (`compare_rooms`, Zero-Energy Internal Dilution Detector & Multi-Room Chart Overlays) (Phase 4)
+- [ ] **Step 28**: Scaling Toolkit — Node #2–3 Per-Device Provisioning CLI (`provision:device`) & Compact Satellite Enclosure Prompt (Phase 5)
+- [ ] **Step 29**: Live Hardware Walkthrough, First House Experiments & Final Docs (Phases 6–7)
+- [ ] **Future / Deferred**:
+  - **Proactive Alerts**: Firestore `onDocumentCreated` push alerts with cooldowns (CO₂ / PM₂.₅ / stale sensor)
+  - **Optional Smart-Home Actuation & VOC/NOₓ Expansion**: Triggering a HEPA air purifier smart plug on PM₂.₅ spikes and adding a Sensirion `SGP41` VOC/NOₓ breakout on STEMMA QT
 
 ---
 
@@ -340,7 +355,45 @@ To keep every change easy to understand, debug, and learn from, every step in th
   - Passed `verify:outdoor`, `verify:mcp`, `verify:api`, `verify:auth`, `node scripts/verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`, deployed `mcp`, `syncOutdoorOnReading`, and Firebase Hosting, and verified live on the deployed Web Dashboard.
 - **Target Commit**: `feat(outdoor): add Open-Meteo trigger, dashboard deltas/overlays, and MCP outdoor tool`
 
-Remaining Phase 4 enhancements (will be broken into atomic steps when ready):
-- **Multi-Room Sensor Network**: Print additional enclosures for bedroom / office / kitchen, tighten `authorized_devices/{uid}` in `firestore.rules` to bind each Auth UID to a specific `device_id`, add a `compare_rooms` MCP tool, and support lower-cost `SCD-40`-only satellite nodes.
+#### Step 21: Firestore Read Optimization & Daily Rollups
+- **Status**: `[x] Completed (Live-Verified & Backfilled)`
+- **Goal**: Cut Firestore read volume by >99% on chart loads and MCP history/summary queries via UTC-day rollup documents (`daily_rollups`, `outdoor_daily_rollups`), server-side and browser-side TTL caches, and 0-read trigger writers.
+- **Deliverables**: `firestore.indexes.json` (`fieldOverrides` for rollup `samples` maps), `functions/src/services/firestore/rollups.ts`, `functions/src/api/cache.ts`, `functions/src/scripts/backfillRollups.ts`, `functions/src/scripts/verifyRollups.ts`, `web/app.js` 5m chart cache & lazy fleet release loading, `docs/13-firestore-read-optimization-and-rollups.md`, and `docs/plans/2026-11-24-reduce-firestore-reads.md`.
+- **Single Focused Validation**: Passed `verify:rollups`, `verify:api`, `verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`; deployed indexes/functions/hosting and ran `backfill:rollups -- --days 30`.
+
+#### Step 22: Visual Showcase, EXIF-Stripped Media Pipeline & Google Flow Storyboard
+- **Status**: `[x] Completed`
+- **Goal**: Prepare privacy-scrubbed, EXIF/GPS-stripped hardware photos and dashboard/MCP screenshots and polish `README.md` with a 5-scene Google Flow (`Veo 3 / 3.1`) hype video storyboard.
+- **Deliverables**: `scripts/prepare_media.sh`, `docs/images/*`, `docs/12-showcase-and-hype-video.md`, `README.md`, `docs/06-security-and-privacy-checklist.md` media privacy guidance, and `docs/plans/2026-11-24-hype-video-and-readme-showcase.md`.
+- **Single Focused Validation**: Verified `< 600 KB` & zero EXIF/GPS metadata across `docs/images/`, passed `./scripts/check-secrets.sh`.
+
+#### Step 23: Reliability, Security & Multi-Room Hardening (`v1.3.4`)
+- **Status**: `[x] Completed (Deployed & Pushed)`
+- **Goal**: Harden firmware `app.py`/`firestore_client.py` (`v1.3.4` HTTP timeouts, 30-bit `time.monotonic()` precision safety, SCD-40 CRC recovery), Open-Meteo `WriteBatch` atomicity, WorkOS/CORS/MCP error sanitization, Web Dashboard chart/auth resilience, and GitHub Actions CI.
+- **Deliverables**: `firmware/app.py`, `firmware/firestore_client.py`, `scripts/test_firmware_local.py`, `.github/workflows/backend-ci.yml`, `functions/src/*`, `web/*`.
+- **Single Focused Validation**: Passed `./scripts/check-secrets.sh`, `python3 scripts/test_firmware_local.py`, `node scripts/verify_web_dashboard.mjs`, and `npm --prefix functions test`; deployed functions & hosting (`02003bf`).
+
+#### Step 24: Psychrometric Energy Tax & 24h Open-Meteo Free-Ventilation Forecast
+- **Status**: `[x] Completed (Deployed & Pushed)`
+- **Goal**: Quantify heating, cooling, and dehumidification energy tax using Magnus-Tetens dew point and ASHRAE moist-air enthalpy, cache Open-Meteo's 24h forecast in `outdoor_forecasts/home`, and surface `Next Best Window` recommendations across API, MCP, and the Web Dashboard.
+- **Deliverables**: `functions/src/services/outdoor.ts`, `functions/src/api/routes/outdoor.ts`, `functions/src/mcp/tools.ts` (`get_ventilation_forecast`), `web/app.js` & `web/styles.css`, `functions/src/scripts/verifyOutdoor.ts` (Phase 1 of `docs/plans/2026-11-27-multi-room-energy-experiments.md`).
+- **Single Focused Validation**: Passed `npm --prefix functions test`, `node scripts/verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`; deployed & pushed (`6cc2218`).
+
+#### Step 25: Experiment Logger, Auto-Detected Events & House Physics Playbook *(In Progress)*
+- **Status**: `[ ] In Progress (Steps 25.1–25.3 deployed & pushed; Steps 25.4–25.6 pending)`
+- **Goal**: Log indoor ventilation/purifier interventions, passively detect sharp CO₂/PM₂.₅ step changes as `unlabeled` triage candidates, evaluate 15m pre-baseline vs. 20m post-settle outcomes (including cross-room spillover), and maintain a single-doc `house_playbook/summary` for AI & dashboard recommendations.
+- **Completed Deliverables**:
+  - **25.1 (`b0aedbd`):** `functions/src/services/experiments.ts`, `functions/src/services/firestore/db.ts`, `functions/src/scripts/verifyExperiments.ts`, `functions/package.json`.
+  - **25.2 (`02003bf`):** `detectUnlabeledEventCandidate()`, `finalizeDuePendingExperiments()`, `processReadingForExperiments()`, and `syncOutdoorOnReading` wiring in `functions/src/index.ts`.
+  - **25.3 (`27222e1`):** `functions/src/api/routes/experiments.ts`, strict Zod schemas in `functions/src/api/schemas.ts`, `PATCH` CORS in `functions/src/index.ts`, cache TTLs/invalidation in `functions/src/api/cache.ts`, and Check #14 in `functions/src/scripts/verifyApi.ts`.
+- **Remaining**:
+  - **25.4:** Remote MCP tools (`log_experiment`, `update_experiment`, `list_experiments`, `get_house_playbook`) & `analyze_indoor_air` prompt update + `verifyMcp.ts`.
+  - **25.5:** Web Dashboard Experiments & Playbook UI + `verify_web_dashboard.mjs`.
+  - **25.6:** Live Cloud Deploy Gate & Validation Gate 2.
+
+#### Steps 26–29: Mixed-Fleet `v1.4.0`, Whole-House `compare_rooms`, Provisioning CLI & Live Walkthrough
+- **Status**: `[ ] Planned` — Tracked in detail in [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md) (Phases 3–7).
+
+Deferred future horizons (beyond the active multi-room plan):
 - **Proactive Alerts**: Add a Firestore `onDocumentCreated` Cloud Function for push notifications (CO₂ > 1,200 ppm, PM₂.₅ > 35 µg/m³, or offline > 20 min) with cooldowns.
 - **Smart-Home Actuation & Extra Sensors**: Optional webhook/Matter/Home Assistant trigger for a HEPA purifier smart plug on PM₂.₅ spikes, and a future STEMMA QT `SGP41` (VOC + NOₓ) breakout for cooking fumes and off-gassing.
