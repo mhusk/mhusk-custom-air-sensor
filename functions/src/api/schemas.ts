@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import {
+  EXPERIMENT_ACTION_TYPES,
+  EXPERIMENT_STATUSES,
+} from "../services/experiments.js";
 import { isValidFirmwareVersion, type SummaryPeriod } from "../services/firestore.js";
 import {
   DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES,
@@ -8,6 +12,11 @@ import {
 } from "../services/outdoor.js";
 
 export const DEVICE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const EXPERIMENT_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
+
+function isValidIsoTimestamp(value: string): boolean {
+  return !Number.isNaN(Date.parse(value));
+}
 
 export const SUMMARY_PERIOD_VALUES = new Set<SummaryPeriod>([
   "1h",
@@ -126,5 +135,94 @@ export const updateSiteLocationConfigSchema = z
         `outdoor_poll_interval_minutes must be at most ${MAX_OUTDOOR_POLL_INTERVAL_MINUTES}.`
       )
       .default(DEFAULT_OUTDOOR_POLL_INTERVAL_MINUTES),
+  })
+  .strict();
+
+const isoTimestampSchema = z
+  .string()
+  .trim()
+  .refine(isValidIsoTimestamp, "Must be a valid ISO-8601 timestamp.");
+
+export const createExperimentSchema = z
+  .object({
+    action_type: z.enum(EXPERIMENT_ACTION_TYPES),
+    device_id: z
+      .string()
+      .trim()
+      .regex(
+        DEVICE_ID_REGEX,
+        "device_id must be 1-64 characters using letters, numbers, underscores, or hyphens."
+      ),
+    location: z
+      .string()
+      .trim()
+      .regex(
+        DEVICE_ID_REGEX,
+        "location must be 1-64 characters using letters, numbers, underscores, or hyphens."
+      )
+      .nullable()
+      .optional(),
+    custom_label: z.string().trim().max(80).nullable().optional(),
+    started_at: isoTimestampSchema.optional(),
+    ended_at: isoTimestampSchema.nullable().optional(),
+    duration_minutes: z.number().finite().positive().max(1440).nullable().optional(),
+    notes: z.string().trim().max(500).nullable().optional(),
+    evaluate_if_ready: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.started_at && data.ended_at) {
+      if (Date.parse(data.ended_at) < Date.parse(data.started_at)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ended_at"],
+          message: "'ended_at' must be greater than or equal to 'started_at'.",
+        });
+      }
+    }
+  });
+
+export const updateExperimentSchema = z
+  .object({
+    action_type: z.enum(EXPERIMENT_ACTION_TYPES).optional(),
+    custom_label: z.string().trim().max(80).nullable().optional(),
+    notes: z.string().trim().max(500).nullable().optional(),
+    started_at: isoTimestampSchema.optional(),
+    ended_at: isoTimestampSchema.nullable().optional(),
+    duration_minutes: z.number().finite().positive().max(1440).nullable().optional(),
+    status: z.enum(EXPERIMENT_STATUSES).optional(),
+    evaluate_if_ready: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    const hasField =
+      data.action_type !== undefined ||
+      data.custom_label !== undefined ||
+      data.notes !== undefined ||
+      data.started_at !== undefined ||
+      data.ended_at !== undefined ||
+      data.duration_minutes !== undefined ||
+      data.status !== undefined;
+    if (!hasField) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: "At least one experiment field must be provided to update.",
+      });
+    }
+    if (data.started_at && data.ended_at) {
+      if (Date.parse(data.ended_at) < Date.parse(data.started_at)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ended_at"],
+          message: "'ended_at' must be greater than or equal to 'started_at'.",
+        });
+      }
+    }
+  });
+
+export const evaluateExperimentSchema = z
+  .object({
+    force: z.boolean().optional(),
   })
   .strict();

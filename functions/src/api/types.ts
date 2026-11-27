@@ -10,6 +10,13 @@ import type {
   WorkosAuthDependencies,
 } from "../auth/workos.js";
 import type {
+  CreateExperimentInput,
+  ExperimentRecord,
+  HousePlaybookSummary,
+  ListExperimentsOptions,
+  UpdateExperimentInput,
+} from "../services/experiments.js";
+import type {
   AirQualitySummaryOptions,
   AirQualitySummaryResult,
   DeviceConfig,
@@ -80,6 +87,18 @@ export interface DashboardDataService {
     reason: string;
     reading: OutdoorReading | null;
   }>;
+  listExperiments?: (options?: ListExperimentsOptions) => Promise<ExperimentRecord[]>;
+  getExperiment?: (id: string) => Promise<ExperimentRecord | null>;
+  createExperiment?: (input: CreateExperimentInput) => Promise<ExperimentRecord>;
+  updateExperiment?: (
+    id: string,
+    input: UpdateExperimentInput
+  ) => Promise<ExperimentRecord | null>;
+  evaluateExperimentOutcome?: (
+    id: string,
+    options?: { force?: boolean }
+  ) => Promise<ExperimentRecord | null>;
+  getHousePlaybook?: () => Promise<HousePlaybookSummary>;
 }
 
 export type OtaRolloutStatus =

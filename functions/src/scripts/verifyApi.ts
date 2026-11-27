@@ -12,6 +12,10 @@ import type {
   WorkosAuthConfig,
 } from "../auth/workos.js";
 import { createMcpHttpHandler } from "../index.js";
+import {
+  computePlaybookFromExperiments,
+  type ExperimentRecord,
+} from "../services/experiments.js";
 import type {
   DeviceConfig,
   DeviceStatus,
@@ -27,6 +31,8 @@ function createMockDashboardService(): {
     getReadingsHistory: number;
     getAirQualitySummary: number;
     getReadingsHistoryWithSummary: number;
+    listExperiments: number;
+    getHousePlaybook: number;
   };
 } {
   const baseService = createMockAirQualityService();
@@ -36,7 +42,11 @@ function createMockDashboardService(): {
     getReadingsHistory: 0,
     getAirQualitySummary: 0,
     getReadingsHistoryWithSummary: 0,
+    listExperiments: 0,
+    getHousePlaybook: 0,
   };
+  const experiments = new Map<string, ExperimentRecord>();
+  let expCounter = 0;
 
   const configs = new Map<string, DeviceConfig>([
     [
@@ -217,6 +227,133 @@ function createMockDashboardService(): {
       reason: "forced_refresh",
       reading: null,
     }),
+    listExperiments: async (options = {}) => {
+      counts.listExperiments += 1;
+      const statusSet = options.status
+        ? new Set(Array.isArray(options.status) ? options.status : [options.status])
+        : null;
+      const items = Array.from(experiments.values())
+        .filter((e) => {
+          if (statusSet && !statusSet.has(e.status)) return false;
+          if (options.device_id && e.device_id !== options.device_id) return false;
+          if (options.location && e.location !== options.location) return false;
+          if (options.action_type && e.action_type !== options.action_type) return false;
+          return true;
+        })
+        .sort((a, b) => b.started_at.localeCompare(a.started_at));
+      return options.limit ? items.slice(0, options.limit) : items;
+    },
+    getExperiment: async (id) => experiments.get(id) ?? null,
+    createExperiment: async (input) => {
+      expCounter += 1;
+      const id = `exp_mock_${expCounter}`;
+      const nowIso = new Date().toISOString();
+      const startedAtIso = input.started_at ?? nowIso;
+      let endedAtIso = input.ended_at ?? null;
+      let durationMinutes = input.duration_minutes ?? null;
+      if (!endedAtIso && durationMinutes) {
+        endedAtIso = new Date(Date.parse(startedAtIso) + durationMinutes * 60_000).toISOString();
+      } else if (endedAtIso) {
+        const diffMs = Date.parse(endedAtIso) - Date.parse(startedAtIso);
+        if (diffMs < 0) {
+          throw new Error("'ended_at' must be greater than or equal to 'started_at'.");
+        }
+        durationMinutes = Math.round((diffMs / 60_000) * 10) / 10;
+      }
+      const record: ExperimentRecord = {
+        id,
+        action_type: input.action_type,
+        custom_label: input.custom_label ?? null,
+        device_id: input.device_id,
+        location: input.location ?? configs.get(input.device_id)?.location ?? "home-office",
+        started_at: startedAtIso,
+        ended_at: endedAtIso,
+        duration_minutes: durationMinutes,
+        notes: input.notes ?? null,
+        status: endedAtIso ? "pending_evaluation" : "active",
+        source: input.source ?? "dashboard",
+        outdoor_snapshot: null,
+        energy_tax_tier: "free",
+        evaluation: null,
+        created_at: nowIso,
+        created_by: input.created_by ?? "owner@example.com",
+        updated_at: nowIso,
+      };
+      experiments.set(id, record);
+      return record;
+    },
+    updateExperiment: async (id, input) => {
+      const existing = experiments.get(id);
+      if (!existing) return null;
+      const startedAtIso = input.started_at ?? existing.started_at;
+      const endedAtIso =
+        input.ended_at === null ? null : (input.ended_at ?? existing.ended_at);
+      if (endedAtIso && Date.parse(endedAtIso) < Date.parse(startedAtIso)) {
+        throw new Error("'ended_at' must be greater than or equal to 'started_at'.");
+      }
+      const durationMinutes = endedAtIso
+        ? Math.round(((Date.parse(endedAtIso) - Date.parse(startedAtIso)) / 60_000) * 10) / 10
+        : null;
+      const nextStatus =
+        input.status ??
+        (existing.status === "active" && endedAtIso ? "pending_evaluation" : existing.status);
+      const updated: ExperimentRecord = {
+        ...existing,
+        action_type: input.action_type ?? existing.action_type,
+        custom_label:
+          input.custom_label !== undefined ? input.custom_label : existing.custom_label,
+        notes: input.notes !== undefined ? input.notes : existing.notes,
+        started_at: startedAtIso,
+        ended_at: endedAtIso,
+        duration_minutes: durationMinutes,
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+      };
+      experiments.set(id, updated);
+      return updated;
+    },
+    evaluateExperimentOutcome: async (id) => {
+      const existing = experiments.get(id);
+      if (!existing) return null;
+      if (!existing.ended_at) {
+        throw new Error("Cannot evaluate an active experiment without an end time.");
+      }
+      const nowIso = new Date().toISOString();
+      const evaluated: ExperimentRecord = {
+        ...existing,
+        status: "evaluated",
+        evaluation: {
+          baseline: {
+            sample_count: 3,
+            co2_ppm: 1200,
+            pm2_5_ug_m3: 8,
+            temperature_f: 70,
+            humidity_percent: 45,
+          },
+          post_settle: {
+            sample_count: 3,
+            co2_ppm: 850,
+            pm2_5_ug_m3: 6,
+            temperature_f: 68.5,
+            humidity_percent: 43,
+          },
+          co2_delta_ppm: -350,
+          co2_rate_ppm_per_min: -35,
+          pm2_5_delta_ug_m3: -2,
+          temp_delta_f: -1.5,
+          humidity_delta_percent: -2,
+          cross_room_deltas: [],
+          evaluated_at: nowIso,
+        },
+        updated_at: nowIso,
+      };
+      experiments.set(id, evaluated);
+      return evaluated;
+    },
+    getHousePlaybook: async () => {
+      counts.getHousePlaybook += 1;
+      return computePlaybookFromExperiments(Array.from(experiments.values()));
+    },
   };
 
   return { service, counts };
@@ -800,6 +937,220 @@ async function main(): Promise<void> {
     assert.equal(badResStatus, 400);
     assert.equal((JSON.parse(badResBody) as { error?: string }).error, "invalid_request");
     console.log("[PASS] 13. Malformed req.url returns 400 invalid_request JSON envelope");
+
+    // 14. Experiments & House Playbook routes (auth, Zod validation, PATCH CORS, caching & invalidation)
+    const unauthExpGet = await apiRequest(baseUrl, "GET", "/api/experiments");
+    assert.equal(unauthExpGet.status, 401);
+    const unauthExpPost = await apiRequest(baseUrl, "POST", "/api/experiments", {
+      body: { action_type: "crack_window", device_id: "feather-s3-01" },
+    });
+    assert.equal(unauthExpPost.status, 401);
+    const unauthPlaybook = await apiRequest(baseUrl, "GET", "/api/playbook");
+    assert.equal(unauthPlaybook.status, 401);
+
+    const corsPatchRes = await fetch(`${baseUrl}/api/experiments/exp_1`, {
+      method: "OPTIONS",
+      headers: { Origin: "https://dashboard.example.web.app" },
+    });
+    assert.equal(corsPatchRes.status, 204);
+    assert.match(
+      corsPatchRes.headers.get("access-control-allow-methods") ?? "",
+      /\bPATCH\b/
+    );
+
+    const badExpUnknown = await apiRequest(baseUrl, "POST", "/api/experiments", {
+      token: ownerJwt,
+      body: { action_type: "crack_window", device_id: "feather-s3-01", unexpected: true },
+    });
+    assert.equal(badExpUnknown.status, 400);
+
+    const badExpAction = await apiRequest(baseUrl, "POST", "/api/experiments", {
+      token: ownerJwt,
+      body: { action_type: "launch_rockets", device_id: "feather-s3-01" },
+    });
+    assert.equal(badExpAction.status, 400);
+
+    const badExpOrder = await apiRequest(baseUrl, "POST", "/api/experiments", {
+      token: ownerJwt,
+      body: {
+        action_type: "crack_window",
+        device_id: "feather-s3-01",
+        started_at: "2026-11-27T12:00:00.000Z",
+        ended_at: "2026-11-27T11:50:00.000Z",
+      },
+    });
+    assert.equal(badExpOrder.status, 400);
+
+    const createActiveRes = await apiRequest(baseUrl, "POST", "/api/experiments", {
+      token: ownerJwt,
+      body: {
+        action_type: "crack_window",
+        device_id: "feather-s3-01",
+        started_at: "2026-11-27T15:00:00.000Z",
+        notes: "Window open 2 inches",
+      },
+    });
+    assert.equal(createActiveRes.status, 201);
+    const createdExp = createActiveRes.body.experiment as ExperimentRecord;
+    assert.equal(createdExp.status, "active");
+    assert.equal(createdExp.source, "dashboard");
+    assert.equal(createdExp.created_by, "owner@example.com");
+
+    // GET /api/experiments list, warm cache hit, and ?refresh=1 bypass
+    const listBefore = mockDashboard.counts.listExperiments;
+    const listRes1 = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/experiments?status=active&device_id=feather-s3-01",
+      { token: ownerJwt }
+    );
+    assert.equal(listRes1.status, 200);
+    assert.equal(listRes1.body.count, 1);
+    assert.equal(mockDashboard.counts.listExperiments, listBefore + 1);
+
+    const listRes2 = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/experiments?status=active&device_id=feather-s3-01",
+      { token: ownerJwt }
+    );
+    assert.equal(listRes2.status, 200);
+    assert.equal(mockDashboard.counts.listExperiments, listBefore + 1);
+
+    await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/experiments?status=active&device_id=feather-s3-01&refresh=1",
+      { token: ownerJwt }
+    );
+    assert.equal(mockDashboard.counts.listExperiments, listBefore + 2);
+
+    // GET /api/experiments/:id + 404 + malformed percent-encoding 400
+    const getOneRes = await apiRequest(
+      baseUrl,
+      "GET",
+      `/api/experiments/${createdExp.id}`,
+      { token: ownerJwt }
+    );
+    assert.equal(getOneRes.status, 200);
+    assert.equal((getOneRes.body.experiment as ExperimentRecord).id, createdExp.id);
+
+    const getMissingRes = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/experiments/exp_does_not_exist",
+      { token: ownerJwt }
+    );
+    assert.equal(getMissingRes.status, 404);
+
+    const badEncodedExp = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/experiments/%E0%A4%A",
+      { token: ownerJwt }
+    );
+    assert.equal(badEncodedExp.status, 400);
+
+    // Evaluate while active -> 400
+    const evalActiveRes = await apiRequest(
+      baseUrl,
+      "POST",
+      `/api/experiments/${createdExp.id}/evaluate`,
+      { token: ownerJwt }
+    );
+    assert.equal(evalActiveRes.status, 400);
+
+    // PATCH validation errors & finishing active experiment
+    const patchEmptyRes = await apiRequest(
+      baseUrl,
+      "PATCH",
+      `/api/experiments/${createdExp.id}`,
+      { token: ownerJwt, body: {} }
+    );
+    assert.equal(patchEmptyRes.status, 400);
+
+    const patchMissingRes = await apiRequest(
+      baseUrl,
+      "PATCH",
+      "/api/experiments/exp_missing",
+      { token: ownerJwt, body: { notes: "hello" } }
+    );
+    assert.equal(patchMissingRes.status, 404);
+
+    const patchFinishRes = await apiRequest(
+      baseUrl,
+      "PATCH",
+      `/api/experiments/${createdExp.id}`,
+      {
+        token: ownerJwt,
+        body: { ended_at: "2026-11-27T15:10:00.000Z" },
+      }
+    );
+    assert.equal(patchFinishRes.status, 200);
+    assert.equal(
+      (patchFinishRes.body.experiment as ExperimentRecord).status,
+      "pending_evaluation"
+    );
+
+    // Warm playbook before evaluation (cached), then evaluate -> invalidates playbook cache
+    const badPlaybookTier = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/playbook?energy_tax_tier=extreme",
+      { token: ownerJwt }
+    );
+    assert.equal(badPlaybookTier.status, 400);
+
+    const pbCallsBefore = mockDashboard.counts.getHousePlaybook;
+    const pbEmpty1 = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/playbook?location=home-office&energy_tax_tier=free&primary_goal=lower_co2",
+      { token: ownerJwt }
+    );
+    assert.equal(pbEmpty1.status, 200);
+    assert.equal(
+      (pbEmpty1.body.playbook as { evaluated_experiment_count: number }).evaluated_experiment_count,
+      0
+    );
+    assert.equal(mockDashboard.counts.getHousePlaybook, pbCallsBefore + 1);
+
+    await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/playbook?location=home-office&energy_tax_tier=free&primary_goal=lower_co2",
+      { token: ownerJwt }
+    );
+    assert.equal(mockDashboard.counts.getHousePlaybook, pbCallsBefore + 1);
+
+    // Evaluate finished experiment -> 200 and invalidates playbook + experiments caches
+    const evalDoneRes = await apiRequest(
+      baseUrl,
+      "POST",
+      `/api/experiments/${createdExp.id}/evaluate`,
+      { token: ownerJwt, body: { force: true } }
+    );
+    assert.equal(evalDoneRes.status, 200);
+    assert.equal(evalDoneRes.body.evaluated, true);
+    assert.equal((evalDoneRes.body.experiment as ExperimentRecord).status, "evaluated");
+
+    const pbAfterEval = await apiRequest(
+      baseUrl,
+      "GET",
+      "/api/playbook?location=home-office&energy_tax_tier=free&primary_goal=lower_co2",
+      { token: ownerJwt }
+    );
+    assert.equal(pbAfterEval.status, 200);
+    assert.equal(mockDashboard.counts.getHousePlaybook, pbCallsBefore + 2);
+    assert.equal(
+      (pbAfterEval.body.playbook as { evaluated_experiment_count: number }).evaluated_experiment_count,
+      1
+    );
+    assert.equal((pbAfterEval.body.recommendations as unknown[]).length, 1);
+
+    console.log(
+      "[PASS] 14. /api/experiments & /api/playbook enforce auth, Zod schemas, PATCH CORS, caching, and invalidation"
+    );
 
     console.log("\nAll Dashboard API & WorkOS Auth verification checks passed!");
   } finally {

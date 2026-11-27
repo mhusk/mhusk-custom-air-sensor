@@ -2,6 +2,8 @@ export const OVERVIEW_CACHE_TTL_MS = 60_000;
 export const HISTORY_CACHE_TTL_MS = 60_000;
 export const RELEASES_CACHE_TTL_MS = 300_000;
 export const FORECAST_CACHE_TTL_MS = 300_000;
+export const EXPERIMENTS_CACHE_TTL_MS = 60_000;
+export const PLAYBOOK_CACHE_TTL_MS = 300_000;
 export const DEFAULT_DASHBOARD_CACHE_MAX_ENTRIES = 64;
 
 interface CacheEntry<T> {

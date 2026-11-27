@@ -22,6 +22,14 @@ import {
   updateDeviceConfig,
 } from "../services/firestore.js";
 import {
+  createExperiment,
+  evaluateExperimentOutcome,
+  getExperiment,
+  getHousePlaybook,
+  listExperiments,
+  updateExperiment,
+} from "../services/experiments.js";
+import {
   getLatestOutdoorForecast,
   getLatestOutdoorReading,
   getOutdoorReadingsHistory,
@@ -32,6 +40,12 @@ import {
 import { BodyReadError, parseQueryParams, sendJson } from "./http.js";
 import { handleMeRoute, handlePublicAuthRoutes, resolveActorLabel } from "./routes/auth.js";
 import { handleDeviceActionRoute, matchDeviceConfigRoute } from "./routes/devices.js";
+import {
+  handleExperimentItemRoute,
+  handleExperimentsCollectionRoute,
+  handlePlaybookRoute,
+  matchExperimentRoute,
+} from "./routes/experiments.js";
 import { handleFirmwareReleasesRoute, handleFirmwareRolloutRoute } from "./routes/firmware.js";
 import {
   handleOutdoorForecastRoute,
@@ -45,9 +59,13 @@ import {
 } from "./routes/telemetry.js";
 import {
   DEVICE_ID_REGEX,
+  EXPERIMENT_ID_REGEX,
+  createExperimentSchema,
+  evaluateExperimentSchema,
   fleetRolloutSchema,
   setTargetFirmwareSchema,
   updateDeviceConfigSchema,
+  updateExperimentSchema,
   updateSiteLocationConfigSchema,
 } from "./schemas.js";
 import type {
@@ -60,10 +78,14 @@ import type {
 
 export {
   DEVICE_ID_REGEX,
+  EXPERIMENT_ID_REGEX,
   computeOtaRolloutStatus,
+  createExperimentSchema,
+  evaluateExperimentSchema,
   fleetRolloutSchema,
   setTargetFirmwareSchema,
   updateDeviceConfigSchema,
+  updateExperimentSchema,
   updateSiteLocationConfigSchema,
 };
 export type {
@@ -101,6 +123,13 @@ export function createFirestoreDashboardService(
     getOutdoorReadingsHistory: (hours, limit, opts) =>
       getOutdoorReadingsHistory(hours, limit, db, new Date(), opts),
     syncOutdoorReadingIfStale: (opts) => syncOutdoorReadingIfStale({ ...opts, db }),
+    listExperiments: (options) => listExperiments(options, db),
+    getExperiment: (id) => getExperiment(id, db),
+    createExperiment: (input) => createExperiment(input, db),
+    updateExperiment: (id, input) => updateExperiment(id, input, db),
+    evaluateExperimentOutcome: (id, options) =>
+      evaluateExperimentOutcome(id, { ...options, db }),
+    getHousePlaybook: () => getHousePlaybook(db),
   };
 }
 
@@ -113,18 +142,25 @@ export function createFirestoreDashboardService(
  *   - POST /api/auth/refresh    (WorkOS AuthKit refresh -> tokens, owner allowlist enforced)
  *
  * Protected endpoints (require valid WorkOS JWT or Bearer fallback + owner allowlist):
- *   - GET  /api/me
- *   - GET  /api/dashboard/overview
- *   - GET  /api/readings/history
- *   - GET  /api/site/config
- *   - PUT  /api/site/config
- *   - POST /api/outdoor/refresh
- *   - GET  /api/firmware/releases
- *   - POST /api/firmware/rollout
- *   - GET  /api/devices/:deviceId/config
- *   - PUT  /api/devices/:deviceId/config
- *   - PUT  /api/devices/:deviceId/firmware
- *   - POST /api/devices/:deviceId/reboot
+ *   - GET   /api/me
+ *   - GET   /api/dashboard/overview
+ *   - GET   /api/readings/history
+ *   - GET   /api/site/config
+ *   - PUT   /api/site/config
+ *   - POST  /api/outdoor/refresh
+ *   - GET   /api/outdoor/forecast
+ *   - GET   /api/experiments
+ *   - POST  /api/experiments
+ *   - GET   /api/experiments/:id
+ *   - PATCH /api/experiments/:id
+ *   - POST  /api/experiments/:id/evaluate
+ *   - GET   /api/playbook
+ *   - GET   /api/firmware/releases
+ *   - POST  /api/firmware/rollout
+ *   - GET   /api/devices/:deviceId/config
+ *   - PUT   /api/devices/:deviceId/config
+ *   - PUT   /api/devices/:deviceId/firmware
+ *   - POST  /api/devices/:deviceId/reboot
  */
 export async function handleDashboardApiRequest(
   req: IncomingApiRequest,
@@ -217,6 +253,43 @@ export async function handleDashboardApiRequest(
         service,
         cache,
         bypassCache,
+      });
+      return;
+    }
+
+    if (pathname === "/api/experiments") {
+      await handleExperimentsCollectionRoute(req, res, {
+        pathname,
+        method,
+        actor,
+        service,
+        cache,
+        bypassCache,
+        queryParams,
+      });
+      return;
+    }
+
+    const experimentRoute = matchExperimentRoute(pathname);
+    if (experimentRoute) {
+      await handleExperimentItemRoute(req, res, {
+        pathname,
+        method,
+        service,
+        route: experimentRoute,
+        cache,
+      });
+      return;
+    }
+
+    if (pathname === "/api/playbook") {
+      await handlePlaybookRoute(res, {
+        pathname,
+        method,
+        service,
+        cache,
+        bypassCache,
+        queryParams,
       });
       return;
     }
