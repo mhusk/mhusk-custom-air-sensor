@@ -9,6 +9,8 @@ rules_version = '2';
 //     devices/{deviceId}, and device_configs/{deviceId}.
 //   - When omitted or null (legacy single-sensor allowlist doc), any valid
 //     device_id is permitted for zero-downtime migration until migrated.
+// SCD-40-only satellites may publish null PM/AQI/particle fields. Present
+// numbers and AQI categories still have to pass the same range and enum checks.
 // Authenticated allowlisted sensors may only:
 //   - create immutable documents in readings/{readingId}
 //   - create/update their status document in devices/{deviceId}
@@ -84,6 +86,25 @@ service cloud.firestore {
       ];
     }
 
+    // SCD-40-only satellites publish null for fields they cannot measure.
+    // A present value still has to pass the same numeric or enum check.
+    function nullableInRange(value, min, max) {
+      return value == null || inRange(value, min, max);
+    }
+
+    function nullableAqiCategory(value) {
+      return value == null || isAqiCategory(value);
+    }
+
+    // Admin-written room metadata on device_configs. Null means "unset".
+    function isFloor(value) {
+      return value == null
+        || (value is string
+          && value.size() >= 1
+          && value.size() <= 32
+          && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$'));
+    }
+
     function isFirmwareVersion(value) {
       return value is string
         && value.size() >= 5
@@ -105,10 +126,7 @@ service cloud.firestore {
     }
 
     function validSensors(value) {
-      return value is list
-        && value.size() >= 1
-        && value.size() <= 4
-        && value.hasOnly(['SCD-40', 'PMSA003I']);
+      return value == ['SCD-40'] || value == ['SCD-40', 'PMSA003I'];
     }
 
     function validLatestReading(data) {
@@ -132,9 +150,9 @@ service cloud.firestore {
         && inRange(data.co2_ppm, 0, 40000)
         && inRange(data.temperature_f, -40, 185)
         && inRange(data.humidity_percent, 0, 100)
-        && inRange(data.pm2_5_ug_m3, 0, 1000)
-        && inRange(data.aqi_us, 0, 500)
-        && isAqiCategory(data.aqi_category);
+        && nullableInRange(data.pm2_5_ug_m3, 0, 1000)
+        && nullableInRange(data.aqi_us, 0, 500)
+        && nullableAqiCategory(data.aqi_category);
     }
 
     function validReading(data) {
@@ -186,17 +204,17 @@ service cloud.firestore {
         && inRange(data.temperature_c, -40, 85)
         && inRange(data.temperature_f, -40, 185)
         && inRange(data.humidity_percent, 0, 100)
-        && inRange(data.pm1_0_ug_m3, 0, 1000)
-        && inRange(data.pm2_5_ug_m3, 0, 1000)
-        && inRange(data.pm10_0_ug_m3, 0, 1000)
-        && inRange(data.aqi_us, 0, 500)
-        && isAqiCategory(data.aqi_category)
-        && inRange(data.particles_0_3um, 0, 65535)
-        && inRange(data.particles_0_5um, 0, 65535)
-        && inRange(data.particles_1_0um, 0, 65535)
-        && inRange(data.particles_2_5um, 0, 65535)
-        && inRange(data.particles_5_0um, 0, 65535)
-        && inRange(data.particles_10_0um, 0, 65535);
+        && nullableInRange(data.pm1_0_ug_m3, 0, 1000)
+        && nullableInRange(data.pm2_5_ug_m3, 0, 1000)
+        && nullableInRange(data.pm10_0_ug_m3, 0, 1000)
+        && nullableInRange(data.aqi_us, 0, 500)
+        && nullableAqiCategory(data.aqi_category)
+        && nullableInRange(data.particles_0_3um, 0, 65535)
+        && nullableInRange(data.particles_0_5um, 0, 65535)
+        && nullableInRange(data.particles_1_0um, 0, 65535)
+        && nullableInRange(data.particles_2_5um, 0, 65535)
+        && nullableInRange(data.particles_5_0um, 0, 65535)
+        && nullableInRange(data.particles_10_0um, 0, 65535);
     }
 
     function validDevice(data) {
@@ -265,8 +283,13 @@ service cloud.firestore {
     // Allowlisted sensors may fetch a single config document by device ID,
     // but cannot list/enumerate configs or modify them.
     // Only Firebase Console (Admin/IAM) or Cloud Functions (Admin SDK) write here.
+    // Optional admin-written `floor` (slug or null, max 32 chars) may be stored
+    // here. Clients still cannot write this collection. A malformed floor
+    // fails closed on get so a bad admin write cannot be treated as valid.
     match /device_configs/{deviceId} {
-      allow get: if canActAsDevice(deviceId) && isDeviceId(deviceId);
+      allow get: if canActAsDevice(deviceId)
+        && isDeviceId(deviceId)
+        && (!('floor' in resource.data) || isFloor(resource.data.floor));
       allow list: if false;
       allow write: if false;
     }

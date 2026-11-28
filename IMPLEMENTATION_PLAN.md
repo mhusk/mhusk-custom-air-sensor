@@ -62,7 +62,8 @@ To keep every change easy to understand, debug, and learn from, every step in th
   - [x] **Step 25.4 (2.4)**: Remote MCP Read/Write Tools & `analyze_indoor_air` Prompt Update
   - [x] **Step 25.5 (2.5)**: Web Dashboard Experiments & Playbook UI
   - [x] **Step 25.6 (2.6)**: Live Cloud Deploy Gate & Validation Gate 2 *(deployed, then committed on main)*
-- [ ] **Step 26**: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` (Phase 3 — `SCD-40`-only satellite support + full hubs)
+- [ ] **Step 26** *(In Progress)*: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` (Phase 3 — `SCD-40`-only satellite support + full hubs):
+  - [x] **Step 26.1 (3.1)**: Backward-compatible Firestore rules for null PM/AQI fields, `SCD-40`-only sensors, and optional `floor` (emulator-verified and deployed; live rules match the file)
 - [ ] **Step 27**: Multi-Room Whole-House Intelligence (`compare_rooms`, Zero-Energy Internal Dilution Detector & Multi-Room Chart Overlays) (Phase 4)
 - [ ] **Step 28**: Scaling Toolkit — Node #2–3 Per-Device Provisioning CLI (`provision:device`) & Compact Satellite Enclosure Prompt (Phase 5)
 - [ ] **Step 29**: Live Hardware Walkthrough, First House Experiments & Final Docs (Phases 6–7)
@@ -380,7 +381,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Single Focused Validation**: Passed `npm --prefix functions test`, `node scripts/verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`; deployed & pushed (`6cc2218`).
 
 #### Step 25: Experiment Logger, Auto-Detected Events & House Physics Playbook
-- **Status**: `[x] Completed (Steps 25.1–25.3 deployed & pushed earlier; Steps 25.4–25.6 deployed 2026-11-27 8:26 PM America/Detroit and committed on main)`
+- **Status**: `[x] Completed (Steps 25.1–25.3 deployed & pushed earlier; Steps 25.4–25.6 deployed 2026-11-27 8:26 PM America/Detroit and committed on main as `c5a2dba`)`
 - **Goal**: Log indoor ventilation/purifier interventions, passively detect sharp CO₂/PM₂.₅ step changes as `unlabeled` triage candidates, evaluate 15m pre-baseline vs. 20m post-settle outcomes (including cross-room spillover), and maintain a single-doc `house_playbook/summary` for AI & dashboard recommendations.
 - **Completed Deliverables**:
   - **25.1 (`b0aedbd`):** `functions/src/services/experiments.ts`, `functions/src/services/firestore/db.ts`, `functions/src/scripts/verifyExperiments.ts`, `functions/package.json`.
@@ -390,8 +391,13 @@ To keep every change easy to understand, debug, and learn from, every step in th
   - **25.5:** Experiments tab in `web/index.html`, `web/app.js`, `web/api.js`, and `web/styles.css` — one-tap presets, active timer/stop, Log Past Action drawer, unlabeled-event triage, and the Learned House Playbook table. Passed `node scripts/verify_web_dashboard.mjs`. Live Hosting serves the tab.
   - **25.6:** `firebase deploy --only firestore:indexes,functions,hosting`. Offline gate passed (`npm --prefix functions test`, `node scripts/verify_web_dashboard.mjs`, `./scripts/check-secrets.sh`). Live dashboard and MCP smoke experiments evaluated into `house_playbook/summary`, then were dismissed so the playbook returned to 0 evaluated entries. Unauthenticated `/api/experiments`, `/api/playbook`, and the Cloud Run `/mcp` endpoint returned `401`.
 
-#### Steps 26–29: Mixed-Fleet `v1.4.0`, Whole-House `compare_rooms`, Provisioning CLI & Live Walkthrough
-- **Status**: `[ ] Planned` — Tracked in detail in [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md) (Phases 3–7).
+#### Step 26: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` *(In Progress)*
+- **Status**: `[ ] In Progress (Step 26.1 emulator-verified and deployed 2026-11-27 8:42 PM America/Detroit; live rules match the file. Steps 26.2–26.5 not started)`
+- **26.1:** `firestore.rules` accepts null PM/AQI/particle fields, exact sensor lists `["SCD-40"]` and `["SCD-40", "PMSA003I"]`, and an optional admin-written `floor` slug on `device_configs`. `scripts/verify_device_configs_rules.py --emulator` passed under `firebase emulators:exec`. `firebase deploy --only firestore:rules` compiled and released the file. The live `cloud.firestore` ruleset matches `firestore.rules` byte for byte, and the five live `device_configs` access checks still pass.
+- **Remaining**: null-safe backend services, firmware `v1.4.0`, null-safe web UI, and Validation Gate 3's deploy.
+
+#### Steps 27–29: Whole-House `compare_rooms`, Provisioning CLI & Live Walkthrough
+- **Status**: `[ ] Planned` — Tracked in detail in [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md) (Phases 4–7).
 
 Deferred future horizons (beyond the active multi-room plan):
 - **Proactive Alerts**: Add a Firestore `onDocumentCreated` Cloud Function for push notifications (CO₂ > 1,200 ppm, PM₂.₅ > 35 µg/m³, or offline > 20 min) with cooldowns.

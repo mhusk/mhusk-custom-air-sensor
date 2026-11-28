@@ -191,12 +191,23 @@ Reads stay closed on purpose. A copy of `settings.toml` pulled off the USB drive
 | `temperature_c` | Number, −40–85 |
 | `temperature_f` | Number, −40–185 |
 | `humidity_percent` | Number, 0–100 |
-| `pm1_0_ug_m3`, `pm2_5_ug_m3`, `pm10_0_ug_m3` | Number, 0–1000 |
-| `aqi_us` | Number, 0–500 |
-| `aqi_category` | `Good`, `Moderate`, `Unhealthy for Sensitive Groups`, `Unhealthy`, `Very Unhealthy`, or `Hazardous` |
-| `particles_*um` | Number, 0–65535 (the PMSA003I reports 16-bit counts) |
+| `pm1_0_ug_m3`, `pm2_5_ug_m3`, `pm10_0_ug_m3` | Number 0–1000, or `null` when the node has no PMSA003I |
+| `aqi_us` | Number 0–500, or `null` on an SCD-40-only satellite |
+| `aqi_category` | One of `Good`, `Moderate`, `Unhealthy for Sensitive Groups`, `Unhealthy`, `Very Unhealthy`, `Hazardous`, or `null` |
+| `particles_*um` | Number 0–65535, or `null` on an SCD-40-only satellite |
 
-`devices/{device_id}` must contain exactly `device_id`, `location`, `last_seen_at`, `firmware_version` (`MAJOR.MINOR.PATCH`), `sensors` (1–4 entries drawn from `SCD-40` and `PMSA003I`), `reporting_interval_seconds` (60–3600; production firmware uses 300), and `latest_reading`. The `latest_reading` map is exactly `co2_ppm`, `temperature_f`, `humidity_percent`, `pm2_5_ug_m3`, `aqi_us`, and `aqi_category`. The `device_id` field has to equal the document path, so the account cannot overwrite `devices/some-other-board` while claiming a different id inside the body.
+The keys still have to be present. Omitting `pm2_5_ug_m3`, sending a negative number, or sending `1001` is rejected. `sensors` must be exactly `["SCD-40"]` or `["SCD-40", "PMSA003I"]` in that order.
+
+`devices/{device_id}` must contain exactly `device_id`, `location`, `last_seen_at`, `firmware_version` (`MAJOR.MINOR.PATCH`), `sensors` (the same two lists), `reporting_interval_seconds` (60–3600; production firmware uses 300), and `latest_reading`. The `latest_reading` map is exactly `co2_ppm`, `temperature_f`, `humidity_percent`, `pm2_5_ug_m3`, `aqi_us`, and `aqi_category`, and the PM/AQI fields in that map may be `null`. The `device_id` field has to equal the document path, so the account cannot overwrite `devices/some-other-board` while claiming a different id inside the body.
+
+`device_configs/{device_id}` may also store an admin-written `floor` slug (`null` or 1–32 characters of letters, digits, `_`, and `-`, such as `main`, `upstairs`, or `basement`). Sensors can read a valid floor and cannot write the document. A malformed `floor` fails the `get`.
+
+The mixed-fleet payload checks run against the local Firestore emulator, without deploying:
+
+```bash
+firebase emulators:exec --only firestore --project demo-custom-air-sensor \
+  "python3 scripts/verify_device_configs_rules.py --emulator"
+```
 
 Numbers are checked with `is number`, which accepts both integers and doubles. Firestore keeps those as different wire types (`integerValue` vs `doubleValue`). Requiring `is int` would reject a perfectly valid `25.0` from CircuitPython.
 
