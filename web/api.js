@@ -277,3 +277,106 @@ export function triggerOutdoorRefresh() {
 export function fetchOutdoorForecast({ refresh = false } = {}) {
   return authenticatedJsonFetch(`/api/outdoor/forecast${refresh ? "?refresh=1" : ""}`);
 }
+
+/**
+ * Builds `/api/experiments` with optional filters and `refresh=1` cache bypass.
+ *
+ * @param {{
+ *   status?: string | string[],
+ *   deviceId?: string,
+ *   location?: string,
+ *   actionType?: string,
+ *   limit?: number,
+ *   refresh?: boolean,
+ * }} [params]
+ */
+export function buildExperimentsPath(params = {}) {
+  const qs = new URLSearchParams();
+  if (Array.isArray(params.status)) {
+    if (params.status.length > 0) qs.set("status", params.status.join(","));
+  } else if (params.status) {
+    qs.set("status", params.status);
+  }
+  if (params.deviceId) qs.set("device_id", params.deviceId);
+  if (params.location) qs.set("location", params.location);
+  if (params.actionType) qs.set("action_type", params.actionType);
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.refresh) qs.set("refresh", "1");
+  const query = qs.toString();
+  return `/api/experiments${query ? `?${query}` : ""}`;
+}
+
+/**
+ * Lists logged and auto-detected experiments, newest first.
+ *
+ * @param {{
+ *   status?: string | string[],
+ *   deviceId?: string,
+ *   location?: string,
+ *   actionType?: string,
+ *   limit?: number,
+ *   refresh?: boolean,
+ * }} [params]
+ */
+export function fetchExperiments(params = {}) {
+  return authenticatedJsonFetch(buildExperimentsPath(params));
+}
+
+/**
+ * Starts or records an experiment. `source` is set to `dashboard` by the API.
+ *
+ * @param {Record<string, unknown>} body
+ */
+export function createExperiment(body) {
+  return authenticatedJsonFetch("/api/experiments", {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * Finishes, labels, or dismisses an experiment.
+ *
+ * @param {string} experimentId
+ * @param {Record<string, unknown>} body
+ */
+export function updateExperiment(experimentId, body) {
+  return authenticatedJsonFetch(`/api/experiments/${encodeURIComponent(experimentId)}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+/**
+ * Builds `/api/playbook` with optional ranking context and `refresh=1`.
+ *
+ * @param {{
+ *   location?: string,
+ *   energyTaxTier?: string,
+ *   primaryGoal?: "lower_co2" | "lower_pm2_5" | "balanced",
+ *   refresh?: boolean,
+ * }} [params]
+ */
+export function buildPlaybookPath(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.location) qs.set("location", params.location);
+  if (params.energyTaxTier) qs.set("energy_tax_tier", params.energyTaxTier);
+  if (params.primaryGoal) qs.set("primary_goal", params.primaryGoal);
+  if (params.refresh) qs.set("refresh", "1");
+  const query = qs.toString();
+  return `/api/playbook${query ? `?${query}` : ""}`;
+}
+
+/**
+ * Fetches the House Physics Playbook and ranked recommendations.
+ *
+ * @param {{
+ *   location?: string,
+ *   energyTaxTier?: string,
+ *   primaryGoal?: "lower_co2" | "lower_pm2_5" | "balanced",
+ *   refresh?: boolean,
+ * }} [params]
+ */
+export function fetchPlaybook(params = {}) {
+  return authenticatedJsonFetch(buildPlaybookPath(params));
+}

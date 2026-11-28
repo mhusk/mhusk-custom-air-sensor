@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   ApiError,
+  buildExperimentsPath,
+  buildPlaybookPath,
   buildReadingsHistoryPath,
   fetchDashboardOverview,
   fetchOutdoorForecast,
@@ -136,6 +138,20 @@ await runCheck("index.html meets modern web guidance semantics and accessibility
   assert.match(html, /id="panel-fleet"[^>]*role="tabpanel"[^>]*hidden="until-found"/s);
   assert.doesNotMatch(html, /aria-controls=/);
   assert.match(html, /tabindex="0"\s+role="region"\s+aria-labelledby="fleet-table-caption"/s);
+  assert.match(html, /id="tab-experiments"[^>]*aria-selected="false"/s);
+  assert.match(html, /id="panel-experiments"[^>]*role="tabpanel"[^>]*hidden="until-found"/s);
+  assert.match(html, /data-experiment-preset="crack_window"/);
+  assert.match(html, /Crack Window/);
+  assert.match(html, /Cross-Ventilate/);
+  assert.match(html, /Open Door/);
+  assert.match(html, /HEPA Purifier/);
+  assert.match(html, /Range Hood/);
+  assert.match(html, /data-experiment-preset="custom"/);
+  assert.match(html, /Log Past Action/);
+  assert.match(html, /Unlabeled Events Detected/);
+  assert.match(html, /Learned House Playbook/);
+  assert.match(html, /class="fleet-table playbook-table"/);
+  assert.match(html, /<dialog\s+id="past-log-dialog"[^>]*closedby="any"/);
 });
 
 await runCheck("firebase.json configures Hosting public=web and 2nd Gen API rewrites", () => {
@@ -189,6 +205,41 @@ await runCheck("app.js implements 5m chartsCache, lazy Fleet loading, and target
   assert.match(appJs, /function describeEnergyTax\(/);
   assert.match(appJs, /open_brief_purge/);
   assert.match(appJs, /forecast-strip/);
+  assert.match(appJs, /async function loadExperimentsPanel\(/);
+  assert.match(appJs, /state\.activeTab === "experiments"[\s\S]*loadExperimentsPanel\(\)/);
+  assert.match(appJs, /data-experiment-preset/);
+  assert.match(appJs, /data-experiment-stop/);
+  assert.match(appJs, /status:\s*"dismissed"/);
+  assert.match(appJs, /CLIENT_CACHE_TTL_MS/);
+});
+
+await runCheck("api.js builds experiment and playbook paths with refresh=1 bypass", () => {
+  assert.equal(buildExperimentsPath(), "/api/experiments");
+  assert.equal(
+    buildExperimentsPath({ status: "active" }),
+    "/api/experiments?status=active"
+  );
+  assert.equal(
+    buildExperimentsPath({
+      status: ["active", "unlabeled"],
+      deviceId: "feather-s3-01",
+      location: "home-office",
+      actionType: "crack_window",
+      limit: 50,
+      refresh: true,
+    }),
+    "/api/experiments?status=active%2Cunlabeled&device_id=feather-s3-01&location=home-office&action_type=crack_window&limit=50&refresh=1"
+  );
+  assert.equal(buildPlaybookPath(), "/api/playbook");
+  assert.equal(
+    buildPlaybookPath({
+      location: "home-office",
+      energyTaxTier: "free",
+      primaryGoal: "lower_co2",
+      refresh: true,
+    }),
+    "/api/playbook?location=home-office&energy_tax_tier=free&primary_goal=lower_co2&refresh=1"
+  );
 });
 
 function createMemoryStorage() {
@@ -354,6 +405,7 @@ await runCheck("index.html, styles.css, and firebase.json enforce hardened form,
   assert.ok(containerStart >= 0);
   const afterContainer = css.slice(containerStart);
   assert.equal(/\.table-wrapper\s*\{/.test(afterContainer), false);
+  assert.match(css, /\.playbook-table\s*\{[^}]*--label-2:\s*"Room"/);
 
   const globalHeaders = cfg.hosting?.headers?.find((h) => h.source === "**")?.headers ?? [];
   const csp = globalHeaders.find((h) => h.key === "Content-Security-Policy")?.value ?? "";

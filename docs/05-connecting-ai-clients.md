@@ -47,11 +47,17 @@ Because all tool schemas, descriptions, and annotations live on your Cloud Funct
 | **Tool** | `get_readings_history` | Fetches chronological time-series readings over `hours` (1–168, default 24) or explicit ISO-8601 `start_time`/`end_time`, with automatic downsampling so large windows never overflow the context window. |
 | **Tool** | `get_air_quality_summary` | Returns server-computed `min`, `max`, `avg`, and `p95` statistics over `1h`, `6h`, `24h`, `7d`, or `30d`, plus threshold exceedance counts and grouped CO<sub>2</sub> (&gt;1,000 ppm) / PM<sub>2.5</sub> (&gt;9.0 &mu;g/m<sup>3</sup>) spike episodes. |
 | **Tool** | `get_sensor_status` | Checks all sensors in the `devices` collection and reports whether each is `online` (&le;15 min), `stale` (16–60 min), or `offline` (&gt;60 min). |
-| **Prompt** | `analyze_indoor_air` | Structured analysis template instructing the assistant to combine `get_latest_reading` + `get_air_quality_summary` and deliver actionable ventilation vs. HEPA filtration guidance. |
+| **Tool** | `get_outdoor_air_quality` | Latest outdoor weather and US EPA AQI for the configured home location, plus optional recent outdoor history. |
+| **Tool** | `get_ventilation_forecast` | Current window energy tax (dew point and moist-air enthalpy) and the next clean, low-tax hour from the cached 24-hour forecast. |
+| **Tool** | `list_experiments` | Recent logged and auto-detected house experiments, newest first, with optional status, room, device, and action filters. |
+| **Tool** | `get_house_playbook` | Learned House Physics Playbook, ranked for the current room and energy-tax tier. Recommendations cite measured CO<sub>2</sub>, PM<sub>2.5</sub>, temperature, and humidity changes. |
+| **Tool** | `log_experiment` | Owner-allowlisted write that starts or records a house experiment (`source: "mcp"`). Omit an end time to leave it `active`. |
+| **Tool** | `update_experiment` | Owner-allowlisted write that finishes (`ended_at` or `duration_minutes`), labels an unlabeled event (`action_type`), or dismisses it (`status: "dismissed"`). It does not delete history. |
+| **Prompt** | `analyze_indoor_air` | Structured analysis template. It calls `get_latest_reading`, `get_air_quality_summary`, `get_ventilation_forecast` when CO<sub>2</sub> or energy tax is elevated, and `get_house_playbook` so advice cites this house's measured outcomes. |
 | **Resource** | `air-quality://thresholds/reference` | Reference table of revised May 2024 US EPA PM<sub>2.5</sub>/PM<sub>10</sub> AQI breakpoints, ASHRAE / Harvard CO<sub>2</sub> cognitive bands, and ideal humidity ranges. |
 
 > [!NOTE]
-> All four tools are registered with MCP `ToolAnnotations` marking them **`readOnlyHint: true`**, **`destructiveHint: false`**, and **`idempotentHint: true`**. Many AI clients display a friendlier confirmation badge (or allow "Always allow") when a tool is explicitly read-only.
+> Read tools are registered with **`readOnlyHint: true`**. `log_experiment` and `update_experiment` are writes: **`readOnlyHint: false`**, **`destructiveHint: false`**, **`idempotentHint: false`**, **`openWorldHint: false`**. Many AI clients ask for confirmation before running a write. Both writes use the same WorkOS owner allowlist (or owner bearer fallback) as every other `/mcp` call. They show up in Gemini, Claude, ChatGPT, and Grok after the next Cloud Functions deploy (Step 25.6).
 
 ---
 
@@ -100,7 +106,7 @@ Google Gemini natively supports remote Streamable HTTP MCP servers with OAuth 2.
    ```
    Leave **Additional settings** collapsed/blank so Gemini uses RFC 9728 discovery + WorkOS DCR automatically.
 4. Click **Next** and complete the **WorkOS AuthKit** sign-in popup using your allowlisted email.
-5. Gemini scans your server and displays the **Save your custom app** confirmation listing all 4 available actions (`get_latest_reading`, `get_readings_history`, `get_air_quality_summary`, `get_sensor_status`). Click **Connect**.
+5. Gemini scans your server and displays the **Save your custom app** confirmation listing the registered tools (sensor reads, outdoor/forecast reads, and the experiment tools `list_experiments`, `get_house_playbook`, `log_experiment`, and `update_experiment`). Click **Connect**. Write tools may show a confirmation badge because they are not marked read-only.
 6. Start a new chat and ask about your air quality (optionally mentioning `@Custom Air Sensor Mcp`).
 
 ---

@@ -36,8 +36,8 @@ export interface HandleMcpHttpRequestOptions extends CreateAirQualityMcpServerOp
 }
 
 /**
- * Creates a fresh, fully configured MCP server instance with all indoor air
- * quality tools, prompts, and threshold reference resources registered.
+ * Creates a fresh, fully configured MCP server instance with indoor, outdoor,
+ * and house-experiment tools, prompts, and threshold reference resources.
  *
  * In stateless HTTP deployments (Cloud Functions / Cloud Run), call this once
  * per incoming HTTP request so each request gets an isolated server + transport.

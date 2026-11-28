@@ -5,15 +5,20 @@
  * - WorkOS AuthKit PKCE browser sign-in (+ optional Bearer fallback)
  * - Live sensor room cards (°F only, manual refresh only)
  * - Interactive 6h / 24h / 7d SVG trend charts (CO2, PM2.5, Temp °F, Humidity)
+ * - Experiments & Playbook tab: one-tap presets, active timers, past-action log,
+ *   unlabeled-event triage, and the learned house playbook
  * - Slide-over Device Settings <dialog> drawer with Layer 1 remote config
  *   editing, post-interaction validation, and one-shot remote reboot confirmation
  */
 
 import {
   ApiError,
+  createExperiment,
   fetchAuthConfig,
   fetchDashboardOverview,
+  fetchExperiments,
   fetchFirmwareReleases,
+  fetchPlaybook,
   fetchReadingsHistory,
   saveDeviceConfig,
   saveSiteLocationConfig,
@@ -21,6 +26,7 @@ import {
   triggerDeviceReboot,
   triggerFleetRollout,
   triggerOutdoorRefresh,
+  updateExperiment,
 } from "./api.js";
 import {
   clearSession,
@@ -46,6 +52,15 @@ const state = {
   releases: [],
   releasesLoadedAt: 0,
   releasesLoading: false,
+  experiments: [],
+  playbookPayload: null,
+  experimentsLoadedAt: 0,
+  experimentsLoading: false,
+  experimentsRequestSeq: 0,
+  experimentDeviceId: null,
+  experimentMutating: false,
+  experimentClockId: null,
+  experimentDrawer: { mode: "past", experimentId: null },
   activeTab: "overview",
   selectedDeviceId: null,
   hours: 24,
@@ -86,9 +101,12 @@ const els = {
   dashboardView: document.getElementById("dashboard-view"),
   dashboardTablist: document.getElementById("dashboard-tablist"),
   tabOverview: document.getElementById("tab-overview"),
+  tabExperiments: document.getElementById("tab-experiments"),
+  tabExperimentsBadge: document.getElementById("tab-experiments-badge"),
   tabFleet: document.getElementById("tab-fleet"),
   tabFleetBadge: document.getElementById("tab-fleet-badge"),
   panelOverview: document.getElementById("panel-overview"),
+  panelExperiments: document.getElementById("panel-experiments"),
   panelFleet: document.getElementById("panel-fleet"),
   lastRefreshed: document.getElementById("last-refreshed"),
   fleetSummaryPills: document.getElementById("fleet-summary-pills"),
@@ -154,6 +172,35 @@ const els = {
   sitePollInterval: document.getElementById("site-poll-interval"),
   siteGeolocateBtn: document.getElementById("site-geolocate-btn"),
   outdoorIntervalPresets: Array.from(document.querySelectorAll("[data-outdoor-interval]")),
+
+  experimentsMeta: document.getElementById("experiments-meta"),
+  experimentDeviceSelect: document.getElementById("experiment-device-select"),
+  openPastLogBtn: document.getElementById("open-past-log-btn"),
+  activeExperiments: document.getElementById("active-experiments"),
+  unlabeledMeta: document.getElementById("unlabeled-meta"),
+  unlabeledEvents: document.getElementById("unlabeled-events"),
+  playbookMeta: document.getElementById("playbook-meta"),
+  playbookRecommendation: document.getElementById("playbook-recommendation"),
+  playbookTableBody: document.getElementById("playbook-table-body"),
+  recentExperimentsMeta: document.getElementById("recent-experiments-meta"),
+  recentExperiments: document.getElementById("recent-experiments"),
+  pastLogDialog: document.getElementById("past-log-dialog"),
+  pastLogTitle: document.getElementById("past-log-dialog-title"),
+  pastLogSubtitle: document.getElementById("past-log-subtitle"),
+  pastLogCloseBtn: document.getElementById("past-log-close-btn"),
+  pastLogError: document.getElementById("past-log-error"),
+  pastLogForm: document.getElementById("past-log-form"),
+  pastLogAction: document.getElementById("past-log-action"),
+  pastLogLabelField: document.getElementById("past-log-label-field"),
+  pastLogLabel: document.getElementById("past-log-label"),
+  pastLogDeviceField: document.getElementById("past-log-device-field"),
+  pastLogDevice: document.getElementById("past-log-device"),
+  pastLogTimesField: document.getElementById("past-log-times-field"),
+  pastLogStarted: document.getElementById("past-log-started"),
+  pastLogEnded: document.getElementById("past-log-ended"),
+  pastLogNotes: document.getElementById("past-log-notes"),
+  pastLogCancelBtn: document.getElementById("past-log-cancel-btn"),
+  pastLogSubmit: document.getElementById("past-log-submit-btn"),
 };
 
 // ============================================================================
@@ -217,7 +264,13 @@ async function closeModalDialog(dialog, returnValue) {
 
 function installDialogEnhancements() {
   // Route native cancel (Esc / closedby light-dismiss) through exit animation fallback
-  for (const dialog of [els.settingsDialog, els.rebootDialog, els.rolloutDialog, els.siteDialog]) {
+  for (const dialog of [
+    els.settingsDialog,
+    els.rebootDialog,
+    els.rolloutDialog,
+    els.siteDialog,
+    els.pastLogDialog,
+  ]) {
     dialog.addEventListener("cancel", (event) => {
       if (!supportsTopLayerExit()) {
         event.preventDefault();
@@ -404,9 +457,9 @@ function installAccessibleFormValidation() {
 
 function installTabsController() {
   const tablist = els.dashboardTablist;
-  const tabs = [els.tabOverview, els.tabFleet];
-  const panels = [els.panelOverview, els.panelFleet];
-  const tabKeys = ["overview", "fleet"];
+  const tabs = [els.tabOverview, els.tabExperiments, els.tabFleet];
+  const panels = [els.panelOverview, els.panelExperiments, els.panelFleet];
+  const tabKeys = ["overview", "experiments", "fleet"];
   const supportsFocusGroup = "focusGroup" in HTMLElement.prototype;
 
   if (!supportsFocusGroup) {
@@ -446,6 +499,9 @@ function installTabsController() {
 
     if (state.activeTab === "fleet" && state.session) {
       loadFirmwareReleases();
+    }
+    if (state.activeTab === "experiments" && state.session) {
+      loadExperimentsPanel();
     }
   };
 
@@ -1954,6 +2010,8 @@ function handleSessionExpired() {
   if (els.rebootDialog.open) els.rebootDialog.close("");
   if (els.settingsDialog.open) els.settingsDialog.close("");
   if (els.siteDialog.open) els.siteDialog.close("");
+  if (els.pastLogDialog.open) els.pastLogDialog.close("");
+  clearExperimentSessionState();
   setView("auth");
   showAuthError("Your session expired. Please sign in again.");
 }
@@ -2136,6 +2194,16 @@ async function refreshDashboard({ silentBanner = false, forceRefresh = false } =
 
     renderDeviceCards();
     renderFleetPanel();
+    const shouldRefreshExperiments =
+      state.activeTab === "experiments" || (forceRefresh && state.experimentsLoadedAt > 0);
+    if (shouldRefreshExperiments) {
+      await loadExperimentsPanel({ forceRefresh });
+    } else if (state.experimentsLoadedAt > 0) {
+      renderExperimentsPanel();
+    }
+    if (epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
     await loadCharts({ forceRefresh });
   } catch (err) {
     if (epoch !== state.sessionEpoch || state.session === null) {
@@ -2186,11 +2254,847 @@ async function loadAuthScreen() {
   }
 }
 
+// ============================================================================
+// Experiments & Playbook
+// ============================================================================
+
+const EXPERIMENT_ACTION_LABELS = {
+  crack_window: "Crack Window",
+  cross_ventilate: "Cross-Ventilate",
+  open_door: "Open Door",
+  hepa_purifier: "HEPA Purifier",
+  range_hood: "Range Hood",
+  hvac_fan: "HVAC Fan",
+  cooking: "Cooking",
+  custom: "Custom",
+};
+
+const UNLABELED_LABEL_ACTIONS = [
+  "crack_window",
+  "cross_ventilate",
+  "open_door",
+  "hepa_purifier",
+  "range_hood",
+  "hvac_fan",
+  "cooking",
+  "custom",
+];
+
+const ENERGY_TAX_TIERS = new Set(["free", "low", "moderate", "high"]);
+const LOCATION_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const RECENT_EXPERIMENT_LIMIT = 8;
+
+function listOverviewDevices() {
+  return state.overview?.devices || [];
+}
+
+function findOverviewDevice(deviceId) {
+  if (!deviceId) return null;
+  return listOverviewDevices().find((item) => item.device?.device_id === deviceId) ?? null;
+}
+
+function resolveExperimentDeviceId() {
+  const devices = listOverviewDevices();
+  const preferred = state.experimentDeviceId || state.selectedDeviceId;
+  if (preferred && devices.some((item) => item.device?.device_id === preferred)) {
+    return preferred;
+  }
+  return devices[0]?.device?.device_id ?? null;
+}
+
+function locationSlugOrUndefined(location) {
+  if (typeof location !== "string") return undefined;
+  const trimmed = location.trim();
+  return LOCATION_SLUG_RE.test(trimmed) ? trimmed : undefined;
+}
+
+function inferPlaybookGoal(reading) {
+  const co2 = Number(reading?.co2_ppm);
+  const pm = Number(reading?.pm2_5_ug_m3);
+  const co2High = Number.isFinite(co2) && co2 > 1000;
+  const pmHigh = Number.isFinite(pm) && pm > 9;
+  if (co2High && pmHigh) return "balanced";
+  if (pmHigh) return "lower_pm2_5";
+  return "lower_co2";
+}
+
+function playbookQueryForDevice(deviceId) {
+  const item = findOverviewDevice(deviceId);
+  const tier = item?.outdoor_delta?.energy_tax?.tier;
+  return {
+    location: locationSlugOrUndefined(item?.device?.location),
+    energyTaxTier: ENERGY_TAX_TIERS.has(tier) ? tier : undefined,
+    primaryGoal: inferPlaybookGoal(item?.device?.latest_reading),
+  };
+}
+
+function experimentTitle(experiment) {
+  if (experiment?.action_type === "custom" && experiment.custom_label) {
+    return experiment.custom_label;
+  }
+  return EXPERIMENT_ACTION_LABELS[experiment?.action_type] || "Experiment";
+}
+
+function experimentStatusPresentation(status) {
+  switch (status) {
+    case "active":
+      return { label: "Running", tone: "good" };
+    case "pending_evaluation":
+      return { label: "Settling", tone: "warn" };
+    case "evaluated":
+      return { label: "Evaluated", tone: "info" };
+    case "unlabeled":
+      return { label: "Needs a label", tone: "warn" };
+    case "dismissed":
+      return { label: "Dismissed", tone: "neutral" };
+    default:
+      return { label: status || "Unknown", tone: "neutral" };
+  }
+}
+
+function formatElapsed(isoString) {
+  const started = Date.parse(isoString);
+  if (!Number.isFinite(started)) return "0:00";
+  const totalSec = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(seconds).padStart(2, "0");
+  if (hours > 0) return `${hours}:${mm}:${ss}`;
+  return `${minutes}:${ss}`;
+}
+
+function formatMeasuredChanges(source) {
+  if (!source) return "";
+  return [
+    formatSignedDelta(source.co2_delta_ppm, " ppm CO₂", 0),
+    formatSignedDelta(source.pm2_5_delta_ug_m3, " µg/m³ PM2.5", 1),
+    formatSignedDelta(source.temp_delta_f, "°F", 1),
+    formatSignedDelta(source.humidity_delta_percent, "% RH", 1),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function energyTaxLabel(tier) {
+  if (!tier || tier === "unknown") return "Unknown";
+  return describeEnergyTax({ tier })?.label ?? tier;
+}
+
+function appendEmptyNote(container, text) {
+  const note = document.createElement("p");
+  note.className = "section__meta";
+  note.textContent = text;
+  container.append(note);
+}
+
+function createExperimentButton(className, label, attrs) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  for (const [key, value] of Object.entries(attrs)) {
+    button.setAttribute(key, value);
+  }
+  return button;
+}
+
+function fillDeviceSelect(select, selectedId) {
+  const devices = listOverviewDevices();
+  const desired =
+    selectedId && devices.some((item) => item.device?.device_id === selectedId)
+      ? selectedId
+      : (devices[0]?.device?.device_id ?? "");
+  const currentValues = Array.from(select.options)
+    .map((option) => option.value)
+    .join("|");
+  const nextValues = devices.map((item) => item.device?.device_id || "").join("|");
+  if (currentValues === nextValues && select.value === desired && devices.length > 0) {
+    return;
+  }
+
+  select.replaceChildren();
+  if (devices.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No sensors yet";
+    select.append(option);
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
+  for (const item of devices) {
+    const option = document.createElement("option");
+    option.value = item.device.device_id;
+    const room = formatRoomName(item.device.location);
+    option.textContent = `${room} (${item.device.device_id})`;
+    select.append(option);
+  }
+  select.value = desired;
+}
+
+function syncExperimentTimers() {
+  for (const node of els.activeExperiments.querySelectorAll("[data-experiment-timer]")) {
+    node.textContent = formatElapsed(node.getAttribute("data-experiment-timer"));
+  }
+}
+
+function ensureExperimentClock() {
+  const hasActive = state.experiments.some((experiment) => experiment.status === "active");
+  if (!hasActive) {
+    if (state.experimentClockId !== null) {
+      clearInterval(state.experimentClockId);
+      state.experimentClockId = null;
+    }
+    return;
+  }
+  if (state.experimentClockId !== null) return;
+  state.experimentClockId = setInterval(syncExperimentTimers, 1000);
+}
+
+function clearExperimentSessionState() {
+  if (state.experimentClockId !== null) {
+    clearInterval(state.experimentClockId);
+    state.experimentClockId = null;
+  }
+  state.experimentsRequestSeq += 1;
+  state.experiments = [];
+  state.playbookPayload = null;
+  state.experimentsLoadedAt = 0;
+  state.experimentsLoading = false;
+  state.experimentDeviceId = null;
+  state.experimentMutating = false;
+  state.experimentDrawer = { mode: "past", experimentId: null };
+  if (els.tabExperimentsBadge) {
+    els.tabExperimentsBadge.hidden = true;
+    els.tabExperimentsBadge.textContent = "";
+  }
+  if (els.activeExperiments) {
+    renderExperimentsPanel();
+  }
+}
+
+function renderActiveExperimentCard(experiment) {
+  const card = document.createElement("article");
+  card.className = "experiment-card";
+
+  const top = document.createElement("div");
+  top.className = "experiment-card__top";
+  const headingWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.className = "experiment-card__title";
+  title.textContent = experimentTitle(experiment);
+  const meta = document.createElement("p");
+  meta.className = "experiment-card__meta";
+  const room = formatRoomName(experiment.location);
+  meta.textContent = `${room} · started ${formatLocalTimestamp(experiment.started_at)}`;
+  headingWrap.append(title, meta);
+
+  const status = experimentStatusPresentation(experiment.status);
+  top.append(headingWrap, createPill(status.label, status.tone, true));
+
+  const timer = document.createElement("p");
+  timer.className = "experiment-timer";
+  timer.dataset.experimentTimer = experiment.started_at || "";
+  timer.textContent = formatElapsed(experiment.started_at);
+
+  const actions = document.createElement("div");
+  actions.className = "experiment-card__actions";
+  actions.append(
+    createExperimentButton("btn btn--danger btn--sm", "Stop", {
+      "data-experiment-stop": experiment.id,
+    })
+  );
+
+  card.append(top, timer, actions);
+  if (experiment.notes) {
+    const notes = document.createElement("p");
+    notes.className = "experiment-card__meta";
+    notes.textContent = experiment.notes;
+    card.append(notes);
+  }
+  return card;
+}
+
+function renderUnlabeledCard(experiment) {
+  const card = document.createElement("article");
+  card.className = "experiment-card";
+
+  const top = document.createElement("div");
+  top.className = "experiment-card__top";
+  const headingWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.className = "experiment-card__title";
+  title.textContent = `${formatRoomName(experiment.location)} change`;
+  const meta = document.createElement("p");
+  meta.className = "experiment-card__meta";
+  meta.textContent = `${formatLocalTimestamp(experiment.started_at)} – ${formatLocalTimestamp(experiment.ended_at)}`;
+  headingWrap.append(title, meta);
+  top.append(headingWrap, createPill("Needs a label", "warn"));
+
+  const actions = document.createElement("div");
+  actions.className = "experiment-card__actions";
+  for (const actionType of UNLABELED_LABEL_ACTIONS) {
+    actions.append(
+      createExperimentButton("chip-btn", EXPERIMENT_ACTION_LABELS[actionType], {
+        "data-experiment-label": experiment.id,
+        "data-action-type": actionType,
+      })
+    );
+  }
+  actions.append(
+    createExperimentButton("btn btn--ghost btn--sm", "Dismiss", {
+      "data-experiment-dismiss": experiment.id,
+    })
+  );
+
+  card.append(top, actions);
+  if (experiment.notes) {
+    const notes = document.createElement("p");
+    notes.className = "experiment-card__meta";
+    notes.textContent = experiment.notes;
+    card.append(notes);
+  }
+  return card;
+}
+
+function renderRecentExperimentCard(experiment) {
+  const card = document.createElement("article");
+  card.className = "experiment-card";
+  const top = document.createElement("div");
+  top.className = "experiment-card__top";
+  const headingWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.className = "experiment-card__title";
+  title.textContent = experimentTitle(experiment);
+  const meta = document.createElement("p");
+  meta.className = "experiment-card__meta";
+  const ended = experiment.ended_at
+    ? `ended ${formatLocalTimestamp(experiment.ended_at)}`
+    : `started ${formatLocalTimestamp(experiment.started_at)}`;
+  meta.textContent = `${formatRoomName(experiment.location)} · ${ended}`;
+  headingWrap.append(title, meta);
+  const status = experimentStatusPresentation(experiment.status);
+  top.append(headingWrap, createPill(status.label, status.tone));
+  card.append(top);
+
+  const measured = formatMeasuredChanges(experiment.evaluation);
+  if (measured) {
+    const result = document.createElement("p");
+    result.className = "experiment-card__meta";
+    result.textContent = measured;
+    card.append(result);
+  }
+  return card;
+}
+
+function renderPlaybookTable(recommendations) {
+  els.playbookTableBody.replaceChildren();
+  if (recommendations.length === 0) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "fleet-empty-cell";
+    cell.textContent =
+      "No evaluated experiments yet. Finish a run and wait about 20 minutes for the settling window.";
+    row.append(cell);
+    els.playbookTableBody.append(row);
+    return;
+  }
+
+  for (const recommendation of recommendations) {
+    const entry = recommendation.entry ?? recommendation;
+    const row = document.createElement("tr");
+    const actionCell = document.createElement("th");
+    actionCell.scope = "row";
+    actionCell.textContent = EXPERIMENT_ACTION_LABELS[entry.action_type] || entry.action_type;
+    const roomCell = document.createElement("td");
+    roomCell.textContent = formatRoomName(entry.location);
+    const taxCell = document.createElement("td");
+    taxCell.textContent = energyTaxLabel(entry.energy_tax_tier);
+    const changeCell = document.createElement("td");
+    const change = document.createElement("div");
+    change.className = "playbook-change";
+    change.textContent = formatMeasuredChanges(entry) || "—";
+    changeCell.append(change);
+    const confidenceCell = document.createElement("td");
+    const samples = Number.isFinite(Number(entry.sample_count)) ? Number(entry.sample_count) : 0;
+    const duration =
+      entry.avg_duration_minutes != null && Number.isFinite(Number(entry.avg_duration_minutes))
+        ? ` · ~${Number(entry.avg_duration_minutes)} min`
+        : "";
+    confidenceCell.textContent = `n=${samples} · ${entry.confidence || "low"}${duration}`;
+    row.append(actionCell, roomCell, taxCell, changeCell, confidenceCell);
+    els.playbookTableBody.append(row);
+  }
+}
+
+function renderExperimentsPanel() {
+  const unlabeled = state.experiments.filter((experiment) => experiment.status === "unlabeled");
+  if (unlabeled.length > 0) {
+    els.tabExperimentsBadge.hidden = false;
+    els.tabExperimentsBadge.textContent = String(unlabeled.length);
+  } else {
+    els.tabExperimentsBadge.hidden = true;
+    els.tabExperimentsBadge.textContent = "";
+  }
+
+  const deviceId = resolveExperimentDeviceId();
+  state.experimentDeviceId = deviceId;
+  fillDeviceSelect(els.experimentDeviceSelect, deviceId);
+  const device = findOverviewDevice(deviceId);
+  const room = device ? formatRoomName(device.device?.location) : "this house";
+  els.experimentsMeta.textContent = `Presets start a run on ${room}. Evaluation uses the 20-minute settling window after you stop.`;
+
+  const active = state.experiments.filter((experiment) => experiment.status === "active");
+  els.activeExperiments.replaceChildren();
+  if (active.length === 0) {
+    appendEmptyNote(els.activeExperiments, "No experiment is running. Pick a preset to start one.");
+  } else {
+    for (const experiment of active) {
+      els.activeExperiments.append(renderActiveExperimentCard(experiment));
+    }
+  }
+  ensureExperimentClock();
+
+  els.unlabeledEvents.replaceChildren();
+  els.unlabeledMeta.textContent =
+    unlabeled.length === 0
+      ? "Sharp CO₂ or PM2.5 changes waiting for a one-tap label."
+      : `${unlabeled.length} detected ${unlabeled.length === 1 ? "change" : "changes"} waiting for a label.`;
+  if (unlabeled.length === 0) {
+    appendEmptyNote(els.unlabeledEvents, "No unlabeled events right now.");
+  } else {
+    for (const experiment of unlabeled) {
+      els.unlabeledEvents.append(renderUnlabeledCard(experiment));
+    }
+  }
+
+  const playbook = state.playbookPayload?.playbook ?? null;
+  const ranked = state.playbookPayload?.recommendations;
+  const recommendations =
+    Array.isArray(ranked) && ranked.length > 0
+      ? ranked
+      : (playbook?.entries ?? []).map((entry) => ({ entry, rationale: "" }));
+  const top = recommendations[0];
+  if (top?.rationale) {
+    els.playbookRecommendation.hidden = false;
+    els.playbookRecommendation.replaceChildren();
+    const label = document.createElement("p");
+    label.className = "playbook-callout__label";
+    label.textContent = "Suggested for this room";
+    const text = document.createElement("p");
+    text.className = "playbook-callout__text";
+    text.textContent = top.rationale;
+    els.playbookRecommendation.append(label, text);
+  } else {
+    els.playbookRecommendation.hidden = true;
+    els.playbookRecommendation.replaceChildren();
+  }
+  const evaluatedCount = Number(playbook?.evaluated_experiment_count);
+  els.playbookMeta.textContent = playbook
+    ? `${Number.isFinite(evaluatedCount) ? evaluatedCount : 0} evaluated · updated ${formatLocalTimestamp(playbook.updated_at)}`
+    : "Median outcomes from evaluated experiments in this house.";
+  renderPlaybookTable(recommendations);
+
+  const recent = state.experiments
+    .filter(
+      (experiment) =>
+        experiment.status === "pending_evaluation" || experiment.status === "evaluated"
+    )
+    .slice(0, RECENT_EXPERIMENT_LIMIT);
+  els.recentExperiments.replaceChildren();
+  els.recentExperimentsMeta.textContent =
+    recent.length === 0
+      ? "Finished runs stay here while the 20-minute post-settle evaluation completes."
+      : `${recent.length} recent ${recent.length === 1 ? "run" : "runs"}. Settling runs finish about 20 minutes after they end.`;
+  if (recent.length === 0) {
+    appendEmptyNote(els.recentExperiments, "Finished experiments will show up here.");
+  } else {
+    for (const experiment of recent) {
+      els.recentExperiments.append(renderRecentExperimentCard(experiment));
+    }
+  }
+}
+
+async function loadExperimentsPanel({ forceRefresh = false } = {}) {
+  if (
+    !forceRefresh &&
+    state.experimentsLoadedAt > 0 &&
+    Date.now() - state.experimentsLoadedAt < CLIENT_CACHE_TTL_MS
+  ) {
+    renderExperimentsPanel();
+    return;
+  }
+
+  const seq = ++state.experimentsRequestSeq;
+  const epoch = state.sessionEpoch;
+  state.experimentsLoading = true;
+  try {
+    const deviceId = resolveExperimentDeviceId();
+    const playbookQuery = playbookQueryForDevice(deviceId);
+    const [experimentsResult, playbookResult] = await Promise.allSettled([
+      fetchExperiments({ limit: 50, refresh: forceRefresh }),
+      fetchPlaybook({ ...playbookQuery, refresh: forceRefresh }),
+    ]);
+    if (seq !== state.experimentsRequestSeq || epoch !== state.sessionEpoch || state.session === null) {
+      return;
+    }
+
+    const reasons = [experimentsResult, playbookResult]
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason);
+    if (reasons.some((err) => err instanceof ApiError && err.status === 401)) {
+      handleSessionExpired();
+      return;
+    }
+
+    if (experimentsResult.status === "fulfilled") {
+      const payload = experimentsResult.value;
+      state.experiments = Array.isArray(payload?.experiments) ? payload.experiments : [];
+      state.experimentsLoadedAt = Date.now();
+    }
+    if (playbookResult.status === "fulfilled") {
+      state.playbookPayload = playbookResult.value;
+    }
+    if (experimentsResult.status === "fulfilled" || playbookResult.status === "fulfilled") {
+      renderExperimentsPanel();
+    }
+
+    const failed = reasons[0];
+    if (failed) {
+      showBanner(
+        failed instanceof Error ? failed.message : "Unable to load experiments.",
+        "danger"
+      );
+    }
+  } finally {
+    if (seq === state.experimentsRequestSeq) {
+      state.experimentsLoading = false;
+    }
+  }
+}
+
+function experimentsAreReady() {
+  return state.experimentsLoadedAt > 0 && !state.experimentsLoading;
+}
+
+function deviceHasActiveExperiment(deviceId) {
+  return state.experiments.some(
+    (experiment) => experiment.status === "active" && experiment.device_id === deviceId
+  );
+}
+
+async function mutateExperiment(work, successMessage) {
+  if (state.experimentMutating) return;
+  state.experimentMutating = true;
+  try {
+    await work();
+    state.experimentsLoadedAt = 0;
+    showBanner(successMessage, "success");
+    await loadExperimentsPanel({ forceRefresh: true });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    showBanner(err instanceof Error ? err.message : "Unable to update the experiment.", "danger");
+  } finally {
+    state.experimentMutating = false;
+  }
+}
+
+async function startPresetExperiment(actionType) {
+  if (!EXPERIMENT_ACTION_LABELS[actionType]) return;
+  if (actionType === "custom") {
+    openExperimentDrawer("start_custom");
+    return;
+  }
+  if (!experimentsAreReady()) {
+    showBanner("Experiments are still loading. Try again in a moment.", "info");
+    return;
+  }
+  const deviceId = resolveExperimentDeviceId();
+  if (!deviceId) {
+    showBanner("No sensor is available to log against yet.", "danger");
+    return;
+  }
+  if (deviceHasActiveExperiment(deviceId)) {
+    showBanner("Stop the running experiment on this sensor before starting another.", "danger");
+    return;
+  }
+  const item = findOverviewDevice(deviceId);
+  const location = locationSlugOrUndefined(item?.device?.location);
+  await mutateExperiment(
+    () =>
+      createExperiment({
+        action_type: actionType,
+        device_id: deviceId,
+        ...(location ? { location } : {}),
+      }),
+    `${EXPERIMENT_ACTION_LABELS[actionType]} started.`
+  );
+}
+
+function toDatetimeLocalValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function localInputToIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function setPastLogError(message) {
+  if (!message) {
+    els.pastLogError.hidden = true;
+    els.pastLogError.textContent = "";
+    return;
+  }
+  els.pastLogError.hidden = false;
+  els.pastLogError.textContent = message;
+}
+
+function experimentDrawerCopy(mode) {
+  switch (mode) {
+    case "past":
+      return {
+        title: "Log Past Action",
+        subtitle: "Record an action that already happened so it can be evaluated.",
+        submit: "Log Past Action",
+      };
+    case "start_custom":
+      return {
+        title: "Start Custom Experiment",
+        subtitle: "Starts a running custom experiment on the selected sensor.",
+        submit: "Start",
+      };
+    case "label":
+      return {
+        title: "Label Event",
+        subtitle: "Name this auto-detected change so it can join the playbook.",
+        submit: "Save Label",
+      };
+    default: {
+      const unknown = mode;
+      throw new Error(`Unknown experiment drawer mode: ${String(unknown)}`);
+    }
+  }
+}
+
+function syncCustomLabelRequirement() {
+  const isCustom = els.pastLogAction.value === "custom";
+  els.pastLogLabel.required = isCustom;
+}
+
+function applyExperimentDrawerMode() {
+  const mode = state.experimentDrawer.mode;
+  const copy = experimentDrawerCopy(mode);
+  const isPast = mode === "past";
+  const isLabel = mode === "label";
+  els.pastLogTitle.textContent = copy.title;
+  els.pastLogSubtitle.textContent = copy.subtitle;
+  els.pastLogSubmit.textContent = copy.submit;
+  els.pastLogTimesField.hidden = !isPast;
+  els.pastLogStarted.required = isPast;
+  els.pastLogEnded.required = isPast;
+  els.pastLogDeviceField.hidden = isLabel;
+  els.pastLogDevice.required = !isLabel;
+  els.pastLogDevice.disabled = isLabel;
+  els.pastLogAction.disabled = mode === "start_custom";
+  if (mode === "start_custom") {
+    els.pastLogAction.value = "custom";
+  }
+  syncCustomLabelRequirement();
+}
+
+function openExperimentDrawer(mode, experiment = null) {
+  state.experimentDrawer = { mode, experimentId: experiment?.id ?? null };
+  setPastLogError("");
+  els.pastLogNotes.value = experiment?.notes || "";
+  els.pastLogLabel.value = experiment?.custom_label || "";
+  els.pastLogAction.disabled = false;
+  els.pastLogAction.value =
+    mode === "start_custom" ? "custom" : experiment?.action_type || "crack_window";
+  fillDeviceSelect(els.pastLogDevice, experiment?.device_id || resolveExperimentDeviceId());
+  const end = new Date();
+  const start = new Date(end.getTime() - 30 * 60_000);
+  els.pastLogStarted.value = toDatetimeLocalValue(start);
+  els.pastLogEnded.value = toDatetimeLocalValue(end);
+  applyExperimentDrawerMode();
+  if (!els.pastLogDialog.open) {
+    els.pastLogDialog.showModal();
+  }
+}
+
+async function handlePastLogSubmit(event) {
+  event.preventDefault();
+  setPastLogError("");
+  syncCustomLabelRequirement();
+  if (!els.pastLogForm.checkValidity()) {
+    els.pastLogForm.reportValidity();
+    return;
+  }
+
+  const mode = state.experimentDrawer.mode;
+  const actionType = els.pastLogAction.value;
+  const customLabel = els.pastLogLabel.value.trim();
+  const notes = els.pastLogNotes.value.trim();
+  if (actionType === "custom" && !customLabel) {
+    setPastLogError("A custom action needs a label.");
+    els.pastLogLabel.focus();
+    return;
+  }
+
+  let startedAt = null;
+  let endedAt = null;
+  if (mode === "past") {
+    startedAt = localInputToIso(els.pastLogStarted.value);
+    endedAt = localInputToIso(els.pastLogEnded.value);
+    if (!startedAt || !endedAt) {
+      setPastLogError("Enter a valid start and end time.");
+      return;
+    }
+    if (Date.parse(endedAt) < Date.parse(startedAt)) {
+      setPastLogError("End time must be the same as or after the start time.");
+      return;
+    }
+  }
+
+  const deviceId = els.pastLogDevice.value;
+  if (mode !== "label" && !deviceId) {
+    setPastLogError("Choose a sensor first.");
+    return;
+  }
+  if (mode === "start_custom" && !experimentsAreReady()) {
+    setPastLogError("Experiments are still loading. Try again in a moment.");
+    return;
+  }
+  if (mode === "start_custom" && deviceHasActiveExperiment(deviceId)) {
+    setPastLogError("Stop the running experiment on this sensor before starting another.");
+    return;
+  }
+
+  const item = findOverviewDevice(deviceId);
+  const location = locationSlugOrUndefined(item?.device?.location);
+  els.pastLogSubmit.disabled = true;
+  try {
+    if (mode === "label") {
+      await updateExperiment(state.experimentDrawer.experimentId, {
+        action_type: actionType,
+        ...(customLabel ? { custom_label: customLabel } : {}),
+        ...(notes ? { notes } : {}),
+      });
+      showBanner("Labeled the detected event.", "success");
+    } else if (mode === "start_custom") {
+      await createExperiment({
+        action_type: "custom",
+        custom_label: customLabel,
+        device_id: deviceId,
+        ...(location ? { location } : {}),
+        ...(notes ? { notes } : {}),
+      });
+      showBanner("Custom experiment started.", "success");
+    } else {
+      await createExperiment({
+        action_type: actionType,
+        device_id: deviceId,
+        started_at: startedAt,
+        ended_at: endedAt,
+        ...(location ? { location } : {}),
+        ...(customLabel ? { custom_label: customLabel } : {}),
+        ...(notes ? { notes } : {}),
+      });
+      showBanner(
+        "Past action logged. Evaluation runs after the 20-minute settling window.",
+        "success"
+      );
+    }
+    await closeModalDialog(els.pastLogDialog, "");
+    state.experimentsLoadedAt = 0;
+    await loadExperimentsPanel({ forceRefresh: true });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+    setPastLogError(err instanceof Error ? err.message : "Unable to save the experiment.");
+  } finally {
+    els.pastLogSubmit.disabled = false;
+  }
+}
+
+function installExperimentsController() {
+  els.panelExperiments.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const preset = target.closest("[data-experiment-preset]");
+    if (preset) {
+      startPresetExperiment(preset.getAttribute("data-experiment-preset"));
+      return;
+    }
+
+    const stop = target.closest("[data-experiment-stop]");
+    if (stop) {
+      const id = stop.getAttribute("data-experiment-stop");
+      mutateExperiment(
+        () => updateExperiment(id, { ended_at: new Date().toISOString() }),
+        "Experiment stopped. It will be evaluated after the 20-minute settling window."
+      );
+      return;
+    }
+
+    const dismiss = target.closest("[data-experiment-dismiss]");
+    if (dismiss) {
+      mutateExperiment(
+        () =>
+          updateExperiment(dismiss.getAttribute("data-experiment-dismiss"), {
+            status: "dismissed",
+          }),
+        "Unlabeled event dismissed."
+      );
+      return;
+    }
+
+    const label = target.closest("[data-experiment-label]");
+    if (!label) return;
+    const id = label.getAttribute("data-experiment-label");
+    const actionType = label.getAttribute("data-action-type");
+    if (actionType === "custom") {
+      const experiment = state.experiments.find((item) => item.id === id) ?? { id };
+      openExperimentDrawer("label", experiment);
+      return;
+    }
+    mutateExperiment(
+      () => updateExperiment(id, { action_type: actionType }),
+      `Labeled as ${EXPERIMENT_ACTION_LABELS[actionType] || actionType}.`
+    );
+  });
+
+  els.openPastLogBtn.addEventListener("click", () => openExperimentDrawer("past"));
+  els.experimentDeviceSelect.addEventListener("change", () => {
+    state.experimentDeviceId = els.experimentDeviceSelect.value || null;
+    state.experimentsLoadedAt = 0;
+    loadExperimentsPanel({ forceRefresh: true });
+  });
+  els.pastLogAction.addEventListener("change", syncCustomLabelRequirement);
+  els.pastLogForm.addEventListener("submit", handlePastLogSubmit);
+  els.pastLogCloseBtn.addEventListener("click", () => closeModalDialog(els.pastLogDialog, ""));
+  els.pastLogCancelBtn.addEventListener("click", () => closeModalDialog(els.pastLogDialog, ""));
+}
+
 async function init() {
   enhanceNativeSwitches();
   installDialogEnhancements();
   installAccessibleFormValidation();
   installTabsController();
+  installExperimentsController();
   setView("loading");
 
   try {
@@ -2273,6 +3177,8 @@ els.signoutBtn.addEventListener("click", async () => {
   state.overview = null;
   state.releases = [];
   state.releasesLoadedAt = 0;
+  clearExperimentSessionState();
+  if (els.pastLogDialog.open) els.pastLogDialog.close("");
   state.historyPayload = null;
   state.chartsCache.clear();
   hideBanner();

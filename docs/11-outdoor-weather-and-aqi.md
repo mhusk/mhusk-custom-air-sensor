@@ -41,7 +41,9 @@
 - **Remote MCP Server (`functions/src/mcp/`)**:
   - **`get_latest_reading`**: Automatically appends `outdoor` and `outdoor_comparison` whenever an outdoor snapshot exists.
   - **`get_outdoor_air_quality`**: Dedicated read-only tool returning the latest outdoor weather + AQI snapshot (auto-refreshing if stale) and optional `hours` history.
-  - **`analyze_indoor_air` prompt**: Guides Gemini, Claude, ChatGPT, and Grok to compare indoor vs. outdoor conditions and answer whether opening a window will help.
+  - **`get_ventilation_forecast`**: Read-only tool returning the current ventilation energy tax and the next low-tax window from the cached 24-hour forecast.
+  - **`get_house_playbook`**: Read-only tool that ranks measured house experiments for the current room and energy-tax tier (see [Guide 04](./04-workos-and-mcp-server.md)).
+  - **`analyze_indoor_air` prompt**: Guides Gemini, Claude, ChatGPT, and Grok to compare indoor vs. outdoor conditions, call `get_ventilation_forecast` when CO₂ or the energy tax is elevated, and cite house-proven playbook outcomes before recommending a window or a purifier.
 
 ---
 

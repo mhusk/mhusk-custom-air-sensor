@@ -1152,7 +1152,9 @@ dialog[open]:where(:not([data-closing])) {
 
 .field input[type="text"],
 .field input[type="number"],
-.field input[type="password"] {
+.field input[type="password"],
+.field input[type="datetime-local"],
+.field textarea {
   width: 100%;
   font: inherit;
   font-size: 0.9375rem;
@@ -1473,6 +1475,13 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
   --label-3: "Target";
   --label-4: "OTA Status";
   --label-5: "Rollout Action";
+}
+
+.playbook-table {
+  --label-2: "Room";
+  --label-3: "Energy tax";
+  --label-4: "Measured change";
+  --label-5: "Confidence";
 }
 
 .fleet-table thead {
@@ -1909,5 +1918,87 @@ input[type="checkbox"][switch].switch-fallback:checked::after {
 
 .forecast-strip__text {
   color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+}
+
+.experiment-stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.experiment-card {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.9rem 1rem;
+  box-shadow: var(--shadow-card);
+  display: grid;
+  gap: 0.65rem;
+}
+
+.experiment-card__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.experiment-card__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.experiment-card__meta {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.experiment-timer {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.experiment-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.playbook-callout {
+  margin-bottom: 0.9rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-md);
+  background-color: var(--surface-subtle);
+  border: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.playbook-callout__label {
+  margin: 0 0 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.playbook-callout__text {
+  margin: 0;
+}
+
+.playbook-change {
+  display: grid;
+  gap: 0.15rem;
   font-variant-numeric: tabular-nums;
 }

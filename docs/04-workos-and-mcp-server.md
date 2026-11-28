@@ -296,7 +296,7 @@ sequenceDiagram
 | `GET /health` | No | Lightweight liveness probe reporting whether WorkOS OAuth and Bearer fallback are configured (exposes zero secrets or user info). |
 | `GET /.well-known/oauth-protected-resource`<br/>`GET /.well-known/oauth-protected-resource/mcp` | No | **RFC 9728** Protected Resource Metadata pointing MCP clients to your `WORKOS_AUTHKIT_DOMAIN`. |
 | `GET /.well-known/oauth-authorization-server` | No | Cached proxy of `${WORKOS_AUTHKIT_DOMAIN}/.well-known/oauth-authorization-server` for legacy MCP (2025-03-26) clients. |
-| `POST /mcp` (plus `GET`/`DELETE /mcp`) | **Yes (`401`/`403`)** | Protected MCP Streamable HTTP endpoint serving all 4 tools, the `analyze_indoor_air` prompt, and the `air-quality://thresholds/reference` resource. |
+| `POST /mcp` (plus `GET`/`DELETE /mcp`) | **Yes (`401`/`403`)** | Protected MCP Streamable HTTP endpoint serving the indoor, outdoor, forecast, and house-experiment tools, the `analyze_indoor_air` prompt, and the `air-quality://thresholds/reference` resource. |
 
 ---
 
@@ -418,3 +418,36 @@ Replace `<CLOUD_RUN_BASE_URL>` with your deployed `https://mcp-...a.run.app` URL
 - **Why `parsedBody: req.body` Matters on Firebase Cloud Functions**: Firebase's `onRequest` Express wrapper pre-parses `application/json` bodies before your handler runs, consuming the raw HTTP request stream. Passing `parsedBody: req.body` into `handleStatelessMcpHttpRequest()` lets `@modelcontextprotocol/sdk`'s `StreamableHTTPServerTransport` process the already-parsed JSON immediately instead of hanging waiting for stream bytes.
 - **Secret Manager IAM Permissions on First Deploy**: The first time you deploy a function with `defineSecret(...)`, `firebase deploy --only functions` automatically grants the Cloud Run compute service account `roles/secretmanager.secretAccessor` on those secrets. If you update a secret value later with `firebase functions:secrets:set`, re-run `firebase deploy --only functions` so Cloud Run pins the new secret version.
 - **Never Use `WORKOS_API_KEY` as a Client Bearer Token**: `WORKOS_API_KEY` is your server's private admin credential for calling WorkOS APIs (like `userManagement.getUser`). Always use either a short-lived WorkOS OAuth 2.1 JWT (for AI assistants) or the separate `MCP_BEARER_FALLBACK_SECRET` (for `curl` / CLI tests).
+
+---
+
+## 7. House Experiment Tools (Step 25.4)
+
+The same owner-allowlisted `/mcp` endpoint now registers four experiment tools on top of the sensor, outdoor, and forecast tools. Writes do not get a second auth path: a caller who fails the WorkOS allowlist or bearer fallback never reaches `log_experiment` or `update_experiment`.
+
+| Tool | Annotations | What it does |
+| :--- | :--- | :--- |
+| `log_experiment` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: false` | Creates an experiment with `source: "mcp"`. Omit `ended_at` and `duration_minutes` to leave it `active`. Provide either to store a finished action as `pending_evaluation`. If that end time is already 20 minutes in the past, the Firestore service evaluates it immediately and returns `evaluated`. Payload is `createExperimentSchema` (Zod `.strict()`). |
+| `update_experiment` | same write annotations | Finish with `ended_at` or `duration_minutes`, label an unlabeled event with `action_type` (and optional `custom_label`), or dismiss with `status: "dismissed"`. Does not delete the document. Unknown JSON fields are rejected. |
+| `list_experiments` | `readOnlyHint: true` | Newest-first list. Optional `status`, `device_id`, `location`, `action_type`, and `limit`. |
+| `get_house_playbook` | `readOnlyHint: true` | Returns `house_playbook/summary` plus recommendations ranked for the room and energy-tax tier. Pass `location` / `device_id`, and optionally `energy_tax_tier` or `primary_goal` (`lower_co2`, `lower_pm2_5`, `balanced`). When the tier or goal is omitted, the tool fills them from the latest indoor reading and the cached outdoor snapshot. |
+
+`analyze_indoor_air` tells the assistant to call `get_ventilation_forecast` when CO₂ or the energy tax is elevated, then `get_house_playbook`, and to cite measured CO₂ / PM₂.₅ / °F / RH deltas instead of generic advice when this house has evaluated experiments.
+
+`created_by` is the allowlisted email on a WorkOS OAuth token. The static bearer fallback has no email, so those calls store `created_by: "mcp"`.
+
+### Validation
+
+```bash
+npm --prefix functions run verify:mcp
+```
+
+The offline suite checks tool annotations, strict rejection of unknown `log_experiment` fields, a mock log → finish → dismiss round trip, playbook ranking, and that `analyze_indoor_air` mentions `get_ventilation_forecast` and `get_house_playbook`. It does not write to Cloud Firestore. `npm --prefix functions run verify:mcp -- --live` only calls the read tools (`list_experiments`, `get_house_playbook`) against live Firestore.
+
+These tools are in the codebase and are not on the deployed Cloud Function until Step 25.6. AI clients keep showing the previously deployed tool list until that deploy.
+
+### Good to Know & Real-World Troubleshooting
+- **AI clients ask before running writes.** `readOnlyHint: false` is intentional. Confirming `log_experiment` or `update_experiment` in Gemini, Claude, ChatGPT, or Grok is expected, not a schema failure.
+- **Strict objects drop nothing silently.** An extra key such as `unexpected_field` fails validation before a document is written. Send only the documented fields.
+- **The offline mock does not evaluate experiments.** `verify:mcp` uses an in-memory store that records status changes (`active` → `pending_evaluation` → `dismissed`) and a seeded playbook. The 15-minute baseline / 20-minute post-settle evaluator still runs only through the Firestore service (`verify:experiments`), not through this MCP mock.
+- **Empty playbook is a successful read.** Before any experiment has been evaluated, `get_house_playbook` returns `found: true`, `has_history: false`, and an empty `recommendations` array. That means "no measured history yet," not a tool failure.

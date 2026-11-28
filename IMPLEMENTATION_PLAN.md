@@ -55,13 +55,13 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - [x] **Step 22**: Visual Showcase, EXIF-Stripped Media Pipeline & Google Flow Hype Video Storyboard (see [docs/plans/2026-11-24-hype-video-and-readme-showcase.md](docs/plans/2026-11-24-hype-video-and-readme-showcase.md) and [docs/12-showcase-and-hype-video.md](docs/12-showcase-and-hype-video.md))
 - [x] **Step 23**: Reliability, Security & Multi-Room Hardening (`v1.3.4` firmware timeouts & 30-bit monotonic safety, Open-Meteo `WriteBatch`, CORS/WorkOS hardening, expanded GitHub Actions CI)
 - [x] **Step 24**: Psychrometric Energy Tax & 24h Open-Meteo Free-Ventilation Forecast (Phase 1 of [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md))
-- [ ] **Step 25** *(In Progress)*: Experiment Logger, Auto-Detected Events & House Physics Playbook (Phase 2 of [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md)):
+- [x] **Step 25**: Experiment Logger, Auto-Detected Events & House Physics Playbook (Phase 2 of [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md)):
   - [x] **Step 25.1 (2.1)**: Core Experiments & House Physics Playbook Service (`b0aedbd`, deployed)
   - [x] **Step 25.2 (2.2)**: Passive Auto-Detection & Opportunistic Finalizer (`02003bf`, deployed)
   - [x] **Step 25.3 (2.3)**: Dashboard API Routes & Strict Zod Schemas (`27222e1`, deployed)
-  - [ ] **Step 25.4 (2.4)**: Remote MCP Read/Write Tools & `analyze_indoor_air` Prompt Update
-  - [ ] **Step 25.5 (2.5)**: Web Dashboard Experiments & Playbook UI
-  - [ ] **Step 25.6 (2.6)**: Live Cloud Deploy Gate & Validation Gate 2
+  - [x] **Step 25.4 (2.4)**: Remote MCP Read/Write Tools & `analyze_indoor_air` Prompt Update
+  - [x] **Step 25.5 (2.5)**: Web Dashboard Experiments & Playbook UI
+  - [x] **Step 25.6 (2.6)**: Live Cloud Deploy Gate & Validation Gate 2 *(deployed, then committed on main)*
 - [ ] **Step 26**: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` (Phase 3 — `SCD-40`-only satellite support + full hubs)
 - [ ] **Step 27**: Multi-Room Whole-House Intelligence (`compare_rooms`, Zero-Energy Internal Dilution Detector & Multi-Room Chart Overlays) (Phase 4)
 - [ ] **Step 28**: Scaling Toolkit — Node #2–3 Per-Device Provisioning CLI (`provision:device`) & Compact Satellite Enclosure Prompt (Phase 5)
@@ -379,17 +379,16 @@ To keep every change easy to understand, debug, and learn from, every step in th
 - **Deliverables**: `functions/src/services/outdoor.ts`, `functions/src/api/routes/outdoor.ts`, `functions/src/mcp/tools.ts` (`get_ventilation_forecast`), `web/app.js` & `web/styles.css`, `functions/src/scripts/verifyOutdoor.ts` (Phase 1 of `docs/plans/2026-11-27-multi-room-energy-experiments.md`).
 - **Single Focused Validation**: Passed `npm --prefix functions test`, `node scripts/verify_web_dashboard.mjs`, and `./scripts/check-secrets.sh`; deployed & pushed (`6cc2218`).
 
-#### Step 25: Experiment Logger, Auto-Detected Events & House Physics Playbook *(In Progress)*
-- **Status**: `[ ] In Progress (Steps 25.1–25.3 deployed & pushed; Steps 25.4–25.6 pending)`
+#### Step 25: Experiment Logger, Auto-Detected Events & House Physics Playbook
+- **Status**: `[x] Completed (Steps 25.1–25.3 deployed & pushed earlier; Steps 25.4–25.6 deployed 2026-11-27 8:26 PM America/Detroit and committed on main)`
 - **Goal**: Log indoor ventilation/purifier interventions, passively detect sharp CO₂/PM₂.₅ step changes as `unlabeled` triage candidates, evaluate 15m pre-baseline vs. 20m post-settle outcomes (including cross-room spillover), and maintain a single-doc `house_playbook/summary` for AI & dashboard recommendations.
 - **Completed Deliverables**:
   - **25.1 (`b0aedbd`):** `functions/src/services/experiments.ts`, `functions/src/services/firestore/db.ts`, `functions/src/scripts/verifyExperiments.ts`, `functions/package.json`.
   - **25.2 (`02003bf`):** `detectUnlabeledEventCandidate()`, `finalizeDuePendingExperiments()`, `processReadingForExperiments()`, and `syncOutdoorOnReading` wiring in `functions/src/index.ts`.
   - **25.3 (`27222e1`):** `functions/src/api/routes/experiments.ts`, strict Zod schemas in `functions/src/api/schemas.ts`, `PATCH` CORS in `functions/src/index.ts`, cache TTLs/invalidation in `functions/src/api/cache.ts`, and Check #14 in `functions/src/scripts/verifyApi.ts`.
-- **Remaining**:
-  - **25.4:** Remote MCP tools (`log_experiment`, `update_experiment`, `list_experiments`, `get_house_playbook`) & `analyze_indoor_air` prompt update + `verifyMcp.ts`.
-  - **25.5:** Web Dashboard Experiments & Playbook UI + `verify_web_dashboard.mjs`.
-  - **25.6:** Live Cloud Deploy Gate & Validation Gate 2.
+  - **25.4:** `log_experiment`, `update_experiment`, `list_experiments`, and `get_house_playbook` in `functions/src/mcp/tools.ts`; `analyze_indoor_air` now calls `get_ventilation_forecast` and `get_house_playbook` (`functions/src/mcp/prompts.ts`); `functions/src/scripts/verifyMcp.ts`. Passed `npm --prefix functions run verify:mcp`.
+  - **25.5:** Experiments tab in `web/index.html`, `web/app.js`, `web/api.js`, and `web/styles.css` — one-tap presets, active timer/stop, Log Past Action drawer, unlabeled-event triage, and the Learned House Playbook table. Passed `node scripts/verify_web_dashboard.mjs`. Live Hosting serves the tab.
+  - **25.6:** `firebase deploy --only firestore:indexes,functions,hosting`. Offline gate passed (`npm --prefix functions test`, `node scripts/verify_web_dashboard.mjs`, `./scripts/check-secrets.sh`). Live dashboard and MCP smoke experiments evaluated into `house_playbook/summary`, then were dismissed so the playbook returned to 0 evaluated entries. Unauthenticated `/api/experiments`, `/api/playbook`, and the Cloud Run `/mcp` endpoint returned `401`.
 
 #### Steps 26–29: Mixed-Fleet `v1.4.0`, Whole-House `compare_rooms`, Provisioning CLI & Live Walkthrough
 - **Status**: `[ ] Planned` — Tracked in detail in [docs/plans/2026-11-27-multi-room-energy-experiments.md](docs/plans/2026-11-27-multi-room-energy-experiments.md) (Phases 3–7).

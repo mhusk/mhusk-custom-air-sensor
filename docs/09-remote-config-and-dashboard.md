@@ -310,11 +310,23 @@ Your live dashboard is immediately available at `https://<your-firebase-project-
 
 > [!TIP]
 > **Why Manual Refresh + Multi-Layer Caching + Zero-Build Static Files?**
-> With manual refresh only (no background polling loop while a tab sits open overnight), plus a 5-minute in-memory browser `chartsCache`, lazy Fleet tab release loading, targeted `refreshOverviewOnly()` updates after config saves, a 60s–300s server-side `DashboardResponseCache` (bypassed via `?refresh=1`), and UTC-day `daily_rollups` (see [Guide 13](./13-firestore-read-optimization-and-rollups.md)), the dashboard incurs **0 idle reads** and only a handful of Firestore reads on live refreshes—keeping monthly usage comfortably inside Firebase's free tier. Zero-build ES Modules also eliminate `node_modules` bloat and let `firebase deploy --only hosting` finish in a few seconds.
+> With manual refresh only (no background polling loop while a tab sits open overnight), plus a 5-minute in-memory browser `chartsCache`, lazy Fleet and Experiments tab loading, targeted `refreshOverviewOnly()` updates after config saves, a 60s–300s server-side `DashboardResponseCache` (bypassed via `?refresh=1`), and UTC-day `daily_rollups` (see [Guide 13](./13-firestore-read-optimization-and-rollups.md)), the dashboard incurs **0 idle reads** and only a handful of Firestore reads on live refreshes—keeping monthly usage comfortably inside Firebase's free tier. Zero-build ES Modules also eliminate `node_modules` bloat and let `firebase deploy --only hosting` finish in a few seconds.
 
 > [!NOTE]
 > **WorkOS UI Gotcha: "Redirect URIs" Lives Under Applications (Not Top-Level Redirects or Admin Portal).**
 > WorkOS moved AuthKit callback URLs out of the old top-level "Redirects" sidebar item into **Applications → `<your application>` → Redirects tab → Redirect URIs**. If you search for `redirect` in the WorkOS command palette, ignore the `Admin Portal > ...` results (`Success redirects`, `Logo redirect URL`, `Admin Portal redirects`, `Directory Sync success URL`)—those are for Enterprise Admin Portal, not AuthKit sign-in. Pick **`<your application> > Redirect URIs`** at the top, verify the Staging/Production switcher matches your Secret Manager `WORKOS_CLIENT_ID`, and add the exact `https://<project-id>.web.app/auth/callback` URL with no trailing slash (leaving the other 5 redirect fields as `Not set`).
+
+## 5. Experiments & Playbook Tab (Step 25.5)
+
+The authenticated dashboard has a third tab, **Experiments**, beside Live & Trends and Fleet & Firmware. It talks to the owner-only experiment API from Step 25.3 (`GET`/`POST /api/experiments`, `PATCH /api/experiments/:id`, `GET /api/playbook`) and stays on the same 5-minute in-memory cache as the Fleet tab. Refresh, or switching back to the tab after the cache expires, sends `?refresh=1`.
+
+- **Presets** start a run on the selected sensor: Crack Window, Cross-Ventilate, Open Door, HEPA Purifier, Range Hood, and Custom. Custom opens the drawer for a label. The tab refuses a second running experiment on the same sensor.
+- **Stop** sets `ended_at` to now. The run stays in Recent Experiments as **Settling** until the 20-minute post-settle window elapses and the server evaluates it.
+- **Log Past Action** records a start and end that already happened. If the settling window has already elapsed, the API evaluates it on save.
+- **Unlabeled Events Detected** lists auto-detected CO₂/PM2.5 step changes. A one-tap label sets `action_type` (Custom asks for a label first). Dismiss sets `status` to `dismissed` and hides the card. The tab badge counts unlabeled events after the list has loaded.
+- **Learned House Playbook** ranks `house_playbook/summary` for the selected room, its current energy-tax tier (`free`, `low`, `moderate`, or `high`), and a goal inferred from the latest reading (CO₂ above 1,000 ppm and PM2.5 above 9 µg/m³ → balanced; PM2.5 alone → lower PM2.5; otherwise lower CO₂). The first recommendation is called out above the table.
+
+The tab is verified offline by `node scripts/verify_web_dashboard.mjs`. Validation Gate 2 deployed it to Firebase Hosting, and the dashboard plus MCP tools are committed on main.
 
 
 

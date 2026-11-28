@@ -113,16 +113,50 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
       bearerSecret
     );
     assert.equal(toolsList.status, 200);
-    const tools = (toolsList.body.result?.tools as Array<{ name: string }>) ?? [];
+    const tools =
+      (toolsList.body.result?.tools as Array<{
+        name: string;
+        annotations?: {
+          readOnlyHint?: boolean;
+          destructiveHint?: boolean;
+          idempotentHint?: boolean;
+          openWorldHint?: boolean;
+        };
+        inputSchema?: { additionalProperties?: boolean };
+      }>) ?? [];
     const toolNames = tools.map((t) => t.name).sort();
     assert.deepEqual(toolNames, [
       "get_air_quality_summary",
+      "get_house_playbook",
       "get_latest_reading",
       "get_outdoor_air_quality",
       "get_readings_history",
       "get_sensor_status",
       "get_ventilation_forecast",
+      "list_experiments",
+      "log_experiment",
+      "update_experiment",
     ]);
+    const toolByName = (name: string) => {
+      const tool = tools.find((candidate) => candidate.name === name);
+      assert.ok(tool, `Expected tools/list to include ${name}`);
+      return tool;
+    };
+    for (const name of ["log_experiment", "update_experiment"]) {
+      const annotations = toolByName(name).annotations;
+      assert.equal(annotations?.readOnlyHint, false, `${name} readOnlyHint`);
+      assert.equal(annotations?.destructiveHint, false, `${name} destructiveHint`);
+      assert.equal(annotations?.idempotentHint, false, `${name} idempotentHint`);
+      assert.equal(annotations?.openWorldHint, false, `${name} openWorldHint`);
+      assert.equal(
+        toolByName(name).inputSchema?.additionalProperties,
+        false,
+        `${name} should reject unknown fields`
+      );
+    }
+    for (const name of ["list_experiments", "get_house_playbook"]) {
+      assert.equal(toolByName(name).annotations?.readOnlyHint, true, `${name} readOnlyHint`);
+    }
     console.log(`   [PASS] tools/list -> ${toolNames.join(", ")}`);
 
     // 4. tools/call: get_latest_reading
@@ -261,6 +295,266 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
       `   [PASS] tools/call get_ventilation_forecast -> found=${forecastPayload.found}`
     );
 
+    // 7b2. House experiment tools. Writes stay on the offline mock so --live
+    // never creates a real experiment. Live mode only reads.
+    const playbookArgs = isLive
+      ? {}
+      : {
+          location: "home-office",
+          energy_tax_tier: "free",
+          primary_goal: "lower_co2",
+        };
+    const playbookRes = await postMcp(
+      baseUrl,
+      {
+        jsonrpc: "2.0",
+        id: 63,
+        method: "tools/call",
+        params: {
+          name: "get_house_playbook",
+          arguments: playbookArgs,
+        },
+      },
+      bearerSecret
+    );
+    assert.equal(playbookRes.status, 200);
+    const playbookContent = (playbookRes.body.result?.content as Array<{ text: string }>) ?? [];
+    assert.equal(Boolean(playbookRes.body.result?.isError), false);
+    const playbookPayload = JSON.parse(playbookContent[0].text) as {
+      found: boolean;
+      has_history: boolean;
+      context?: { energy_tax_tier: string | null; primary_goal: string };
+      recommendations?: Array<{
+        match_quality: string;
+        rationale: string;
+        entry: { action_type: string };
+      }>;
+    };
+    assert.equal(playbookPayload.found, true);
+    if (!isLive) {
+      assert.equal(playbookPayload.has_history, true);
+      assert.equal(playbookPayload.context?.primary_goal, "lower_co2");
+      assert.equal(playbookPayload.context?.energy_tax_tier, "free");
+      assert.equal(playbookPayload.recommendations?.[0]?.entry.action_type, "crack_window");
+      assert.equal(playbookPayload.recommendations?.[0]?.match_quality, "exact_tier");
+      assert.match(playbookPayload.recommendations?.[0]?.rationale ?? "", /ppm/);
+
+      const derivedRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 641,
+          method: "tools/call",
+          params: {
+            name: "get_house_playbook",
+            arguments: { device_id: "feather-s3-01" },
+          },
+        },
+        bearerSecret
+      );
+      const derivedContent = (derivedRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const derivedPayload = JSON.parse(derivedContent[0].text) as {
+        context?: { location: string | null; energy_tax_tier: string | null; primary_goal: string };
+      };
+      assert.equal(derivedPayload.context?.location, "home-office");
+      assert.equal(derivedPayload.context?.primary_goal, "lower_co2");
+      assert.ok(
+        derivedPayload.context?.energy_tax_tier === "free" ||
+          derivedPayload.context?.energy_tax_tier === "low" ||
+          derivedPayload.context?.energy_tax_tier === "moderate" ||
+          derivedPayload.context?.energy_tax_tier === "high",
+        "Expected a derived energy-tax tier from the current indoor and outdoor readings"
+      );
+
+      const pmPlaybookRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 64,
+          method: "tools/call",
+          params: {
+            name: "get_house_playbook",
+            arguments: {
+              location: "home-office",
+              energy_tax_tier: "high",
+              primary_goal: "lower_pm2_5",
+            },
+          },
+        },
+        bearerSecret
+      );
+      const pmContent = (pmPlaybookRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const pmPayload = JSON.parse(pmContent[0].text) as {
+        recommendations?: Array<{ entry: { action_type: string } }>;
+      };
+      assert.equal(pmPayload.recommendations?.[0]?.entry.action_type, "hepa_purifier");
+
+      const loggedRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 65,
+          method: "tools/call",
+          params: {
+            name: "log_experiment",
+            arguments: {
+              action_type: "open_door",
+              device_id: "feather-s3-01",
+              location: "home-office",
+              notes: "mcp verifier",
+            },
+          },
+        },
+        bearerSecret
+      );
+      assert.equal(loggedRes.status, 200);
+      assert.equal(loggedRes.body.result?.isError, undefined);
+      const loggedContent = (loggedRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const loggedPayload = JSON.parse(loggedContent[0].text) as {
+        created: boolean;
+        experiment: { id: string; status: string; source: string; created_by: string };
+      };
+      assert.equal(loggedPayload.created, true);
+      assert.equal(loggedPayload.experiment.status, "active");
+      assert.equal(loggedPayload.experiment.source, "mcp");
+      assert.equal(loggedPayload.experiment.created_by, "mcp");
+
+      const strictRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 66,
+          method: "tools/call",
+          params: {
+            name: "log_experiment",
+            arguments: {
+              action_type: "open_door",
+              device_id: "feather-s3-01",
+              unexpected_field: "nope",
+            },
+          },
+        },
+        bearerSecret
+      );
+      assert.equal(strictRes.status, 200);
+      assert.ok(
+        strictRes.body.error ||
+          (strictRes.body.result as { isError?: boolean } | undefined)?.isError,
+        "Expected strict schema rejection for unknown log_experiment field"
+      );
+
+      const finishedRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 67,
+          method: "tools/call",
+          params: {
+            name: "update_experiment",
+            arguments: {
+              experiment_id: loggedPayload.experiment.id,
+              duration_minutes: 5,
+            },
+          },
+        },
+        bearerSecret
+      );
+      const finishedContent = (finishedRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const finishedPayload = JSON.parse(finishedContent[0].text) as {
+        updated: boolean;
+        experiment: { status: string; duration_minutes: number };
+      };
+      assert.equal(finishedPayload.updated, true);
+      assert.equal(finishedPayload.experiment.status, "pending_evaluation");
+      assert.equal(finishedPayload.experiment.duration_minutes, 5);
+
+      const dismissedRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 68,
+          method: "tools/call",
+          params: {
+            name: "update_experiment",
+            arguments: {
+              experiment_id: loggedPayload.experiment.id,
+              status: "dismissed",
+            },
+          },
+        },
+        bearerSecret
+      );
+      const dismissedContent = (dismissedRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const dismissedPayload = JSON.parse(dismissedContent[0].text) as {
+        experiment: { status: string };
+      };
+      assert.equal(dismissedPayload.experiment.status, "dismissed");
+
+      const missingRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 69,
+          method: "tools/call",
+          params: {
+            name: "update_experiment",
+            arguments: {
+              experiment_id: "exp_does_not_exist",
+              status: "dismissed",
+            },
+          },
+        },
+        bearerSecret
+      );
+      const missingContent = (missingRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const missingPayload = JSON.parse(missingContent[0].text) as { found: boolean };
+      assert.equal(missingPayload.found, false);
+
+      const listRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 70,
+          method: "tools/call",
+          params: {
+            name: "list_experiments",
+            arguments: { status: "dismissed", device_id: "feather-s3-01" },
+          },
+        },
+        bearerSecret
+      );
+      const listContent = (listRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const listPayload = JSON.parse(listContent[0].text) as {
+        count: number;
+        experiments: Array<{ id: string; status: string }>;
+      };
+      assert.ok(listPayload.experiments.some((experiment) => experiment.id === loggedPayload.experiment.id));
+      assert.ok(listPayload.experiments.every((experiment) => experiment.status === "dismissed"));
+    } else {
+      const listRes = await postMcp(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: 70,
+          method: "tools/call",
+          params: {
+            name: "list_experiments",
+            arguments: { limit: 5 },
+          },
+        },
+        bearerSecret
+      );
+      assert.equal(listRes.status, 200);
+      assert.equal(Boolean(listRes.body.result?.isError), false);
+      const listContent = (listRes.body.result?.content as Array<{ text: string }>) ?? [];
+      const listPayload = JSON.parse(listContent[0].text) as { count: number; experiments: unknown[] };
+      assert.equal(typeof listPayload.count, "number");
+      assert.ok(Array.isArray(listPayload.experiments));
+    }
+    console.log(
+      `   [PASS] experiment tools -> playbook history=${playbookPayload.has_history}${isLive ? " (live read-only)" : ""}`
+    );
+
     // 7c. Invalid device_id/location slug rejected by MCP tool schema
     const badSlugRes = await postMcp(
       baseUrl,
@@ -315,6 +609,9 @@ async function runSuite(mode: "mock" | "live"): Promise<void> {
       (promptGet.body.result?.messages as Array<{ content: { text: string } }>) ?? [];
     assert.ok(promptMessages.length === 1);
     assert.ok(promptMessages[0].content.text.includes("get_latest_reading"));
+    assert.ok(promptMessages[0].content.text.includes("get_ventilation_forecast"));
+    assert.ok(promptMessages[0].content.text.includes("get_house_playbook"));
+    assert.ok(promptMessages[0].content.text.includes("house-proven"));
     assert.ok(promptMessages[0].content.text.includes(THRESHOLDS_RESOURCE_URI));
     console.log("   [PASS] prompts/list & prompts/get -> analyze_indoor_air");
 

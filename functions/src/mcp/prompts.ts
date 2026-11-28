@@ -68,7 +68,7 @@ export function registerAirQualityPromptsAndResources(server: McpServer): void {
     {
       title: "Analyze Indoor Air Quality",
       description:
-        "Guides the AI assistant to inspect the latest sensor reading and 24-hour summary, evaluate CO2 cognitive impact and PM2.5/PM10 risks against EPA/ASHRAE thresholds, and deliver concise, actionable recommendations.",
+        "Guides the AI assistant to inspect the latest sensor reading and summary, compare ventilation energy tax and the 24-hour forecast, consult this house's measured experiment playbook, and deliver concise recommendations that cite those outcomes.",
       argsSchema: {
         location: z
           .string()
@@ -116,14 +116,16 @@ export function registerAirQualityPromptsAndResources(server: McpServer): void {
                 `2. Call \`get_air_quality_summary\` with \`period="${targetPeriod}"\`${filterParts.length > 0 ? ` (${filterParts.join(", ")})` : ""} to review min/avg/max/p95 statistics, threshold exceedances, and any notable CO2 or PM2.5 spikes.`,
                 `3. If outdoor context is missing or stale on the latest reading, call \`get_outdoor_air_quality\` to compare outdoor temperature, humidity, PM2.5, and US EPA AQI.`,
                 `4. If indoor CO2 is elevated (>1000 ppm) or \`outdoor_comparison.energy_tax.tier\` is \`moderate\` or \`high\`, call \`get_ventilation_forecast\` to find the next low-energy-tax ventilation window or recommend a brief purge.`,
-                `5. If the latest reading is stale (or no recent reading is returned), call \`get_sensor_status\` to check whether the ESP32-S3 sensor is offline.`,
-                `6. Reference \`${THRESHOLDS_RESOURCE_URI}\` when interpreting CO2 cognitive ranges (400–800 ppm optimal, >1000 ppm elevated, >1400 ppm poor), revised 2024 US EPA PM2.5 AQI breakpoints (<=9.0 ug/m3 Good), and ideal humidity (30%–50% RH).`,
+                `5. Call \`get_house_playbook\`${filterParts.length > 0 ? ` (${filterParts.join(", ")})` : ""} and pass \`energy_tax_tier\` from \`outdoor_comparison.energy_tax.tier\` when you have it. Set \`primary_goal\` to \`lower_co2\`, \`lower_pm2_5\`, or \`balanced\` based on which metric is elevated. Prefer house-proven recommendations — measured CO2, PM2.5, temperature, and humidity deltas with sample count and confidence — over generic advice when the playbook has history.`,
+                `6. If the latest reading is stale (or no recent reading is returned), call \`get_sensor_status\` to check whether the ESP32-S3 sensor is offline.`,
+                `7. Reference \`${THRESHOLDS_RESOURCE_URI}\` when interpreting CO2 cognitive ranges (400–800 ppm optimal, >1000 ppm elevated, >1400 ppm poor), revised 2024 US EPA PM2.5 AQI breakpoints (<=9.0 ug/m3 Good), and ideal humidity (30%–50% RH).`,
                 "",
                 "Present a clear, concise summary covering:",
                 "- **Current Snapshot**: CO2 (ppm), PM2.5/PM10 (ug/m3) & US EPA AQI category, Temperature (°F/°C), Humidity (% RH), and how many minutes ago the reading was recorded.",
                 "- **Indoor vs. Outdoor Delta & Energy Tax**: Outdoor conditions, temperature/humidity/dew-point deltas, the ventilation energy tax tier (`free` / `low` / `moderate` / `high`), and whether opening a window helps now or if waiting for a forecast window saves energy.",
                 `- **${targetPeriod} Trend & Spikes**: Notable CO2 or PM2.5 episodes with peak values and timestamps.`,
-                "- **Actionable Advice**: Concrete next steps tailored to the metrics (remembering that opening a window / fresh air lowers CO2 when outdoor air is clean, while HEPA filtration lowers PM2.5/PM10 without incurring an HVAC energy tax).",
+                "- **House-Proven Playbook**: The best matching past action for this room and energy-tax tier, including measured CO2 / PM2.5 / °F / RH deltas, or an explicit note when this house has no evaluated experiments yet.",
+                "- **Actionable Advice**: Concrete next steps that cite the energy-tax tier and any house-proven outcome. Opening a window / fresh air lowers CO2 when outdoor air is clean and the tax is free or low; HEPA filtration lowers PM2.5/PM10 without an HVAC energy tax.",
               ].join("\n"),
             },
           },

@@ -4,11 +4,20 @@ import { fileURLToPath } from "node:url";
 
 import { extractBearerToken, timingSafeSecretEqual } from "../auth/workos.js";
 import {
+  computePlaybookFromExperiments,
+  generateExperimentId,
+  type CreateExperimentInput,
+  type ExperimentRecord,
+  type ExperimentStatus,
+  type UpdateExperimentInput,
+} from "../services/experiments.js";
+import {
   assessReadingHealth,
   computeMetricStats,
   detectNotableSpikes,
   downsampleReadings,
   getDb,
+  roundTo,
   type AirQualityReading,
   type DeviceStatus,
 } from "../services/firestore.js";
@@ -26,6 +35,155 @@ import { resolveProjectId } from "./projectId.js";
  */
 export function resolveProjectIdFromFirebaserc(): string | undefined {
   return resolveProjectId();
+}
+
+function normalizeMockLabel(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * In-memory stand-in for the Firestore experiment service. It records and
+ * updates experiments but does not run the 20-minute settling-window evaluator.
+ */
+function applyMockExperimentUpdate(
+  existing: ExperimentRecord,
+  input: UpdateExperimentInput
+): ExperimentRecord {
+  const now = input.now ?? new Date();
+  const startedAt =
+    input.started_at !== undefined ? new Date(input.started_at) : new Date(existing.started_at);
+  if (Number.isNaN(startedAt.getTime())) {
+    throw new Error(`Invalid ISO-8601 timestamp for 'started_at': ${String(input.started_at)}`);
+  }
+
+  let endedAt: Date | null = existing.ended_at ? new Date(existing.ended_at) : null;
+  let durationMinutes = existing.duration_minutes;
+
+  if (input.ended_at === null) {
+    endedAt = null;
+    durationMinutes = null;
+  } else if (input.ended_at !== undefined) {
+    endedAt = new Date(input.ended_at);
+    if (Number.isNaN(endedAt.getTime())) {
+      throw new Error(`Invalid ISO-8601 timestamp for 'ended_at': ${input.ended_at}`);
+    }
+    if (endedAt.getTime() < startedAt.getTime()) {
+      throw new Error("'ended_at' must be greater than or equal to 'started_at'.");
+    }
+    durationMinutes = roundTo((endedAt.getTime() - startedAt.getTime()) / 60_000, 1);
+  } else if (input.duration_minutes !== undefined && input.duration_minutes !== null) {
+    if (!Number.isFinite(input.duration_minutes) || input.duration_minutes <= 0) {
+      throw new Error("'duration_minutes' must be a positive number.");
+    }
+    durationMinutes = roundTo(input.duration_minutes, 1);
+    endedAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
+  } else if (endedAt !== null) {
+    durationMinutes = roundTo((endedAt.getTime() - startedAt.getTime()) / 60_000, 1);
+  }
+
+  const nextActionType = input.action_type ?? existing.action_type;
+  let nextStatus: ExperimentStatus = existing.status;
+  if (input.status !== undefined) {
+    nextStatus = input.status;
+  } else if (existing.status === "dismissed") {
+    nextStatus = "dismissed";
+  } else if (existing.status === "unlabeled" && input.action_type !== undefined) {
+    nextStatus = endedAt ? "pending_evaluation" : "active";
+  } else if (
+    existing.status === "active" &&
+    (input.ended_at !== undefined || input.duration_minutes !== undefined) &&
+    endedAt !== null
+  ) {
+    nextStatus = "pending_evaluation";
+  }
+
+  return {
+    ...existing,
+    action_type: nextActionType,
+    custom_label:
+      input.custom_label !== undefined
+        ? normalizeMockLabel(input.custom_label)
+        : existing.custom_label,
+    notes: input.notes !== undefined ? normalizeMockLabel(input.notes) : existing.notes,
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt ? endedAt.toISOString() : null,
+    duration_minutes: durationMinutes,
+    status: nextStatus,
+    updated_at: now.toISOString(),
+  };
+}
+
+function seedMockExperiments(): ExperimentRecord[] {
+  const evaluatedBase = {
+    custom_label: null,
+    device_id: "feather-s3-01",
+    location: "home-office",
+    notes: null,
+    status: "evaluated" as const,
+    source: "dashboard" as const,
+    outdoor_snapshot: null,
+    created_by: "owner",
+    evaluation: {
+      baseline: {
+        sample_count: 3,
+        co2_ppm: 1200,
+        pm2_5_ug_m3: 10,
+        temperature_f: 72,
+        humidity_percent: 45,
+      },
+      post_settle: {
+        sample_count: 3,
+        co2_ppm: 900,
+        pm2_5_ug_m3: 8,
+        temperature_f: 70.5,
+        humidity_percent: 43,
+      },
+      co2_delta_ppm: -300,
+      co2_rate_ppm_per_min: -30,
+      pm2_5_delta_ug_m3: -2,
+      temp_delta_f: -1.5,
+      humidity_delta_percent: -2,
+      cross_room_deltas: [],
+      evaluated_at: "2026-11-27T12:30:00.000Z",
+    },
+  };
+
+  return [
+    {
+      ...evaluatedBase,
+      id: "exp_mock_crack_window",
+      action_type: "crack_window",
+      started_at: "2026-11-27T12:00:00.000Z",
+      ended_at: "2026-11-27T12:10:00.000Z",
+      duration_minutes: 10,
+      energy_tax_tier: "free",
+      created_at: "2026-11-27T12:00:00.000Z",
+      updated_at: "2026-11-27T12:30:00.000Z",
+    },
+    {
+      ...evaluatedBase,
+      id: "exp_mock_hepa",
+      action_type: "hepa_purifier",
+      started_at: "2026-11-27T15:00:00.000Z",
+      ended_at: "2026-11-27T15:30:00.000Z",
+      duration_minutes: 30,
+      energy_tax_tier: "high",
+      created_at: "2026-11-27T15:00:00.000Z",
+      updated_at: "2026-11-27T16:00:00.000Z",
+      evaluation: {
+        ...evaluatedBase.evaluation,
+        co2_delta_ppm: 0,
+        co2_rate_ppm_per_min: 0,
+        pm2_5_delta_ug_m3: -18,
+        temp_delta_f: 0.1,
+        humidity_delta_percent: 0,
+      },
+    },
+  ];
 }
 
 /**
@@ -124,6 +282,8 @@ export function createMockAirQualityService(): AirQualityDataService {
       aqi_category: "Good",
     },
   };
+
+  const experiments = seedMockExperiments();
 
   const filterReadings = (deviceId?: string, location?: string): AirQualityReading[] =>
     readings.filter(
@@ -277,6 +437,86 @@ export function createMockAirQualityService(): AirQualityDataService {
         minutes_ago: 4.0,
         is_stale: false,
       };
+    },
+    async listExperiments(options = {}) {
+      const limit = Math.min(Math.max(Math.floor(options.limit ?? 50), 1), 200);
+      const statusSet = options.status
+        ? new Set(Array.isArray(options.status) ? options.status : [options.status])
+        : null;
+      const sorted = [...experiments].sort((a, b) => b.started_at.localeCompare(a.started_at));
+      const results: ExperimentRecord[] = [];
+      for (const mapped of sorted) {
+        if (statusSet && !statusSet.has(mapped.status)) continue;
+        if (options.device_id && mapped.device_id !== options.device_id) continue;
+        if (options.location && mapped.location !== options.location) continue;
+        if (options.action_type && mapped.action_type !== options.action_type) continue;
+        results.push(mapped);
+        if (results.length >= limit) break;
+      }
+      return results;
+    },
+    async createExperiment(input: CreateExperimentInput) {
+      const now = input.now ?? new Date();
+      const startedAt = input.started_at ? new Date(input.started_at) : now;
+      if (Number.isNaN(startedAt.getTime())) {
+        throw new Error(`Invalid ISO-8601 timestamp for 'started_at': ${String(input.started_at)}`);
+      }
+      let endedAt: Date | null = null;
+      let durationMinutes: number | null = null;
+      if (input.ended_at !== undefined && input.ended_at !== null) {
+        endedAt = new Date(input.ended_at);
+        if (Number.isNaN(endedAt.getTime())) {
+          throw new Error(`Invalid ISO-8601 timestamp for 'ended_at': ${input.ended_at}`);
+        }
+        if (endedAt.getTime() < startedAt.getTime()) {
+          throw new Error("'ended_at' must be greater than or equal to 'started_at'.");
+        }
+        durationMinutes = roundTo((endedAt.getTime() - startedAt.getTime()) / 60_000, 1);
+      } else if (input.duration_minutes !== undefined && input.duration_minutes !== null) {
+        if (!Number.isFinite(input.duration_minutes) || input.duration_minutes <= 0) {
+          throw new Error("'duration_minutes' must be a positive number.");
+        }
+        durationMinutes = roundTo(input.duration_minutes, 1);
+        endedAt = new Date(startedAt.getTime() + durationMinutes * 60_000);
+      }
+      const record: ExperimentRecord = {
+        id: generateExperimentId(startedAt),
+        action_type: input.action_type,
+        custom_label: normalizeMockLabel(input.custom_label),
+        device_id: input.device_id.trim(),
+        location: normalizeMockLabel(input.location) ?? "home-office",
+        started_at: startedAt.toISOString(),
+        ended_at: endedAt ? endedAt.toISOString() : null,
+        duration_minutes: durationMinutes,
+        notes: normalizeMockLabel(input.notes),
+        status:
+          input.status === "unlabeled"
+            ? "unlabeled"
+            : endedAt
+              ? "pending_evaluation"
+              : (input.status ?? "active"),
+        source: input.source ?? "dashboard",
+        outdoor_snapshot: input.outdoor_snapshot ?? null,
+        energy_tax_tier: input.energy_tax_tier ?? null,
+        evaluation: null,
+        created_at: now.toISOString(),
+        created_by: normalizeMockLabel(input.created_by) ?? "owner",
+        updated_at: now.toISOString(),
+      };
+      experiments.push(record);
+      return record;
+    },
+    async updateExperiment(id, input) {
+      const index = experiments.findIndex((experiment) => experiment.id === id);
+      if (index < 0) {
+        return null;
+      }
+      const next = applyMockExperimentUpdate(experiments[index], input);
+      experiments[index] = next;
+      return next;
+    },
+    async getHousePlaybook() {
+      return computePlaybookFromExperiments(experiments);
     },
   };
 }

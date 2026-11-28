@@ -107,6 +107,15 @@
           </button>
           <button
             type="button"
+            id="tab-experiments"
+            class="tablist__tab"
+            aria-selected="false"
+          >
+            <span>Experiments</span>
+            <span id="tab-experiments-badge" class="tab-badge" hidden></span>
+          </button>
+          <button
+            type="button"
             id="tab-fleet"
             class="tablist__tab"
             aria-selected="false"
@@ -156,6 +165,105 @@
               <div id="charts-grid" class="charts-grid"></div>
 
               <div id="spikes-panel" class="spikes-panel" hidden></div>
+            </section>
+          </div>
+        </div>
+
+        <div
+          id="panel-experiments"
+          class="tabpanel"
+          role="tabpanel"
+          aria-labelledby="tab-experiments"
+          hidden="until-found"
+        >
+          <div class="tabpanel__inner dashboard">
+            <section class="section" aria-labelledby="experiments-heading">
+              <div class="section__header section__header--wrap">
+                <div>
+                  <h1 id="experiments-heading" class="section__title">Experiments &amp; Playbook</h1>
+                  <p id="experiments-meta" class="section__meta">
+                    Log a real action, then wait about 20 minutes after it ends for the settling window.
+                  </p>
+                </div>
+                <div class="controls-bar">
+                  <label class="select-wrap" for="experiment-device-select">
+                    <span class="visually-hidden">Sensor for this experiment</span>
+                    <select id="experiment-device-select" class="select-input"></select>
+                  </label>
+                  <button type="button" id="open-past-log-btn" class="btn btn--secondary">
+                    Log Past Action
+                  </button>
+                </div>
+              </div>
+
+              <div id="active-experiments" class="experiment-stack"></div>
+
+              <div class="preset-row" role="group" aria-label="Start an experiment">
+                <button type="button" class="chip-btn" data-experiment-preset="crack_window">Crack Window</button>
+                <button type="button" class="chip-btn" data-experiment-preset="cross_ventilate">Cross-Ventilate</button>
+                <button type="button" class="chip-btn" data-experiment-preset="open_door">Open Door</button>
+                <button type="button" class="chip-btn" data-experiment-preset="hepa_purifier">HEPA Purifier</button>
+                <button type="button" class="chip-btn" data-experiment-preset="range_hood">Range Hood</button>
+                <button type="button" class="chip-btn" data-experiment-preset="custom">Custom</button>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="unlabeled-heading">
+              <div class="section__header">
+                <div>
+                  <h2 id="unlabeled-heading" class="section__title">Unlabeled Events Detected</h2>
+                  <p id="unlabeled-meta" class="section__meta">
+                    Sharp CO₂ or PM2.5 changes waiting for a one-tap label.
+                  </p>
+                </div>
+              </div>
+              <div id="unlabeled-events" class="experiment-stack"></div>
+            </section>
+
+            <section class="section" aria-labelledby="playbook-heading">
+              <div class="section__header">
+                <div>
+                  <h2 id="playbook-heading" class="section__title">Learned House Playbook</h2>
+                  <p id="playbook-meta" class="section__meta">
+                    Median outcomes from evaluated experiments in this house.
+                  </p>
+                </div>
+              </div>
+              <div id="playbook-recommendation" class="playbook-callout" hidden></div>
+              <div
+                tabindex="0"
+                role="region"
+                aria-labelledby="playbook-table-caption"
+                class="table-wrapper"
+              >
+                <table class="fleet-table playbook-table">
+                  <caption id="playbook-table-caption" class="visually-hidden">
+                    Learned house playbook grouped by room, action, and energy-tax tier
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Action</th>
+                      <th scope="col">Room</th>
+                      <th scope="col">Energy tax</th>
+                      <th scope="col">Measured change</th>
+                      <th scope="col">Confidence</th>
+                    </tr>
+                  </thead>
+                  <tbody id="playbook-table-body"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="recent-experiments-heading">
+              <div class="section__header">
+                <div>
+                  <h2 id="recent-experiments-heading" class="section__title">Recent Experiments</h2>
+                  <p id="recent-experiments-meta" class="section__meta">
+                    Finished runs stay here while the 20-minute post-settle evaluation completes.
+                  </p>
+                </div>
+              </div>
+              <div id="recent-experiments" class="experiment-stack"></div>
             </section>
           </div>
         </div>
@@ -540,6 +648,76 @@
         <div class="drawer__actions">
           <button type="button" id="site-cancel-btn" class="btn btn--secondary">Cancel</button>
           <button type="submit" id="site-save-btn" class="btn btn--primary">Save &amp; Fetch Outdoor</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <dialog id="past-log-dialog" class="drawer-dialog" closedby="any" aria-labelledby="past-log-dialog-title">
+    <div class="drawer__header">
+      <div>
+        <h1 id="past-log-dialog-title" class="drawer__title">Log Past Action</h1>
+        <p id="past-log-subtitle" class="drawer__subtitle">
+          Record an action that already happened so it can be evaluated.
+        </p>
+      </div>
+      <button type="button" id="past-log-close-btn" class="icon-btn" aria-label="Close log past action">
+        &times;
+      </button>
+    </div>
+    <div class="drawer__body">
+      <div id="past-log-error" class="inline-alert inline-alert--danger" role="alert" hidden></div>
+      <form id="past-log-form" class="settings-form">
+        <div class="field" id="past-log-action-field">
+          <label for="past-log-action">Action</label>
+          <select id="past-log-action" class="select-input" required>
+            <option value="crack_window">Crack Window</option>
+            <option value="cross_ventilate">Cross-Ventilate</option>
+            <option value="open_door">Open Door</option>
+            <option value="hepa_purifier">HEPA Purifier</option>
+            <option value="range_hood">Range Hood</option>
+            <option value="hvac_fan">HVAC Fan</option>
+            <option value="cooking">Cooking</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="field" id="past-log-label-field">
+          <label for="past-log-label">Custom label</label>
+          <span id="past-log-label-hint" class="field__hint">Up to 80 characters. Required for a custom action.</span>
+          <input
+            id="past-log-label"
+            type="text"
+            maxlength="80"
+            aria-describedby="past-log-label-hint"
+          >
+        </div>
+        <div class="field" id="past-log-device-field">
+          <label for="past-log-device">Sensor</label>
+          <select id="past-log-device" class="select-input" required></select>
+        </div>
+        <div id="past-log-times-field">
+          <div class="field">
+            <label for="past-log-started">Started</label>
+            <input id="past-log-started" type="datetime-local" required>
+          </div>
+          <div class="field">
+            <label for="past-log-ended">Ended</label>
+            <input id="past-log-ended" type="datetime-local" required>
+          </div>
+        </div>
+        <div class="field">
+          <label for="past-log-notes">Notes</label>
+          <span id="past-log-notes-hint" class="field__hint">Optional. Up to 500 characters.</span>
+          <textarea
+            id="past-log-notes"
+            maxlength="500"
+            rows="3"
+            aria-describedby="past-log-notes-hint"
+          ></textarea>
+        </div>
+        <div class="drawer__actions">
+          <button type="button" id="past-log-cancel-btn" class="btn btn--secondary">Cancel</button>
+          <button type="submit" id="past-log-submit-btn" class="btn btn--primary">Log Past Action</button>
         </div>
       </form>
     </div>

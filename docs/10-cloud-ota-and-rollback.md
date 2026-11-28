@@ -492,13 +492,15 @@ Additionally, `GET /api/dashboard/overview` now maps `ota_status`, `ota_target_v
 
 ### Fleet & Firmware Tab (`web/`)
 
-The zero-build web dashboard (`web/index.html`, `web/app.js`, `web/api.js`, `web/styles.css`) now organizes the authenticated view into two accessible tabs:
+Step 19 organizes the authenticated view of the zero-build web dashboard (`web/index.html`, `web/app.js`, `web/api.js`, `web/styles.css`) into two accessible tabs:
 
 1. **Live & Trends** — Live room cards (with a status pill whenever a sensor is `updating`, `pending`, `rolled_back`, or `error`), 6h/24h/7d interactive SVG charts, and the Layer 1 Device Settings drawer.
 2. **Fleet & Firmware** — Displays:
    - **Fleet-Wide Promotion Bar**: Pick any `active` release, inspect its notes/size/git SHA, and promote across all rooms (or clear targets) behind a native `<dialog>` confirmation modal.
    - **Responsive Fleet Table**: Shows each sensor's room, online/stale status, running version badge, target version badge, OTA status + inline `ota_last_error` warnings, and per-device `Promote` / `Clear` controls (automatically transforms into stacked cards on narrow screens via CSS `@container` queries).
    - **Published Releases**: Compact cards for every manifest in `firmware_releases`, clearly labeling `Active` vs. `Yanked` builds.
+
+Step 25.5 adds a third tab, **Experiments**, for one-tap ventilation experiments, unlabeled-event triage, and the learned house playbook. That tab is documented in [Guide 09](./09-remote-config-and-dashboard.md). The Fleet table is unchanged.
 
 ### Running the Step 19 Focused Validation
 
