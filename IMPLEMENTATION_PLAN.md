@@ -64,7 +64,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
   - [x] **Step 25.6 (2.6)**: Live Cloud Deploy Gate & Validation Gate 2 *(deployed, then committed on main)*
 - [ ] **Step 26** *(In Progress)*: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` (Phase 3 — `SCD-40`-only satellite support + full hubs):
   - [x] **Step 26.1 (3.1)**: Backward-compatible Firestore rules for null PM/AQI fields, `SCD-40`-only sensors, and optional `floor` (emulator-verified and deployed; live rules match the file)
-  - [x] **Step 26.2 (3.2)**: Null-safe backend services (PM/AQI stay null; optional `floor` on device config). Offline checks passed. Not deployed.
+  - [x] **Step 26.2 (3.2)**: Null-safe backend services (PM/AQI stay null; optional `floor` on device config). Offline checks passed. `firebase deploy --only functions` updated `mcp` and `syncOutdoorOnReading` on 2026-11-27 at 8:57 PM America/Detroit. Hosting was not deployed.
 - [ ] **Step 27**: Multi-Room Whole-House Intelligence (`compare_rooms`, Zero-Energy Internal Dilution Detector & Multi-Room Chart Overlays) (Phase 4)
 - [ ] **Step 28**: Scaling Toolkit — Node #2–3 Per-Device Provisioning CLI (`provision:device`) & Compact Satellite Enclosure Prompt (Phase 5)
 - [ ] **Step 29**: Live Hardware Walkthrough, First House Experiments & Final Docs (Phases 6–7)
@@ -395,7 +395,7 @@ To keep every change easy to understand, debug, and learn from, every step in th
 #### Step 26: Mixed-Fleet Data Model, Security Rules & Auto-Detecting Firmware `v1.4.0` *(In Progress)*
 - **Status**: `[ ] In Progress (Steps 26.1–26.2 done; firmware v1.4.0, null-safe web UI, and the Gate 3 functions/hosting deploy are not started)`
 - **26.1:** `firestore.rules` accepts null PM/AQI/particle fields, exact sensor lists `["SCD-40"]` and `["SCD-40", "PMSA003I"]`, and an optional admin-written `floor` slug on `device_configs`. `scripts/verify_device_configs_rules.py --emulator` passed under `firebase emulators:exec`. `firebase deploy --only firestore:rules` compiled and released the file. The live `cloud.firestore` ruleset matches `firestore.rules` byte for byte, and the five live `device_configs` access checks still pass.
-- **26.2:** Readings, device snapshots, and daily rollups keep null PM/AQI/particle values. `assessReadingHealth()` reports `unavailable` instead of Good. Summaries and indoor/outdoor deltas ignore unmeasured PM so a satellite cannot dilute the house average or look like `0 µg/m³`. `DeviceConfig.floor` and `updateDeviceConfigSchema` accept an optional slug. Not deployed.
+- **26.2:** Readings, device snapshots, and daily rollups keep null PM/AQI/particle values. `assessReadingHealth()` reports `unavailable` instead of Good. Summaries and indoor/outdoor deltas ignore unmeasured PM so a satellite cannot dilute the house average or look like `0 µg/m³`. `DeviceConfig.floor` and `updateDeviceConfigSchema` accept an optional slug. `firebase deploy --only functions` updated `mcp` (`mcp-00016-pem`) and `syncOutdoorOnReading` (`syncoutdooronreading-00010-wug`) in `us-east1` at 8:57 PM America/Detroit on 2026-11-27. Hosting was not deployed.
 - **Remaining**: firmware `v1.4.0`, null-safe web UI, and Validation Gate 3's functions/hosting deploy.
 
 #### Steps 27–29: Whole-House `compare_rooms`, Provisioning CLI & Live Walkthrough
