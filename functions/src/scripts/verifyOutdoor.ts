@@ -396,6 +396,20 @@ function testIndoorOutdoorDelta(): void {
   );
   assert.equal(neutralDelta.window_recommendation, "neutral");
 
+  // SCD-40 satellite has no PM. A null indoor value must not look like 0 ug/m3 Good air.
+  const satelliteDelta = computeIndoorOutdoorDelta(
+    {
+      ...SAMPLE_READING,
+      co2_ppm: 640,
+      pm2_5_ug_m3: null,
+      aqi_us: null,
+    },
+    { ...SAMPLE_OUTDOOR, pm2_5_ug_m3: 18.0 }
+  );
+  assert.equal(satelliteDelta.pm2_5_diff_ug_m3, null);
+  assert.equal(satelliteDelta.aqi_diff, null);
+  assert.equal(satelliteDelta.window_recommendation, "neutral");
+
   // Forecast window finder selects clean contiguous free/low window
   const sampleForecast: OutdoorForecast = {
     fetched_at: "2026-11-24T17:00:00.000Z",

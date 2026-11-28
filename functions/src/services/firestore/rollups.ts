@@ -9,12 +9,13 @@ import type { OutdoorReading } from "../outdoor.js";
 import {
   DAILY_ROLLUPS_COLLECTION,
   OUTDOOR_DAILY_ROLLUPS_COLLECTION,
+  asNullableNumber,
   asNumber,
   asString,
   getDb,
   parseTimestampToDateOrNull,
 } from "./db.js";
-import type { AirQualityReading, AqiCategory } from "./types.js";
+import { parseAqiCategory, type AirQualityReading, type AqiCategory } from "./types.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -25,12 +26,19 @@ export interface CompactIndoorSample {
   tc: number;
   tf: number;
   rh: number;
-  pm1: number;
-  pm25: number;
-  pm10: number;
-  aqi: number;
-  cat: AqiCategory;
-  p: [number, number, number, number, number, number];
+  pm1: number | null;
+  pm25: number | null;
+  pm10: number | null;
+  aqi: number | null;
+  cat: AqiCategory | null;
+  p: [
+    number | null,
+    number | null,
+    number | null,
+    number | null,
+    number | null,
+    number | null,
+  ];
   id?: string;
 }
 
@@ -268,17 +276,17 @@ export function decodeIndoorRollupDoc(
       temperature_c: asNumber(entry.tc),
       temperature_f: asNumber(entry.tf),
       humidity_percent: asNumber(entry.rh),
-      pm1_0_ug_m3: asNumber(entry.pm1),
-      pm2_5_ug_m3: asNumber(entry.pm25),
-      pm10_0_ug_m3: asNumber(entry.pm10),
-      aqi_us: asNumber(entry.aqi),
-      aqi_category: asString(entry.cat, "Good") as AqiCategory,
-      particles_0_3um: asNumber(particles[0]),
-      particles_0_5um: asNumber(particles[1]),
-      particles_1_0um: asNumber(particles[2]),
-      particles_2_5um: asNumber(particles[3]),
-      particles_5_0um: asNumber(particles[4]),
-      particles_10_0um: asNumber(particles[5]),
+      pm1_0_ug_m3: asNullableNumber(entry.pm1),
+      pm2_5_ug_m3: asNullableNumber(entry.pm25),
+      pm10_0_ug_m3: asNullableNumber(entry.pm10),
+      aqi_us: asNullableNumber(entry.aqi),
+      aqi_category: parseAqiCategory(entry.cat),
+      particles_0_3um: asNullableNumber(particles[0]),
+      particles_0_5um: asNullableNumber(particles[1]),
+      particles_1_0um: asNullableNumber(particles[2]),
+      particles_2_5um: asNullableNumber(particles[3]),
+      particles_5_0um: asNullableNumber(particles[4]),
+      particles_10_0um: asNullableNumber(particles[5]),
     });
   }
 
@@ -450,17 +458,17 @@ export async function appendIndoorRollupFromRawDoc(
     temperature_c: asNumber(rawData.temperature_c),
     temperature_f: asNumber(rawData.temperature_f),
     humidity_percent: asNumber(rawData.humidity_percent),
-    pm1_0_ug_m3: asNumber(rawData.pm1_0_ug_m3),
-    pm2_5_ug_m3: asNumber(rawData.pm2_5_ug_m3),
-    pm10_0_ug_m3: asNumber(rawData.pm10_0_ug_m3),
-    aqi_us: asNumber(rawData.aqi_us),
-    aqi_category: asString(rawData.aqi_category, "Good") as AqiCategory,
-    particles_0_3um: asNumber(rawData.particles_0_3um),
-    particles_0_5um: asNumber(rawData.particles_0_5um),
-    particles_1_0um: asNumber(rawData.particles_1_0um),
-    particles_2_5um: asNumber(rawData.particles_2_5um),
-    particles_5_0um: asNumber(rawData.particles_5_0um),
-    particles_10_0um: asNumber(rawData.particles_10_0um),
+    pm1_0_ug_m3: asNullableNumber(rawData.pm1_0_ug_m3),
+    pm2_5_ug_m3: asNullableNumber(rawData.pm2_5_ug_m3),
+    pm10_0_ug_m3: asNullableNumber(rawData.pm10_0_ug_m3),
+    aqi_us: asNullableNumber(rawData.aqi_us),
+    aqi_category: parseAqiCategory(rawData.aqi_category),
+    particles_0_3um: asNullableNumber(rawData.particles_0_3um),
+    particles_0_5um: asNullableNumber(rawData.particles_0_5um),
+    particles_1_0um: asNullableNumber(rawData.particles_1_0um),
+    particles_2_5um: asNullableNumber(rawData.particles_2_5um),
+    particles_5_0um: asNullableNumber(rawData.particles_5_0um),
+    particles_10_0um: asNullableNumber(rawData.particles_10_0um),
   };
 
   return appendIndoorRollupSample(reading, db);

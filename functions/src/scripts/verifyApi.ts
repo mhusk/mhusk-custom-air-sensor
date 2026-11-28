@@ -63,6 +63,7 @@ function createMockDashboardService(): {
         target_firmware_version: null,
         updated_at: "2026-11-24T13:52:00.000Z",
         updated_by: "initial-seed",
+        floor: null,
       },
     ],
   ]);
@@ -171,6 +172,7 @@ function createMockDashboardService(): {
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: existing?.reboot_requested_at ?? null,
         target_firmware_version: existing?.target_firmware_version ?? null,
+        floor: input.floor === undefined ? existing?.floor ?? null : input.floor,
         updated_at: new Date().toISOString(),
         updated_by: updatedBy,
       };
@@ -190,6 +192,7 @@ function createMockDashboardService(): {
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: nowIso,
         target_firmware_version: existing?.target_firmware_version ?? null,
+        floor: existing?.floor ?? null,
         updated_at: nowIso,
         updated_by: updatedBy,
       };
@@ -216,6 +219,7 @@ function createMockDashboardService(): {
         config_version: (existing?.config_version ?? 0) + 1,
         reboot_requested_at: existing?.reboot_requested_at ?? null,
         target_firmware_version: targetVersion,
+        floor: existing?.floor ?? null,
         updated_at: nowIso,
         updated_by: updatedBy,
       };
@@ -711,6 +715,48 @@ async function main(): Promise<void> {
     assert.equal(savedCfg.altitude_m, 150);
     assert.equal(savedCfg.led_enabled, false);
     assert.equal(savedCfg.updated_by, "owner@example.com");
+    assert.equal(savedCfg.floor, null);
+
+    const badFloor = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/config", {
+      token: ownerJwt,
+      body: {
+        location: "master-bedroom",
+        reporting_interval_seconds: 120,
+        temperature_offset_c: 5.5,
+        altitude_m: 150,
+        led_enabled: false,
+        floor: "not a slug",
+      },
+    });
+    assert.equal(badFloor.status, 400);
+
+    const withFloor = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/config", {
+      token: ownerJwt,
+      body: {
+        location: "master-bedroom",
+        reporting_interval_seconds: 120,
+        temperature_offset_c: 5.5,
+        altitude_m: 150,
+        led_enabled: false,
+        floor: "upstairs",
+      },
+    });
+    assert.equal(withFloor.status, 200);
+    assert.equal((withFloor.body.config as Record<string, unknown>).floor, "upstairs");
+    assert.equal((withFloor.body.config as Record<string, unknown>).config_version, 3);
+
+    const preservedFloor = await apiRequest(baseUrl, "PUT", "/api/devices/feather-s3-01/config", {
+      token: ownerJwt,
+      body: {
+        location: "master-bedroom",
+        reporting_interval_seconds: 120,
+        temperature_offset_c: 5.5,
+        altitude_m: 150,
+        led_enabled: false,
+      },
+    });
+    assert.equal(preservedFloor.status, 200);
+    assert.equal((preservedFloor.body.config as Record<string, unknown>).floor, "upstairs");
 
     // Overview should now mark sync status as "pending" because device still reports v1
     const overviewAfter = await apiRequest(baseUrl, "GET", "/api/dashboard/overview", {
@@ -737,7 +783,8 @@ async function main(): Promise<void> {
     assert.equal(rebootRes.status, 200);
     assert.equal(rebootRes.body.reboot_requested, true);
     const rebootCfg = rebootRes.body.config as Record<string, unknown>;
-    assert.equal(rebootCfg.config_version, 3);
+    assert.equal(rebootCfg.config_version, 5);
+    assert.equal(rebootCfg.floor, "upstairs");
     assert.equal(typeof rebootCfg.reboot_requested_at, "string");
     assert.equal(rebootCfg.temperature_offset_c, 5.5); // preserved!
     console.log("[PASS] 7. POST /api/devices/:deviceId/reboot stamps reboot_requested_at & increments config_version");
@@ -780,7 +827,8 @@ async function main(): Promise<void> {
     assert.equal(promoteOneRes.body.target_firmware_version, "1.3.2");
     const promotedCfg = promoteOneRes.body.config as Record<string, unknown>;
     assert.equal(promotedCfg.target_firmware_version, "1.3.2");
-    assert.equal(promotedCfg.config_version, 4);
+    assert.equal(promotedCfg.config_version, 6);
+    assert.equal(promotedCfg.floor, "upstairs");
     assert.equal(promotedCfg.temperature_offset_c, 5.5); // preserved!
 
     const overviewPendingOta = await apiRequest(baseUrl, "GET", "/api/dashboard/overview", {

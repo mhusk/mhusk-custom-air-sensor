@@ -211,6 +211,8 @@ firebase emulators:exec --only firestore --project demo-custom-air-sensor \
 
 Numbers are checked with `is number`, which accepts both integers and doubles. Firestore keeps those as different wire types (`integerValue` vs `doubleValue`). Requiring `is int` would reject a perfectly valid `25.0` from CircuitPython.
 
+The Cloud Functions parsers keep a missing or null PM, AQI, or particle field as `null`. They do not turn it into `0`, and they do not label a missing AQI category as `Good`. House PM₂.₅ and AQI averages use only the samples that actually measured those fields. A node with no PMSA003I reports PM health as `unavailable`. `device_configs.floor` is optional on `PUT /api/devices/:deviceId/config`.
+
 ---
 
 ## 6. Hands-On Setup (Part 2: Rules & Device Allowlist)

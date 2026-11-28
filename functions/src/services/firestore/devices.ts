@@ -2,6 +2,7 @@ import type { DocumentData, Firestore } from "firebase-admin/firestore";
 
 import {
   DEVICES_COLLECTION,
+  asNullableNumber,
   asNumber,
   asString,
   getDb,
@@ -12,7 +13,7 @@ import {
 import {
   OFFLINE_THRESHOLD_MINUTES,
   STALE_THRESHOLD_MINUTES,
-  type AqiCategory,
+  parseAqiCategory,
   type DeviceLatestReadingSnapshot,
   type DeviceStatus,
   type OtaStatus,
@@ -48,9 +49,9 @@ export function mapDeviceData(docId: string, data: DocumentData, now: Date): Dev
         co2_ppm: asNumber(latestRaw.co2_ppm),
         temperature_f: asNumber(latestRaw.temperature_f),
         humidity_percent: asNumber(latestRaw.humidity_percent),
-        pm2_5_ug_m3: asNumber(latestRaw.pm2_5_ug_m3),
-        aqi_us: asNumber(latestRaw.aqi_us),
-        aqi_category: asString(latestRaw.aqi_category, "Good") as AqiCategory,
+        pm2_5_ug_m3: asNullableNumber(latestRaw.pm2_5_ug_m3),
+        aqi_us: asNullableNumber(latestRaw.aqi_us),
+        aqi_category: parseAqiCategory(latestRaw.aqi_category),
       }
     : null;
 

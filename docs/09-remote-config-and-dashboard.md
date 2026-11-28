@@ -34,6 +34,7 @@ flowchart LR
 | :--- | :--- | :--- | :--- | :--- |
 | `device_id` | `string` | `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` | `"feather-s3-01"` | Matches the document ID |
 | `location` | `string` | `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` | `"master-bedroom"` | Room label written to future `readings` and `devices` docs |
+| `floor` | `string` or `null` | slug, 1–32 characters (`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`) | `null` | Optional floor such as `main`, `upstairs`, or `basement`. Omit it on `PUT /api/devices/:id/config` to leave the stored value unchanged; send `null` to clear it. |
 | `reporting_interval_seconds` | `integer` | `60` – `3600` | `300` | Seconds between Firestore publishes |
 | `temperature_offset_c` | `double` | `0.0` – `20.0` | `4.0` | Sensirion SCD-40 hardware temperature offset (°C) |
 | `altitude_m` | `integer` | `0` – `5000` | `0` | Site elevation in meters for SCD-40 CO₂ pressure compensation |

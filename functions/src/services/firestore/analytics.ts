@@ -43,6 +43,22 @@ export function computeMetricStats(values: number[], decimals = 1): MetricStats 
   };
 }
 
+function finiteNumbers(values: Array<number | null>): number[] {
+  return values.filter((value): value is number => value !== null && Number.isFinite(value));
+}
+
+/** Stats over measured samples only. An all-null series stays null instead of becoming 0. */
+export function computeOptionalMetricStats(
+  values: Array<number | null>,
+  decimals = 1
+): MetricStats | null {
+  const finite = finiteNumbers(values);
+  if (finite.length === 0) {
+    return null;
+  }
+  return computeMetricStats(finite, decimals);
+}
+
 /**
  * Evenly downsamples an ordered array to at most `maxPoints` elements,
  * always preserving the first and last observations.
@@ -89,7 +105,10 @@ export function assessReadingHealth(reading: AirQualityReading): ReadingHealthCo
 
   let pm2_5_level: ReadingHealthContext["pm2_5_level"];
   let pm2_5_note: string;
-  if (reading.pm2_5_ug_m3 <= PM2_5_ELEVATED_UG_M3) {
+  if (reading.pm2_5_ug_m3 === null) {
+    pm2_5_level = "unavailable";
+    pm2_5_note = "PM2.5 is not measured on this node.";
+  } else if (reading.pm2_5_ug_m3 <= PM2_5_ELEVATED_UG_M3) {
     pm2_5_level = "good";
     pm2_5_note = "Low fine particulate matter (<=9.0 ug/m3, 2024 US EPA Good range).";
   } else if (reading.pm2_5_ug_m3 <= PM2_5_HIGH_UG_M3) {
@@ -139,7 +158,7 @@ function collectSpikesForMetric(
   for (const reading of readingsAsc) {
     const value = reading[metric];
     const active = activeByDevice.get(reading.device_id);
-    if (value > elevatedThreshold) {
+    if (typeof value === "number" && value > elevatedThreshold) {
       const severity: NotableSpike["severity"] =
         value >= highThreshold ? "high" : "elevated";
 
@@ -250,8 +269,10 @@ export function computeAirQualitySummaryFromReadings(
 
   const co2Above1000 = readingsAsc.filter((r) => r.co2_ppm > CO2_ELEVATED_PPM).length;
   const co2Above1400 = readingsAsc.filter((r) => r.co2_ppm > CO2_HIGH_PPM).length;
-  const pm25Above9 = readingsAsc.filter((r) => r.pm2_5_ug_m3 > PM2_5_ELEVATED_UG_M3).length;
-  const pm25Above35_4 = readingsAsc.filter((r) => r.pm2_5_ug_m3 > PM2_5_HIGH_UG_M3).length;
+  const pm25Values = finiteNumbers(readingsAsc.map((r) => r.pm2_5_ug_m3));
+  const pm25Above9 = pm25Values.filter((value) => value > PM2_5_ELEVATED_UG_M3).length;
+  const pm25Above35_4 = pm25Values.filter((value) => value > PM2_5_HIGH_UG_M3).length;
+  const pmCapable = pm25Values.length;
 
   return {
     period: options.period,
@@ -265,19 +286,20 @@ export function computeAirQualitySummaryFromReadings(
     scan_capped: options.scanCapped,
     metrics: {
       co2_ppm: computeMetricStats(readingsAsc.map((r) => r.co2_ppm), 0),
-      pm2_5_ug_m3: computeMetricStats(readingsAsc.map((r) => r.pm2_5_ug_m3), 1),
-      pm10_0_ug_m3: computeMetricStats(readingsAsc.map((r) => r.pm10_0_ug_m3), 1),
+      pm2_5_ug_m3: computeOptionalMetricStats(readingsAsc.map((r) => r.pm2_5_ug_m3), 1),
+      pm10_0_ug_m3: computeOptionalMetricStats(readingsAsc.map((r) => r.pm10_0_ug_m3), 1),
       temperature_f: computeMetricStats(readingsAsc.map((r) => r.temperature_f), 1),
       temperature_c: computeMetricStats(readingsAsc.map((r) => r.temperature_c), 1),
       humidity_percent: computeMetricStats(readingsAsc.map((r) => r.humidity_percent), 1),
-      aqi_us: computeMetricStats(readingsAsc.map((r) => r.aqi_us), 0),
+      aqi_us: computeOptionalMetricStats(readingsAsc.map((r) => r.aqi_us), 0),
     },
     threshold_exceedances: {
       co2_above_1000_ppm_count: co2Above1000,
       co2_above_1000_ppm_percent: roundTo((co2Above1000 / sampleCount) * 100, 1),
       co2_above_1400_ppm_count: co2Above1400,
       pm2_5_above_9_ug_m3_count: pm25Above9,
-      pm2_5_above_9_ug_m3_percent: roundTo((pm25Above9 / sampleCount) * 100, 1),
+      pm2_5_above_9_ug_m3_percent:
+        pmCapable > 0 ? roundTo((pm25Above9 / pmCapable) * 100, 1) : 0,
       pm2_5_above_35_4_ug_m3_count: pm25Above35_4,
     },
     notable_spikes: detectNotableSpikes(readingsAsc),

@@ -278,7 +278,7 @@ interface PlaybookToolContext {
   primary_goal: PlaybookPrimaryGoal;
   indoor: {
     co2_ppm: number;
-    pm2_5_ug_m3: number;
+    pm2_5_ug_m3: number | null;
     temperature_f: number;
     humidity_percent: number;
   } | null;

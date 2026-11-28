@@ -17,6 +17,16 @@ import {
 } from "../services/firestore.js";
 import { resolveProjectId } from "./projectId.js";
 
+function nullableOverride<T>(
+  overrides: object,
+  key: string,
+  fallback: T
+): T {
+  return Object.prototype.hasOwnProperty.call(overrides, key)
+    ? (overrides as Record<string, T>)[key]
+    : fallback;
+}
+
 function makeReading(
   overrides: Partial<AirQualityReading> & { timestamp: string }
 ): AirQualityReading {
@@ -29,17 +39,17 @@ function makeReading(
     temperature_c: overrides.temperature_c ?? 22.0,
     temperature_f: overrides.temperature_f ?? 71.6,
     humidity_percent: overrides.humidity_percent ?? 45.0,
-    pm1_0_ug_m3: overrides.pm1_0_ug_m3 ?? 3,
-    pm2_5_ug_m3: overrides.pm2_5_ug_m3 ?? 6,
-    pm10_0_ug_m3: overrides.pm10_0_ug_m3 ?? 10,
-    aqi_us: overrides.aqi_us ?? 33,
-    aqi_category: overrides.aqi_category ?? "Good",
-    particles_0_3um: overrides.particles_0_3um ?? 800,
-    particles_0_5um: overrides.particles_0_5um ?? 220,
-    particles_1_0um: overrides.particles_1_0um ?? 40,
-    particles_2_5um: overrides.particles_2_5um ?? 4,
-    particles_5_0um: overrides.particles_5_0um ?? 1,
-    particles_10_0um: overrides.particles_10_0um ?? 0,
+    pm1_0_ug_m3: nullableOverride(overrides, "pm1_0_ug_m3", 3),
+    pm2_5_ug_m3: nullableOverride(overrides, "pm2_5_ug_m3", 6),
+    pm10_0_ug_m3: nullableOverride(overrides, "pm10_0_ug_m3", 10),
+    aqi_us: nullableOverride(overrides, "aqi_us", 33),
+    aqi_category: nullableOverride(overrides, "aqi_category", "Good" as const),
+    particles_0_3um: nullableOverride(overrides, "particles_0_3um", 800),
+    particles_0_5um: nullableOverride(overrides, "particles_0_5um", 220),
+    particles_1_0um: nullableOverride(overrides, "particles_1_0um", 40),
+    particles_2_5um: nullableOverride(overrides, "particles_2_5um", 4),
+    particles_5_0um: nullableOverride(overrides, "particles_5_0um", 1),
+    particles_10_0um: nullableOverride(overrides, "particles_10_0um", 0),
   };
 }
 
@@ -82,6 +92,25 @@ async function runOfflineUnitChecks(): Promise<void> {
   assert.equal(poorHealth.co2_level, "poor");
   assert.equal(poorHealth.pm2_5_level, "unhealthy_sensitive");
   assert.equal(poorHealth.humidity_level, "dry");
+
+  const satelliteHealth = assessReadingHealth(
+    makeReading({
+      timestamp: "2026-11-22T12:10:00Z",
+      pm1_0_ug_m3: null,
+      pm2_5_ug_m3: null,
+      pm10_0_ug_m3: null,
+      aqi_us: null,
+      aqi_category: null,
+      particles_0_3um: null,
+      particles_0_5um: null,
+      particles_1_0um: null,
+      particles_2_5um: null,
+      particles_5_0um: null,
+      particles_10_0um: null,
+    })
+  );
+  assert.equal(satelliteHealth.pm2_5_level, "unavailable");
+  assert.equal(satelliteHealth.co2_level, "optimal");
   console.log("   [PASS] assessReadingHealth() CO2, PM2.5, and humidity bands");
 
   // Spike episode grouping
@@ -149,6 +178,37 @@ async function runOfflineUnitChecks(): Promise<void> {
   assert.equal(filledSummary.threshold_exceedances.co2_above_1000_ppm_count, 3);
   assert.equal(filledSummary.threshold_exceedances.co2_above_1400_ppm_count, 1);
   assert.equal(filledSummary.notable_spikes.length, 2);
+
+  const mixedSummary = computeAirQualitySummaryFromReadings(
+    [
+      makeReading({ timestamp: "2026-11-22T11:00:00Z", device_id: "hub", pm2_5_ug_m3: 12 }),
+      makeReading({
+        timestamp: "2026-11-22T11:05:00Z",
+        device_id: "sat",
+        pm1_0_ug_m3: null,
+        pm2_5_ug_m3: null,
+        pm10_0_ug_m3: null,
+        aqi_us: null,
+        aqi_category: null,
+        particles_0_3um: null,
+        particles_0_5um: null,
+        particles_1_0um: null,
+        particles_2_5um: null,
+        particles_5_0um: null,
+        particles_10_0um: null,
+      }),
+    ],
+    {
+      period: "24h",
+      windowStart: new Date("2026-11-22T00:00:00Z"),
+      windowEnd: new Date("2026-11-23T00:00:00Z"),
+      scanCapped: false,
+    }
+  );
+  assert.equal(mixedSummary.metrics?.pm2_5_ug_m3?.avg, 12);
+  assert.equal(mixedSummary.metrics?.aqi_us?.avg, 33);
+  assert.equal(mixedSummary.threshold_exceedances.pm2_5_above_9_ug_m3_count, 1);
+  assert.equal(mixedSummary.threshold_exceedances.pm2_5_above_9_ug_m3_percent, 100);
   console.log("   [PASS] computeAirQualitySummaryFromReadings() empty & spike aggregation");
 
   // Regression check: firebase-functions v7 creates a named internal app ("__FIREBASE_FUNCTIONS_SDK__")
@@ -210,7 +270,7 @@ async function runLiveFirestoreChecks(): Promise<void> {
   );
   assert.ok(summary.sample_count >= 1 && summary.metrics !== null);
   console.log(
-    `   [PASS] getAirQualitySummary(24h, location=${latest.reading.location}) -> samples=${summary.sample_count}, CO2 avg=${summary.metrics.co2_ppm.avg} ppm (p95=${summary.metrics.co2_ppm.p95}), PM2.5 avg=${summary.metrics.pm2_5_ug_m3.avg} ug/m3, spikes=${summary.notable_spikes.length}`
+    `   [PASS] getAirQualitySummary(24h, location=${latest.reading.location}) -> samples=${summary.sample_count}, CO2 avg=${summary.metrics.co2_ppm.avg} ppm (p95=${summary.metrics.co2_ppm.p95}), PM2.5 avg=${summary.metrics.pm2_5_ug_m3?.avg ?? "n/a"} ug/m3, spikes=${summary.notable_spikes.length}`
   );
 
   const status = await getSensorStatus({}, db);

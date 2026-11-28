@@ -12,6 +12,7 @@ import {
 } from "../services/outdoor.js";
 
 export const DEVICE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const FLOOR_SLUG_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export const EXPERIMENT_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 
 function isValidIsoTimestamp(value: string): boolean {
@@ -51,6 +52,15 @@ export const updateDeviceConfigSchema = z
       .min(0, "altitude_m must be between 0 and 5000 meters.")
       .max(5000, "altitude_m must be between 0 and 5000 meters."),
     led_enabled: z.boolean(),
+    floor: z
+      .string()
+      .trim()
+      .regex(
+        FLOOR_SLUG_REGEX,
+        "floor must be a 1-32 character slug using letters, numbers, underscores, or hyphens, or null."
+      )
+      .nullable()
+      .optional(),
   })
   .strict();
 

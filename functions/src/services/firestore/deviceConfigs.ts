@@ -12,6 +12,23 @@ import {
 import { isValidFirmwareVersion } from "./firmwareReleases.js";
 import type { DeviceConfig, UpdateDeviceConfigInput } from "./types.js";
 
+const FLOOR_SLUG_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+
+function parseFloor(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return FLOOR_SLUG_REGEX.test(trimmed) ? trimmed : null;
+}
+
+function resolveFloor(input: UpdateDeviceConfigInput, existing: unknown): string | null {
+  if (input.floor === undefined) {
+    return parseFloor(existing);
+  }
+  return input.floor;
+}
+
 function mapDeviceConfigData(docId: string, data: DocumentData): DeviceConfig {
   const updatedAtDate = normalizeTimestampToDate(data.updated_at);
   const rebootRequestedAt =
@@ -36,6 +53,7 @@ function mapDeviceConfigData(docId: string, data: DocumentData): DeviceConfig {
     target_firmware_version: targetFirmwareVersion,
     updated_at: updatedAtDate.toISOString(),
     updated_by: asString(data.updated_by, "unknown"),
+    floor: parseFloor(data.floor),
   };
 }
 
@@ -100,6 +118,7 @@ export async function updateDeviceConfig(
       config_version: nextVersion,
       reboot_requested_at: existingData?.reboot_requested_at ?? null,
       target_firmware_version: existingData?.target_firmware_version ?? null,
+      floor: resolveFloor(input, existingData?.floor),
       updated_at: nowTs,
       updated_by: updatedBy,
     };
@@ -163,6 +182,7 @@ async function mutateDeviceConfigWithDefaults(
       config_version: nextVersion,
       reboot_requested_at: overrides.reboot_requested_at,
       target_firmware_version: overrides.target_firmware_version,
+      floor: parseFloor(cfgData?.floor),
       updated_at: nowTs,
       updated_by: updatedBy,
     };

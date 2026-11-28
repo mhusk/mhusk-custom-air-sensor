@@ -414,12 +414,16 @@ export function computeIndoorOutdoorDelta(
     indoor.humidity_percent - outdoor.humidity_percent,
     1
   );
+  const indoorPm = indoor.pm2_5_ug_m3;
+  const indoorAqi = indoor.aqi_us;
   const pm25Diff =
-    outdoor.pm2_5_ug_m3 !== null
-      ? roundTo(indoor.pm2_5_ug_m3 - outdoor.pm2_5_ug_m3, 1)
+    indoorPm !== null && outdoor.pm2_5_ug_m3 !== null
+      ? roundTo(indoorPm - outdoor.pm2_5_ug_m3, 1)
       : null;
   const aqiDiff =
-    outdoor.us_aqi !== null ? Math.round(indoor.aqi_us - outdoor.us_aqi) : null;
+    indoorAqi !== null && outdoor.us_aqi !== null
+      ? Math.round(indoorAqi - outdoor.us_aqi)
+      : null;
   const energyTax = computeVentilationEnergyTax(indoor, outdoor);
 
   let windowRecommendation: WindowRecommendation = "neutral";
@@ -447,19 +451,21 @@ export function computeIndoorOutdoorDelta(
       windowReason = `Indoor CO2 is elevated (${Math.round(indoor.co2_ppm)} ppm) while outdoor air is clean (${energyTax.tier} energy tax) — cracking a window will refresh the room.`;
     }
   } else if (
-    indoor.pm2_5_ug_m3 > 12.0 &&
+    indoorPm !== null &&
+    indoorPm > 12.0 &&
     outdoor.pm2_5_ug_m3 !== null &&
-    outdoor.pm2_5_ug_m3 + 3.0 < indoor.pm2_5_ug_m3
+    outdoor.pm2_5_ug_m3 + 3.0 < indoorPm
   ) {
     if (energyTax.tier === "high") {
       windowRecommendation = "keep_closed";
-      windowReason = `Indoor PM2.5 (${indoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is elevated, but ${energyTax.summary} Run indoor HEPA filtration instead to avoid the energy penalty.`;
+      windowReason = `Indoor PM2.5 (${indoorPm.toFixed(1)} ug/m3) is elevated, but ${energyTax.summary} Run indoor HEPA filtration instead to avoid the energy penalty.`;
     } else {
       windowRecommendation = "open_recommended";
-      windowReason = `Outdoor PM2.5 (${outdoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is noticeably lower than indoors (${indoor.pm2_5_ug_m3.toFixed(1)} ug/m3) with ${energyTax.tier} energy tax — ventilating will help clear indoor particles.`;
+      windowReason = `Outdoor PM2.5 (${outdoor.pm2_5_ug_m3.toFixed(1)} ug/m3) is noticeably lower than indoors (${indoorPm.toFixed(1)} ug/m3) with ${energyTax.tier} energy tax — ventilating will help clear indoor particles.`;
     }
   } else if (
-    indoor.pm2_5_ug_m3 <= 9.0 &&
+    indoorPm !== null &&
+    indoorPm <= 9.0 &&
     outdoor.pm2_5_ug_m3 !== null &&
     outdoor.pm2_5_ug_m3 > 15.0
   ) {

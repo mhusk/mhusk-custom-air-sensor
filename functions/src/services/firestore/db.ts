@@ -45,6 +45,11 @@ export function roundTo(value: number, decimals: number): number {
 }
 
 export function asNumber(value: unknown, fallback = 0): number {
+  return asNullableNumber(value) ?? fallback;
+}
+
+/** Finite numbers stay numbers. Null, missing, and non-numeric values stay null. */
+export function asNullableNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
@@ -54,7 +59,7 @@ export function asNumber(value: unknown, fallback = 0): number {
       return parsed;
     }
   }
-  return fallback;
+  return null;
 }
 
 export function asString(value: unknown, fallback = ""): string {

@@ -23,6 +23,22 @@ export type AqiCategory =
   | "Very Unhealthy"
   | "Hazardous";
 
+const AQI_CATEGORIES = new Set<AqiCategory>([
+  "Good",
+  "Moderate",
+  "Unhealthy for Sensitive Groups",
+  "Unhealthy",
+  "Very Unhealthy",
+  "Hazardous",
+]);
+
+/** Known EPA category strings stay. Null and unknown strings stay null, never "Good". */
+export function parseAqiCategory(value: unknown): AqiCategory | null {
+  return typeof value === "string" && AQI_CATEGORIES.has(value as AqiCategory)
+    ? (value as AqiCategory)
+    : null;
+}
+
 export type SummaryPeriod = "1h" | "6h" | "24h" | "7d" | "30d";
 
 export const SUMMARY_PERIOD_MS: Record<SummaryPeriod, number> = {
@@ -50,26 +66,26 @@ export interface AirQualityReading {
   temperature_c: number;
   temperature_f: number;
   humidity_percent: number;
-  pm1_0_ug_m3: number;
-  pm2_5_ug_m3: number;
-  pm10_0_ug_m3: number;
-  aqi_us: number;
-  aqi_category: AqiCategory;
-  particles_0_3um: number;
-  particles_0_5um: number;
-  particles_1_0um: number;
-  particles_2_5um: number;
-  particles_5_0um: number;
-  particles_10_0um: number;
+  pm1_0_ug_m3: number | null;
+  pm2_5_ug_m3: number | null;
+  pm10_0_ug_m3: number | null;
+  aqi_us: number | null;
+  aqi_category: AqiCategory | null;
+  particles_0_3um: number | null;
+  particles_0_5um: number | null;
+  particles_1_0um: number | null;
+  particles_2_5um: number | null;
+  particles_5_0um: number | null;
+  particles_10_0um: number | null;
 }
 
 export interface DeviceLatestReadingSnapshot {
   co2_ppm: number;
   temperature_f: number;
   humidity_percent: number;
-  pm2_5_ug_m3: number;
-  aqi_us: number;
-  aqi_category: AqiCategory;
+  pm2_5_ug_m3: number | null;
+  aqi_us: number | null;
+  aqi_category: AqiCategory | null;
 }
 
 export type OtaStatus = "up_to_date" | "updating" | "rolled_back" | "error";
@@ -107,6 +123,8 @@ export interface DeviceConfig {
   target_firmware_version: string | null;
   updated_at: string;
   updated_by: string;
+  /** Admin-written room slug, or null when the node has no floor set. */
+  floor: string | null;
 }
 
 export type FirmwareReleaseStatus = "active" | "yanked";
@@ -146,12 +164,14 @@ export interface UpdateDeviceConfigInput {
   temperature_offset_c: number;
   altitude_m: number;
   led_enabled: boolean;
+  /** Omit to leave the stored floor unchanged. Null clears it. */
+  floor?: string | null;
 }
 
 export interface ReadingHealthContext {
   co2_level: "optimal" | "acceptable" | "elevated" | "poor";
   co2_note: string;
-  pm2_5_level: "good" | "moderate" | "unhealthy_sensitive" | "unhealthy";
+  pm2_5_level: "good" | "moderate" | "unhealthy_sensitive" | "unhealthy" | "unavailable";
   pm2_5_note: string;
   humidity_level: "dry" | "ideal" | "humid";
   humidity_note: string;
@@ -246,12 +266,12 @@ export interface AirQualitySummaryResult {
   scan_capped: boolean;
   metrics: {
     co2_ppm: MetricStats;
-    pm2_5_ug_m3: MetricStats;
-    pm10_0_ug_m3: MetricStats;
+    pm2_5_ug_m3: MetricStats | null;
+    pm10_0_ug_m3: MetricStats | null;
     temperature_f: MetricStats;
     temperature_c: MetricStats;
     humidity_percent: MetricStats;
-    aqi_us: MetricStats;
+    aqi_us: MetricStats | null;
   } | null;
   threshold_exceedances: ThresholdExceedances;
   notable_spikes: NotableSpike[];

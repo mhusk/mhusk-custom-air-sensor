@@ -2,6 +2,7 @@ export {
   assessReadingHealth,
   computeAirQualitySummaryFromReadings,
   computeMetricStats,
+  computeOptionalMetricStats,
   detectNotableSpikes,
   downsampleReadings,
 } from "./firestore/analytics.js";
@@ -87,6 +88,7 @@ export {
   STALE_THRESHOLD_MINUTES,
   SUMMARY_PERIOD_HOURS,
   SUMMARY_PERIOD_MS,
+  parseAqiCategory,
   type AirQualityReading,
   type AirQualitySummaryOptions,
   type AirQualitySummaryResult,

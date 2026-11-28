@@ -86,7 +86,7 @@ export interface ExperimentOutdoorSnapshot {
 export interface ExperimentMetricSnapshot {
   sample_count: number;
   co2_ppm: number;
-  pm2_5_ug_m3: number;
+  pm2_5_ug_m3: number | null;
   temperature_f: number;
   humidity_percent: number;
 }
@@ -97,7 +97,7 @@ export interface CrossRoomExperimentDelta {
   baseline_sample_count: number;
   post_sample_count: number;
   co2_delta_ppm: number;
-  pm2_5_delta_ug_m3: number;
+  pm2_5_delta_ug_m3: number | null;
   temp_delta_f: number;
   humidity_delta_percent: number;
 }
@@ -107,7 +107,7 @@ export interface ExperimentEvaluation {
   post_settle: ExperimentMetricSnapshot;
   co2_delta_ppm: number;
   co2_rate_ppm_per_min: number | null;
-  pm2_5_delta_ug_m3: number;
+  pm2_5_delta_ug_m3: number | null;
   temp_delta_f: number;
   humidity_delta_percent: number;
   cross_room_deltas: CrossRoomExperimentDelta[];
@@ -145,7 +145,7 @@ export interface PlaybookEntry {
   co2_delta_ppm: number;
   co2_delta_mean_ppm: number;
   co2_rate_ppm_per_min: number | null;
-  pm2_5_delta_ug_m3: number;
+  pm2_5_delta_ug_m3: number | null;
   temp_delta_f: number;
   humidity_delta_percent: number;
   avg_duration_minutes: number | null;
@@ -225,7 +225,7 @@ const VALID_ENERGY_TIERS = new Set<string>(["free", "low", "moderate", "high"]);
 const EMPTY_METRIC_SNAPSHOT: ExperimentMetricSnapshot = {
   sample_count: 0,
   co2_ppm: 0,
-  pm2_5_ug_m3: 0,
+  pm2_5_ug_m3: null,
   temperature_f: 0,
   humidity_percent: 0,
 };
@@ -283,6 +283,17 @@ export function computeMedian(values: number[]): number {
   return (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+function subtractNullable(
+  post: number | null,
+  pre: number | null,
+  decimals: number
+): number | null {
+  if (post === null || pre === null) {
+    return null;
+  }
+  return roundTo(post - pre, decimals);
+}
+
 export function computeMean(values: number[]): number {
   if (values.length === 0) {
     return 0;
@@ -299,14 +310,16 @@ export function computeMetricSnapshot(
   }
 
   const co2Values = readings.map((r) => r.co2_ppm);
-  const pm25Values = readings.map((r) => r.pm2_5_ug_m3);
+  const pm25Values = readings
+    .map((r) => r.pm2_5_ug_m3)
+    .filter((value): value is number => value !== null);
   const tempValues = readings.map((r) => r.temperature_f);
   const rhValues = readings.map((r) => r.humidity_percent);
 
   return {
     sample_count: readings.length,
     co2_ppm: roundTo(computeMean(co2Values), 1),
-    pm2_5_ug_m3: roundTo(computeMean(pm25Values), 1),
+    pm2_5_ug_m3: pm25Values.length > 0 ? roundTo(computeMean(pm25Values), 1) : null,
     temperature_f: roundTo(computeMean(tempValues), 2),
     humidity_percent: roundTo(computeMean(rhValues), 1),
   };
@@ -367,7 +380,9 @@ export function computePlaybookFromExperiments(
     const co2Rates = items
       .map((e) => e.evaluation!.co2_rate_ppm_per_min)
       .filter((v): v is number => v !== null && Number.isFinite(v));
-    const pm25Deltas = items.map((e) => e.evaluation!.pm2_5_delta_ug_m3);
+    const pm25Deltas = items
+      .map((e) => e.evaluation!.pm2_5_delta_ug_m3)
+      .filter((value): value is number => value !== null && Number.isFinite(value));
     const tempDeltas = items.map((e) => e.evaluation!.temp_delta_f);
     const rhDeltas = items.map((e) => e.evaluation!.humidity_delta_percent);
     const durations = items
@@ -391,7 +406,8 @@ export function computePlaybookFromExperiments(
       co2_delta_ppm: roundTo(computeMedian(co2Deltas), 1),
       co2_delta_mean_ppm: roundTo(computeMean(co2Deltas), 1),
       co2_rate_ppm_per_min: co2Rates.length > 0 ? roundTo(computeMedian(co2Rates), 2) : null,
-      pm2_5_delta_ug_m3: roundTo(computeMedian(pm25Deltas), 1),
+      pm2_5_delta_ug_m3:
+        pm25Deltas.length > 0 ? roundTo(computeMedian(pm25Deltas), 1) : null,
       temp_delta_f: roundTo(computeMedian(tempDeltas), 2),
       humidity_delta_percent: roundTo(computeMedian(rhDeltas), 1),
       avg_duration_minutes:
@@ -430,12 +446,14 @@ function effectivenessScoreForGoal(
   goal: PlaybookPrimaryGoal
 ): number {
   if (goal === "lower_pm2_5") {
-    // Larger negative PM2.5 delta yields higher score.
-    return -entry.pm2_5_delta_ug_m3;
+    // Larger negative PM2.5 delta yields higher score. Unmeasured PM adds no score.
+    return entry.pm2_5_delta_ug_m3 === null ? 0 : -entry.pm2_5_delta_ug_m3;
   }
   if (goal === "balanced") {
     // Normalize CO2 (~300 ppm) and PM2.5 (~10 ug/m3) drops on comparable scales.
-    return -entry.co2_delta_ppm / 300 + -entry.pm2_5_delta_ug_m3 / 10;
+    const pmTerm =
+      entry.pm2_5_delta_ug_m3 === null ? 0 : -entry.pm2_5_delta_ug_m3 / 10;
+    return -entry.co2_delta_ppm / 300 + pmTerm;
   }
   // Default: "lower_co2"
   return -entry.co2_delta_ppm;
@@ -488,7 +506,11 @@ export function rankPlaybookRecommendations(
     const rationale =
       `${formatActionLabel(entry.action_type)} in ${entry.location}${tierPart}${durationPart}: ` +
       `median ${formatSigned(entry.co2_delta_ppm, "ppm CO₂", 0)}, ` +
-      `${formatSigned(entry.pm2_5_delta_ug_m3, "µg/m³ PM2.5", 1)}, ` +
+      `${
+        entry.pm2_5_delta_ug_m3 === null
+          ? "PM2.5 not measured"
+          : formatSigned(entry.pm2_5_delta_ug_m3, "µg/m³ PM2.5", 1)
+      }, ` +
       `${formatSigned(entry.temp_delta_f, "°F", 1)}, ` +
       `${formatSigned(entry.humidity_delta_percent, "% RH", 1)} ` +
       `(n=${entry.sample_count}, ${entry.confidence} confidence).`;
@@ -540,7 +562,7 @@ function mapMetricSnapshot(raw: unknown): ExperimentMetricSnapshot {
   return {
     sample_count: Math.max(0, Math.round(asNumber(obj.sample_count, 0))),
     co2_ppm: asNumber(obj.co2_ppm, 0),
-    pm2_5_ug_m3: asNumber(obj.pm2_5_ug_m3, 0),
+    pm2_5_ug_m3: toFiniteNumberOrNull(obj.pm2_5_ug_m3),
     temperature_f: asNumber(obj.temperature_f, 0),
     humidity_percent: asNumber(obj.humidity_percent, 0),
   };
@@ -567,7 +589,7 @@ function mapEvaluation(raw: unknown): ExperimentEvaluation | null {
       baseline_sample_count: Math.max(0, Math.round(asNumber(c.baseline_sample_count, 0))),
       post_sample_count: Math.max(0, Math.round(asNumber(c.post_sample_count, 0))),
       co2_delta_ppm: asNumber(c.co2_delta_ppm, 0),
-      pm2_5_delta_ug_m3: asNumber(c.pm2_5_delta_ug_m3, 0),
+      pm2_5_delta_ug_m3: toFiniteNumberOrNull(c.pm2_5_delta_ug_m3),
       temp_delta_f: asNumber(c.temp_delta_f, 0),
       humidity_delta_percent: asNumber(c.humidity_delta_percent, 0),
     });
@@ -581,7 +603,7 @@ function mapEvaluation(raw: unknown): ExperimentEvaluation | null {
     post_settle: mapMetricSnapshot(obj.post_settle),
     co2_delta_ppm: asNumber(obj.co2_delta_ppm, 0),
     co2_rate_ppm_per_min: toFiniteNumberOrNull(obj.co2_rate_ppm_per_min),
-    pm2_5_delta_ug_m3: asNumber(obj.pm2_5_delta_ug_m3, 0),
+    pm2_5_delta_ug_m3: toFiniteNumberOrNull(obj.pm2_5_delta_ug_m3),
     temp_delta_f: asNumber(obj.temp_delta_f, 0),
     humidity_delta_percent: asNumber(obj.humidity_delta_percent, 0),
     cross_room_deltas: crossRoomDeltas,
@@ -1122,7 +1144,7 @@ export async function evaluateExperimentOutcome(
       post_settle: postSettle ?? { ...EMPTY_METRIC_SNAPSHOT },
       co2_delta_ppm: 0,
       co2_rate_ppm_per_min: null,
-      pm2_5_delta_ug_m3: 0,
+      pm2_5_delta_ug_m3: null,
       temp_delta_f: 0,
       humidity_delta_percent: 0,
       cross_room_deltas: [],
@@ -1150,7 +1172,7 @@ export async function evaluateExperimentOutcome(
         baseline_sample_count: sibPre.sample_count,
         post_sample_count: sibPost.sample_count,
         co2_delta_ppm: roundTo(sibPost.co2_ppm - sibPre.co2_ppm, 1),
-        pm2_5_delta_ug_m3: roundTo(sibPost.pm2_5_ug_m3 - sibPre.pm2_5_ug_m3, 1),
+        pm2_5_delta_ug_m3: subtractNullable(sibPost.pm2_5_ug_m3, sibPre.pm2_5_ug_m3, 1),
         temp_delta_f: roundTo(sibPost.temperature_f - sibPre.temperature_f, 2),
         humidity_delta_percent: roundTo(
           sibPost.humidity_percent - sibPre.humidity_percent,
@@ -1165,7 +1187,7 @@ export async function evaluateExperimentOutcome(
       post_settle: postSettle,
       co2_delta_ppm: co2Delta,
       co2_rate_ppm_per_min: co2Rate,
-      pm2_5_delta_ug_m3: roundTo(postSettle.pm2_5_ug_m3 - baseline.pm2_5_ug_m3, 1),
+      pm2_5_delta_ug_m3: subtractNullable(postSettle.pm2_5_ug_m3, baseline.pm2_5_ug_m3, 1),
       temp_delta_f: roundTo(postSettle.temperature_f - baseline.temperature_f, 2),
       humidity_delta_percent: roundTo(
         postSettle.humidity_percent - baseline.humidity_percent,
@@ -1266,7 +1288,7 @@ export async function getHousePlaybook(
       co2_delta_ppm: asNumber(e.co2_delta_ppm, 0),
       co2_delta_mean_ppm: asNumber(e.co2_delta_mean_ppm, 0),
       co2_rate_ppm_per_min: toFiniteNumberOrNull(e.co2_rate_ppm_per_min),
-      pm2_5_delta_ug_m3: asNumber(e.pm2_5_delta_ug_m3, 0),
+      pm2_5_delta_ug_m3: toFiniteNumberOrNull(e.pm2_5_delta_ug_m3),
       temp_delta_f: asNumber(e.temp_delta_f, 0),
       humidity_delta_percent: asNumber(e.humidity_delta_percent, 0),
       avg_duration_minutes: toFiniteNumberOrNull(e.avg_duration_minutes),
@@ -1296,14 +1318,14 @@ export interface ReadingStepInput {
   location: string;
   timestamp: string;
   co2_ppm: number;
-  pm2_5_ug_m3: number;
+  pm2_5_ug_m3: number | null;
 }
 
 export interface DetectorDeviceState {
   device_id: string;
   last_timestamp: string;
   last_co2_ppm: number;
-  last_pm2_5_ug_m3: number;
+  last_pm2_5_ug_m3: number | null;
   last_detected_at: string | null;
 }
 
@@ -1311,7 +1333,7 @@ export interface StepChangeEvaluation {
   triggered: boolean;
   reason: string;
   co2_delta_ppm?: number;
-  pm2_5_delta_ug_m3?: number;
+  pm2_5_delta_ug_m3?: number | null;
   note?: string;
 }
 
@@ -1320,7 +1342,7 @@ export interface StepDetectionResult {
   reason: string;
   experiment?: ExperimentRecord | null;
   co2_delta_ppm?: number;
-  pm2_5_delta_ug_m3?: number;
+  pm2_5_delta_ug_m3?: number | null;
 }
 
 export interface ProcessReadingForExperimentsResult {
@@ -1347,10 +1369,11 @@ export function evaluateStepChange(
   }
 
   const co2Delta = roundTo(current.co2_ppm - prior.last_co2_ppm, 1);
-  const pm25Delta = roundTo(current.pm2_5_ug_m3 - prior.last_pm2_5_ug_m3, 1);
+  const pm25Delta = subtractNullable(current.pm2_5_ug_m3, prior.last_pm2_5_ug_m3, 1);
 
   const co2Triggered = Math.abs(co2Delta) >= AUTO_DETECT_CO2_DELTA_PPM;
-  const pm25Triggered = Math.abs(pm25Delta) >= AUTO_DETECT_PM2_5_DELTA_UG_M3;
+  const pm25Triggered =
+    pm25Delta !== null && Math.abs(pm25Delta) >= AUTO_DETECT_PM2_5_DELTA_UG_M3;
 
   if (!co2Triggered && !pm25Triggered) {
     return {
@@ -1370,7 +1393,7 @@ export function evaluateStepChange(
       `CO₂ ${dir} of ${signed} (${Math.round(prior.last_co2_ppm)} → ${Math.round(current.co2_ppm)} ppm)`
     );
   }
-  if (pm25Triggered) {
+  if (pm25Triggered && pm25Delta !== null && prior.last_pm2_5_ug_m3 !== null && current.pm2_5_ug_m3 !== null) {
     const dir = pm25Delta < 0 ? "drop" : "spike";
     const signed = `${pm25Delta > 0 ? "+" : ""}${pm25Delta.toFixed(1)} µg/m³`;
     parts.push(
@@ -1391,7 +1414,7 @@ function mapDetectorState(docId: string, data: DocumentData): DetectorDeviceStat
   const lastTs = parseTimestampToDateOrNull(data.last_timestamp);
   const co2 = toFiniteNumberOrNull(data.last_co2_ppm);
   const pm25 = toFiniteNumberOrNull(data.last_pm2_5_ug_m3);
-  if (!lastTs || co2 === null || pm25 === null) {
+  if (!lastTs || co2 === null) {
     return null;
   }
   const lastDetected = parseTimestampToDateOrNull(data.last_detected_at);
@@ -1642,7 +1665,7 @@ export async function processReadingForExperiments(
       location,
       timestamp: tsDate.toISOString(),
       co2_ppm: co2,
-      pm2_5_ug_m3: pm25 ?? 0,
+      pm2_5_ug_m3: pm25,
     },
     { db, now }
   );

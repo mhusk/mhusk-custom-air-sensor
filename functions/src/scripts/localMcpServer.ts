@@ -14,6 +14,7 @@ import {
 import {
   assessReadingHealth,
   computeMetricStats,
+  computeOptionalMetricStats,
   detectNotableSpikes,
   downsampleReadings,
   getDb,
@@ -342,12 +343,12 @@ export function createMockAirQualityService(): AirQualityDataService {
             ? null
             : {
                 co2_ppm: computeMetricStats(matched.map((r) => r.co2_ppm), 0),
-                pm2_5_ug_m3: computeMetricStats(matched.map((r) => r.pm2_5_ug_m3), 1),
-                pm10_0_ug_m3: computeMetricStats(matched.map((r) => r.pm10_0_ug_m3), 1),
+                pm2_5_ug_m3: computeOptionalMetricStats(matched.map((r) => r.pm2_5_ug_m3), 1),
+                pm10_0_ug_m3: computeOptionalMetricStats(matched.map((r) => r.pm10_0_ug_m3), 1),
                 temperature_f: computeMetricStats(matched.map((r) => r.temperature_f), 1),
                 temperature_c: computeMetricStats(matched.map((r) => r.temperature_c), 1),
                 humidity_percent: computeMetricStats(matched.map((r) => r.humidity_percent), 1),
-                aqi_us: computeMetricStats(matched.map((r) => r.aqi_us), 0),
+                aqi_us: computeOptionalMetricStats(matched.map((r) => r.aqi_us), 0),
               },
         threshold_exceedances: {
           co2_above_1000_ppm_count: matched.filter((r) => r.co2_ppm > 1000).length,
@@ -356,12 +357,20 @@ export function createMockAirQualityService(): AirQualityDataService {
               ? Math.round((matched.filter((r) => r.co2_ppm > 1000).length / matched.length) * 1000) / 10
               : 0,
           co2_above_1400_ppm_count: matched.filter((r) => r.co2_ppm > 1400).length,
-          pm2_5_above_9_ug_m3_count: matched.filter((r) => r.pm2_5_ug_m3 > 9).length,
+          pm2_5_above_9_ug_m3_count: matched.filter(
+            (r) => r.pm2_5_ug_m3 !== null && r.pm2_5_ug_m3 > 9
+          ).length,
           pm2_5_above_9_ug_m3_percent:
-            matched.length > 0
-              ? Math.round((matched.filter((r) => r.pm2_5_ug_m3 > 9).length / matched.length) * 1000) / 10
+            matched.filter((r) => r.pm2_5_ug_m3 !== null).length > 0
+              ? Math.round(
+                  (matched.filter((r) => r.pm2_5_ug_m3 !== null && r.pm2_5_ug_m3 > 9).length /
+                    matched.filter((r) => r.pm2_5_ug_m3 !== null).length) *
+                    1000
+                ) / 10
               : 0,
-          pm2_5_above_35_4_ug_m3_count: matched.filter((r) => r.pm2_5_ug_m3 > 35.4).length,
+          pm2_5_above_35_4_ug_m3_count: matched.filter(
+            (r) => r.pm2_5_ug_m3 !== null && r.pm2_5_ug_m3 > 35.4
+          ).length,
         },
         notable_spikes: detectNotableSpikes(matched),
       };

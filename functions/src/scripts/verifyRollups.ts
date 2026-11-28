@@ -195,17 +195,17 @@ function makeSampleReading(overrides: Partial<AirQualityReading> = {}): AirQuali
     temperature_c: 21.35,
     temperature_f: 70.43,
     humidity_percent: 43.25,
-    pm1_0_ug_m3: 2,
-    pm2_5_ug_m3: 5.5,
-    pm10_0_ug_m3: 7,
-    aqi_us: 23,
-    aqi_category: "Good",
-    particles_0_3um: 412,
-    particles_0_5um: 118,
-    particles_1_0um: 21,
-    particles_2_5um: 3,
-    particles_5_0um: 1,
-    particles_10_0um: 0,
+    pm1_0_ug_m3: "pm1_0_ug_m3" in overrides ? overrides.pm1_0_ug_m3 ?? null : 2,
+    pm2_5_ug_m3: "pm2_5_ug_m3" in overrides ? overrides.pm2_5_ug_m3 ?? null : 5.5,
+    pm10_0_ug_m3: "pm10_0_ug_m3" in overrides ? overrides.pm10_0_ug_m3 ?? null : 7,
+    aqi_us: "aqi_us" in overrides ? overrides.aqi_us ?? null : 23,
+    aqi_category: "aqi_category" in overrides ? overrides.aqi_category ?? null : "Good",
+    particles_0_3um: "particles_0_3um" in overrides ? overrides.particles_0_3um ?? null : 412,
+    particles_0_5um: "particles_0_5um" in overrides ? overrides.particles_0_5um ?? null : 118,
+    particles_1_0um: "particles_1_0um" in overrides ? overrides.particles_1_0um ?? null : 21,
+    particles_2_5um: "particles_2_5um" in overrides ? overrides.particles_2_5um ?? null : 3,
+    particles_5_0um: "particles_5_0um" in overrides ? overrides.particles_5_0um ?? null : 1,
+    particles_10_0um: "particles_10_0um" in overrides ? overrides.particles_10_0um ?? null : 0,
     ...overrides,
   };
 }
@@ -265,6 +265,30 @@ async function runTests(): Promise<void> {
   });
   assert.equal(decodedIn.length, 1);
   assert.deepEqual(decodedIn[0], indoor);
+
+  const satellite = makeSampleReading({
+    id: "sat-01_1795546800",
+    device_id: "sat-01",
+    pm1_0_ug_m3: null,
+    pm2_5_ug_m3: null,
+    pm10_0_ug_m3: null,
+    aqi_us: null,
+    aqi_category: null,
+    particles_0_3um: null,
+    particles_0_5um: null,
+    particles_1_0um: null,
+    particles_2_5um: null,
+    particles_5_0um: null,
+    particles_10_0um: null,
+  });
+  const encodedSatellite = encodeIndoorRollupSample(satellite);
+  assert.equal(encodedSatellite.sample.pm25, null);
+  assert.equal(encodedSatellite.sample.cat, null);
+  const decodedSatellite = decodeIndoorRollupDoc("sat-01_2026-11-24", {
+    device_id: "sat-01",
+    samples: { [encodedSatellite.epochKey]: encodedSatellite.sample },
+  });
+  assert.deepEqual(decodedSatellite[0], satellite);
 
   const outdoor = makeSampleOutdoor();
   const encodedOut = encodeOutdoorRollupSample(outdoor, outdoor.id);
